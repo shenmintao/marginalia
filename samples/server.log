@@ -1,0 +1,22 @@
+2024-03-12T10:00:01 INFO server starting on port 8000
+2024-03-12T10:00:02 INFO loading database connection pool size=10
+2024-03-12T10:00:03 INFO worker daemon connected: marginalia-worker:1
+2024-03-12T10:00:05 INFO accepting connections
+2024-03-12T10:00:10 INFO POST /upload remote_path=/research/llm/ size=24512
+2024-03-12T10:00:11 INFO ingest_file enqueued file_id=019e5493-fca4-7524-...
+2024-03-12T10:00:42 INFO ingest_file done file_id=019e5493 sections=4
+2024-03-12T10:01:30 WARN slow query detected on /api/search took=850ms
+2024-03-12T10:02:00 ERROR connection refused from 10.0.0.5
+2024-03-12T10:03:15 ERROR connection refused from 10.0.0.5
+2024-03-12T10:03:16 INFO firewall rule applied for 10.0.0.5
+2024-03-12T10:05:00 INFO recovered after retry attempt=3
+2024-03-12T10:08:21 INFO POST /sessions session_id=019e549a
+2024-03-12T10:08:22 INFO POST /sessions/019e549a/turn user_message="..."
+2024-03-12T10:08:45 INFO turn complete tool_calls=4 llm_calls=6 duration_ms=23500
+2024-03-12T10:10:00 DEBUG cache hit ratio 0.83 over last 100 requests
+2024-03-12T10:15:00 INFO periodic_tick dispatched: normalize_tags, enrich_tags
+2024-03-12T10:15:30 INFO normalize_tags done merges=3 tags_redirected=18
+2024-03-12T10:30:00 WARN reflect_turn took 12s for conversation_id=019e549b
+2024-03-12T11:00:00 ERROR fatal disk full /data; cannot accept new uploads
+2024-03-12T11:00:30 INFO operator paged for disk full alert
+2024-03-12T11:05:00 INFO disk space recovered after cleanup

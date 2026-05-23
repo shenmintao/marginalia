@@ -1,0 +1,8 @@
+2024-03-12T10:00:01 INFO server starting
+2024-03-12T10:00:05 INFO accepting connections
+2024-03-12T10:01:30 WARN slow query detected on /api/users
+2024-03-12T10:02:00 ERROR connection refused from 10.0.0.5
+2024-03-12T10:03:15 ERROR connection refused from 10.0.0.6
+2024-03-12T10:05:00 INFO recovered after retry
+2024-03-12T10:10:00 DEBUG cache hit ratio 0.83
+2024-03-12T11:00:00 ERROR fatal disk full

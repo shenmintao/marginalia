@@ -1,0 +1,13 @@
+id,name,department,role,years,salary
+1,Alice Chen,Engineering,Backend Engineer,4,135000
+2,Bob Martin,Engineering,Frontend Engineer,2,110000
+3,Carol Davis,Engineering,Engineering Manager,7,180000
+4,Dave Liu,Design,Product Designer,3,120000
+5,Eve Wong,Design,Design Lead,6,160000
+6,Frank Smith,Sales,Account Executive,5,140000
+7,Grace Patel,Sales,Sales Director,8,200000
+8,Henry Kim,Marketing,Content Lead,4,125000
+9,Iris Baker,Marketing,Marketing Manager,6,150000
+10,Jack Walsh,Engineering,Senior Backend Engineer,5,155000
+11,Kara Tan,Engineering,Junior Engineer,1,90000
+12,Liam Garcia,Engineering,Staff Engineer,9,210000

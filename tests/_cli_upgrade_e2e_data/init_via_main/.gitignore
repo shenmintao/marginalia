@@ -1,0 +1,7 @@
+# Marginalia local artifacts
+.env
+data/
+.marginalia/
+*.db
+*.db-shm
+*.db-wal

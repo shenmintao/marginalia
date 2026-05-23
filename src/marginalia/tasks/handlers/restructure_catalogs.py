@@ -1,0 +1,269 @@
+"""restructure_catalogs — design.md §9.4 (重整书架分类).
+
+LLM-driven catalog tree maintenance. The agent (offline librarian) is asked
+to propose a small list of typed operations against the current catalog
+tree, given:
+  - current catalog tree with doc_count per node (entries currently linked)
+  - recent journal entries that carry `tags=['hint:restructure_catalogs']`
+  - high-activity active entries that may be misclassified
+
+The LLM returns an ordered list of operations. The backend validates and
+applies them in ONE transaction; any operation that fails validation is
+recorded as `rejected` in task_outcomes but does NOT abort the others.
+
+Operations supported (design §9.4 + §14.4):
+  - `rename`        — change catalogs.name
+  - `move`          — change catalogs.parent_id (cycle-checked)
+  - `update_extra`  — overwrite catalogs.extra
+  - `create`        — INSERT a new catalog (uses temp_id so subsequent ops
+                      can reference it)
+  - `soft_delete`   — set catalogs.deleted_at; if merge_into supplied,
+                      reassign children + child-entries to target; otherwise
+                      promote children to root (parent_id=NULL) and reassign
+                      entries to NULL (uncategorised)
+  - `move_entries`  — UPDATE file_entries.catalog_id for a list of entry_ids
+
+Hard invariants:
+  - NEVER hard-delete a catalog row (design §14.4 #2 — AI never deletes;
+    delete is user-only). soft_delete sets deleted_at.
+  - NEVER produce a parent cycle. After every `move`/`create`, walk the
+    parent chain to verify.
+  - alias_of-style chains do not exist on catalogs; parent_id is a normal
+    tree edge. Soft-deleted catalogs are skipped from "current tree" the
+    LLM sees but their rows remain for history.
+  - file_entries.catalog_id pointing at a now-soft-deleted catalog is
+    rewritten by soft_delete (atomic, same transaction).
+
+Audit:
+  - `catalog_moved` per move (parent_id change)
+  - `catalog_updated` per rename / update_extra / create
+  - `lifecycle_changed` is NOT emitted (this handler does not touch entry
+    lifecycle)
+"""
+from __future__ import annotations
+
+import json
+import logging
+from datetime import datetime, timezone
+from typing import Any, Mapping
+
+from sqlalchemy import func, select, update
+
+from marginalia.db.models import Catalog, FileEntry, Journal, Tag
+from marginalia.db.session import session_scope
+from marginalia.llm import ChatMessage, ChatRequest, TextBlock, get_chat_client
+from marginalia.services.audit import write_event
+from marginalia.services.task_outcomes import (
+    GLOBAL_OBJECT_ID,
+    GLOBAL_OBJECT_KIND,
+    record_outcome,
+)
+from marginalia.tasks.kinds import KIND_RESTRUCTURE_CATALOGS, task_handler
+from marginalia.utils.ids import new_id
+
+log = logging.getLogger(__name__)
+
+JOURNAL_HINT_DAYS = 14            # window to fetch hint:restructure_catalogs notes
+HIGH_ACTIVITY_TOP_N = 50          # top-N most-recently-touched active entries
+MAX_OPERATIONS = 20               # LLM cap; protects against runaway output
+
+
+RESTRUCTURE_SYSTEM = """You are Marginalia's catalog tree maintainer.
+
+You are given:
+  - the current catalog tree, with each node's doc_count (entries linked)
+  - recent reflection notes hinting that some classification is off
+  - a sample of currently-active entries with their tags + summary + extra
+
+Decide a SMALL set of operations to improve the tree. Be conservative:
+  - Most runs should change nothing (return {"operations": []}).
+  - Prefer renames over splits; prefer splits over deletes; prefer moves
+    over rewrites.
+  - Aim for at most 5 operations per run.
+  - When creating a new catalog, you may reference it in subsequent
+    operations via the temp_id you assign (e.g. "tmp_AI").
+
+Operation types and their fields (output ONLY one JSON object per the schema):
+  rename:        {op:"rename", catalog_id, new_name}
+  move:          {op:"move", catalog_id, new_parent_id} -- new_parent_id may be null (root) or a temp_id
+  update_extra:  {op:"update_extra", catalog_id, extra}
+  create:        {op:"create", temp_id, name, parent_id?, summary?, description?, tags?}
+  soft_delete:   {op:"soft_delete", catalog_id, merge_into?}
+                 -- if merge_into is null, the deleted catalog's children
+                    promote to root and its entries become uncategorised.
+  move_entries:  {op:"move_entries", entry_ids:[...], target_catalog_id}
+                 -- target may be a temp_id from an earlier create
+
+NEVER hard-delete a catalog. NEVER create a parent cycle. NEVER touch any
+entry lifecycle, files content, or tags table.
+
+Output ONLY one JSON object matching the supplied schema. No prose, no
+fences.
+"""
+
+
+RESTRUCTURE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["operations"],
+    "properties": {
+        "operations": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                # Operations have a discriminator field "op" but JSON Schema
+                # union-with-discriminator handling varies by provider; we
+                # use a relaxed schema and validate strictly in code.
+                "additionalProperties": True,
+                "required": ["op"],
+                "properties": {"op": {"type": "string"}},
+            },
+        },
+    },
+}
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+@task_handler(KIND_RESTRUCTURE_CATALOGS)
+async def handle_restructure_catalogs(payload: Mapping[str, Any]) -> None:
+    now = _utcnow()
+    snapshot = await _take_snapshot(now=now)
+
+    if not snapshot["catalogs"]:
+        async with session_scope() as session:
+            await record_outcome(
+                session,
+                task_kind=KIND_RESTRUCTURE_CATALOGS,
+                object_kind=GLOBAL_OBJECT_KIND,
+                object_id=GLOBAL_OBJECT_ID,
+                outcome="noop",
+                detail={"reason": "no_catalogs_yet"},
+            )
+            await session.commit()
+        return
+
+    operations = await _ask_llm_for_operations(snapshot)
+    operations = operations[:MAX_OPERATIONS]
+
+    from marginalia.tasks.handlers.restructure_catalogs_apply import apply_operations
+    await apply_operations(operations=operations, now=_utcnow())
+
+
+# ----- snapshot --------------------------------------------------------------
+
+async def _take_snapshot(*, now: datetime) -> dict[str, Any]:
+    journal_cutoff = now - __import__("datetime").timedelta(days=JOURNAL_HINT_DAYS)
+    async with session_scope() as session:
+        catalogs = (
+            await session.execute(
+                select(Catalog).where(Catalog.deleted_at.is_(None)).order_by(Catalog.created_at)
+            )
+        ).scalars().all()
+
+        # doc_count per catalog from file_entries (live entries only)
+        counts_rows = (
+            await session.execute(
+                select(FileEntry.catalog_id, func.count())
+                .where(
+                    FileEntry.catalog_id.isnot(None),
+                    FileEntry.deleted_at.is_(None),
+                )
+                .group_by(FileEntry.catalog_id)
+            )
+        ).all()
+        counts = {cid: c for cid, c in counts_rows}
+
+        catalog_view = [
+            {
+                "id": c.id,
+                "parent_id": c.parent_id,
+                "name": c.name,
+                "summary": c.summary,
+                "description": c.description,
+                "tags": c.tags,
+                "extra": c.extra,
+                "doc_count": counts.get(c.id, 0),
+            }
+            for c in catalogs
+        ]
+
+        hints = (
+            await session.execute(
+                select(Journal.note, Journal.entry_ids, Journal.tags, Journal.created_at)
+                .where(Journal.created_at >= journal_cutoff)
+                .order_by(Journal.created_at.desc())
+                .limit(40)
+            )
+        ).all()
+        hint_view = [
+            {"note": n, "entry_ids": list(e or []), "tags": list(t or []),
+             "created_at": ca.isoformat()}
+            for n, e, t, ca in hints
+            if any(str(tag).startswith("hint:") for tag in (t or []))
+        ]
+
+        # high-activity entries: most recently updated active entries
+        # (cheap proxy — restructure does not need a full query stack here)
+        active_entries = (
+            await session.execute(
+                select(FileEntry)
+                .where(
+                    FileEntry.lifecycle.in_(("active", "manual_active")),
+                    FileEntry.deleted_at.is_(None),
+                )
+                .order_by(FileEntry.updated_at.desc())
+                .limit(HIGH_ACTIVITY_TOP_N)
+            )
+        ).scalars().all()
+
+        entry_view = []
+        for e in active_entries:
+            tag_rows = (
+                await session.execute(
+                    select(Tag.name, Tag.facet)
+                    .join_from(Tag, __import__("marginalia.db.models", fromlist=["EntryTag"]).EntryTag,
+                               Tag.id == __import__("marginalia.db.models", fromlist=["EntryTag"]).EntryTag.tag_id)
+                    .where(__import__("marginalia.db.models", fromlist=["EntryTag"]).EntryTag.entry_id == e.id)
+                )
+            ).all()
+            entry_view.append({
+                "entry_id": e.id,
+                "display_name": e.display_name,
+                "catalog_id": e.catalog_id,
+                "extra": e.extra,
+                "tags": [{"name": n, "facet": f} for n, f in tag_rows],
+            })
+
+        await session.commit()
+
+    return {
+        "catalogs": catalog_view,
+        "hints": hint_view,
+        "active_entries": entry_view,
+    }
+
+
+# ----- LLM -------------------------------------------------------------------
+
+async def _ask_llm_for_operations(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    user_text = (
+        "Decide what to change. Be conservative — most runs should output "
+        "an empty operations list.\n\n"
+        f"<snapshot>\n{json.dumps(snapshot, ensure_ascii=False)}\n</snapshot>"
+    )
+    client = get_chat_client("ingest")
+    resp = await client.complete(ChatRequest(
+        system=RESTRUCTURE_SYSTEM,
+        messages=[ChatMessage(role="user", content=[TextBlock(text=user_text)])],
+        max_tokens=2048,
+        json_schema=RESTRUCTURE_SCHEMA,
+        temperature=0.2,
+    ))
+    if resp.parsed_json is None:
+        log.warning("restructure_catalogs: non-JSON response, aborting")
+        return []
+    ops = resp.parsed_json.get("operations") or []
+    return list(ops)

@@ -1,0 +1,9 @@
+# Overview
+
+Marginalia indexes documents using a small
+library of pipelines.
+
+# Pipeline
+
+Each pipeline emits
+structured JSON describing the document.
