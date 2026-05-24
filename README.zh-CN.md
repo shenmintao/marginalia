@@ -36,6 +36,13 @@ marginalia> 帮我对比 Raft 和 Paxos
 `marginalia` 一个命令进程通吃——server、worker、CLI 都在同一进程
 里，跟 Claude Code、DeepSeek TUI 同样的形态。不用开两个终端。
 
+默认情况下你的文件以真实的文件夹树存在
+`~/Marginalia/library/research/llm/paper.pdf`，可以在 Finder 里浏览、用
+`rsync` 或 `git` 备份、用任何编辑器修改——这个文件夹**就是**你的库，
+marginalia 只是给它建索引。在 marginalia 之外动过文件后，跑 `/check`
+看差异、`/ingest --all` 同步 db 和磁盘。要把整套（db + library + 缓存）
+搬到别处，设 `MARGINALIA_HOME=/some/path` 即可。
+
 只有当你想多机共享同一个知识库（笔记本 + 台式机）时，才把 server
 拆出来跑成独立进程，CLI 通过 `--server URL` 连过去。见下文"部署
 形态"。

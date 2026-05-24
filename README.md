@@ -41,6 +41,14 @@ The `marginalia` command is one process — server, worker, and CLI all
 run inside it (same shape as Claude Code or the DeepSeek TUI). No need
 to open two terminals.
 
+By default your files live as a real folder tree under
+`~/Marginalia/library/research/llm/paper.pdf`. Browse them in Finder,
+back them up with `rsync` or `git`, edit them in your favourite editor —
+the vault IS your library, marginalia just indexes it. After you change
+files outside marginalia, run `/check` to see the diff and `/ingest --all`
+to sync db with disk. Set `MARGINALIA_HOME=/some/path` to relocate the
+whole footprint (db + library + caches) to wherever you want.
+
 When you want to share one library across machines (laptop + desktop),
 split the server out as a separate process and point the CLI at it via
 `--server URL`. See "Deployment shape" below.
