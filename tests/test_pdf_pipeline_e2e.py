@@ -133,10 +133,31 @@ class _FakeIngest:
 def _install_fake() -> None:
     llm.reset_clients_cache()
     fake = _FakeIngest()
+    fake_ocr = _FakeOcrEmpty()
     def _factory(profile: str = "ingest"):
+        if profile == "vision":
+            return fake_ocr
         return fake
     import marginalia.pipelines.pdf as pmod
     pmod.get_chat_client = _factory  # type: ignore[assignment]
+
+
+class _FakeOcrEmpty:
+    """Vision client used in this test only — every page returns 'No text content',
+    so the OCR fallback decides the doc is genuinely scanned-but-empty and the
+    pipeline still raises PdfNeedsOcrError. Guarantees test [4] stays
+    deterministic without needing a real VLM."""
+    profile_name = "vision"
+    model = "fake-vision"
+
+    async def complete(self, request):  # noqa: ANN001
+        return ChatResponse(
+            text="No text content",
+            tool_calls=[],
+            stop_reason="end_turn",
+            usage=TokenUsage(input_tokens=200, output_tokens=10),
+            parsed_json=None,
+        )
 
 
 # ---- helpers ---------------------------------------------------------------

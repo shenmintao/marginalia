@@ -39,6 +39,7 @@ from marginalia.pipelines.base import (
     SegmentResult,
     TagSuggestion,
 )
+from marginalia.pipelines.image import downscale_for_vlm
 from marginalia.pipelines.registry import register_pipeline
 from marginalia.storage.base import StorageBackend
 
@@ -48,6 +49,21 @@ MAX_PAGES = 60                    # cap pages we feed the model
 MAX_TOTAL_TEXT_BYTES = 80_000     # ≈ 25-30k tokens cap
 MIN_TEXT_PER_PAGE_FOR_TEXT_LAYER = 50  # if every page yields fewer chars,
                                        # the doc is probably scanned
+OCR_MAX_PAGES = 50                # cap how many pages we OCR per doc
+OCR_RENDER_DPI = 200              # JPEG render DPI before VLM (sweet spot)
+OCR_VLM_MAX_LONG_EDGE = 2048      # OCR is glyph-sensitive — keep more
+                                  # detail than the caption path's 1568
+
+
+PDF_OCR_PROMPT = """You are an OCR assistant. Extract all body text from the provided document image and output pure Markdown in the document's own language.
+
+Rules:
+1. Ignore page headers, footers, and page numbers.
+2. Preserve paragraph and heading hierarchy where visible.
+3. Use Markdown table syntax for tables.
+4. Use LaTeX for math (wrapped with $ or $$).
+5. Output ONLY the extracted text. No HTML, no preamble, no commentary.
+6. If the page has no recognisable text content, reply only with: No text content."""
 
 
 PDF_PIPELINE_SYSTEM = """You are Marginalia's PDF document indexer.
@@ -136,11 +152,11 @@ PDF_PIPELINE_SCHEMA: dict[str, Any] = {
 
 
 class PdfNeedsOcrError(Exception):
-    """Raised when the PDF appears to be scanned (no usable text layer).
-
-    The handler catches this and marks `files.ingest_status='failed'` with
-    reason 'needs_ocr' so a future OCR / vision-per-page pipeline can take
-    over without re-uploading."""
+    """Raised when the OCR fallback itself failed (e.g. VLM unavailable
+    or returned only empty pages). Kept for the dispatcher to mark the
+    file as 'failed' with reason 'needs_ocr' so the user can retry once
+    the VLM is back up. The text-layer-missing case no longer raises —
+    it triggers the OCR path automatically."""
 
     def __init__(self, *, total_pages: int, total_chars: int) -> None:
         super().__init__(
@@ -169,16 +185,35 @@ class PdfPipeline(Pipeline):
 
         total_pages = len(text_per_page)
         total_chars = sum(len(t) for t in text_per_page)
+        ocr_used = False
+        ocr_pages_done = 0
         if total_pages > 0 and total_chars / max(total_pages, 1) < MIN_TEXT_PER_PAGE_FOR_TEXT_LAYER:
-            raise PdfNeedsOcrError(
-                total_pages=total_pages, total_chars=total_chars,
+            log.info(
+                "pdf %s appears scanned (pages=%d, avg_chars=%.1f); "
+                "running VLM OCR fallback",
+                ctx.storage_key, total_pages,
+                total_chars / max(total_pages, 1),
             )
+            ocr_used = True
+            ocr_text_per_page = await _ocr_pdf_pages(body, total_pages)
+            ocr_pages_done = sum(1 for t in ocr_text_per_page if t.strip())
+            if ocr_pages_done == 0:
+                raise PdfNeedsOcrError(
+                    total_pages=total_pages, total_chars=total_chars,
+                )
+            text_per_page = ocr_text_per_page
+            total_chars = sum(len(t) for t in text_per_page)
 
         # Extract embedded figures and describe them via vision profile.
         # Single-image failures degrade to placeholder text; the ingest
         # call below still gets useful context.
-        images = extract_images(body)
-        described = await describe_images(images) if images else []
+        # Skip figure extraction in OCR mode — the page render IS the figure,
+        # and we already have its OCR text.
+        if ocr_used:
+            described = []
+        else:
+            images = extract_images(body)
+            described = await describe_images(images) if images else []
         body_text = render_pages_with_figures(text_per_page, described)
         body_text = self._truncate(body_text)
 
@@ -189,6 +224,8 @@ class PdfPipeline(Pipeline):
             "tag_vocabulary": ctx.tag_vocabulary,
             "page_count": total_pages,
             "figure_count": len(described),
+            "ocr_used": ocr_used,
+            "ocr_pages_done": ocr_pages_done if ocr_used else 0,
         }
         user_text = (
             "Index the PDF below. Hints are advisory; the document's text "
@@ -215,9 +252,16 @@ class PdfPipeline(Pipeline):
             raise ValueError("pdf pipeline produced non-JSON output")
 
         data = resp.parsed_json
+        description = {"sections": data["description"]["sections"]}
+        if ocr_used:
+            description["ocr"] = {
+                "engine": "vlm",
+                "pages_total": total_pages,
+                "pages_processed": ocr_pages_done,
+            }
         return PipelineResult(
             summary=str(data["summary"]),
-            description={"sections": data["description"]["sections"]},
+            description=description,
             kind="text",
             extra=(data.get("extra") or "") or None,
             entry_extra=(data.get("entry_extra") or "") or None,
@@ -411,6 +455,95 @@ FIGURE_DESCRIBE_SYSTEM = (
 )
 
 
+# ---- scanned-PDF OCR via VLM ---------------------------------------------
+
+async def _ocr_pdf_pages(pdf_bytes: bytes, total_pages: int) -> list[str]:
+    """Render the first OCR_MAX_PAGES pages to JPEG via pypdfium2,
+    down-scale each via downscale_for_vlm, and ask the vision profile
+    to extract text in markdown. Returns one entry per rendered page;
+    pages beyond the cap are returned as empty strings.
+
+    Empty / "No text content" responses are normalised to '' so the
+    caller can detect the all-empty-page case and raise PdfNeedsOcrError.
+    """
+    pages_to_ocr = min(total_pages, OCR_MAX_PAGES)
+    page_jpegs = await asyncio.to_thread(
+        _render_pdf_pages_to_jpeg, pdf_bytes, pages_to_ocr,
+    )
+    client = get_chat_client("vision")
+    out: list[str] = []
+    for i, jpeg_bytes in enumerate(page_jpegs):
+        # OCR is more sensitive to fine glyph detail than image caption,
+        # so use a higher long-edge cap than the caption path. 200-DPI A4
+        # renders to ~2200px and only loses ~7% at 2048; 8pt footnotes
+        # in dense layouts stay readable.
+        scaled, media_type = downscale_for_vlm(
+            jpeg_bytes, max_long_edge=OCR_VLM_MAX_LONG_EDGE,
+        )
+        b64 = base64.b64encode(scaled).decode("ascii")
+        try:
+            resp = await client.complete(ChatRequest(
+                system=PDF_OCR_PROMPT,
+                messages=[ChatMessage(role="user", content=[
+                    TextBlock(text=f"Page {i + 1} of {pages_to_ocr}."),
+                    ImageBlock(media_type=media_type, data_b64=b64),
+                ])],
+                max_tokens=4096,
+                temperature=0.0,
+            ))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("OCR call failed for page %d: %s", i + 1, exc)
+            out.append("")
+            continue
+        text = (resp.text or "").strip()
+        if text.lower() in ("no text content", "no text content."):
+            text = ""
+        out.append(text)
+    # Pad with empties for pages we skipped past the cap, so caller's
+    # page indexing stays aligned with total_pages.
+    while len(out) < total_pages:
+        out.append("")
+    return out
+
+
+def _render_pdf_pages_to_jpeg(
+    pdf_bytes: bytes, page_count: int,
+) -> list[bytes]:
+    """Render `page_count` pages to JPEG bytes. Sync, intended to run
+    inside asyncio.to_thread. Mirrors WeKnora's PDFScannedParser shape:
+    pypdfium2 → PIL.Image → JPEG via Pillow."""
+    import pypdfium2 as pdfium
+
+    scale = OCR_RENDER_DPI / 72
+    out: list[bytes] = []
+    pdf = pdfium.PdfDocument(pdf_bytes)
+    try:
+        for i in range(min(page_count, len(pdf))):
+            page = pdf[i]
+            bitmap = None
+            try:
+                bitmap = page.render(scale=scale)
+                img = bitmap.to_pil()
+                if img.mode != "RGB":
+                    img = img.convert("RGB")
+                buf = io.BytesIO()
+                img.save(buf, format="JPEG", quality=85, optimize=True)
+                out.append(buf.getvalue())
+            finally:
+                if bitmap is not None:
+                    close = getattr(bitmap, "close", None)
+                    if close:
+                        close()
+                close = getattr(page, "close", None)
+                if close:
+                    close()
+    finally:
+        close = getattr(pdf, "close", None)
+        if close:
+            close()
+    return out
+
+
 @dataclass(slots=True)
 class ExtractedImage:
     page_num: int       # 1-indexed
@@ -512,7 +645,6 @@ async def describe_images(
 
 
 async def _describe_one(client, img: ExtractedImage) -> DescribedImage:
-    from marginalia.pipelines.image import downscale_for_vlm
     scaled, media_type = downscale_for_vlm(img.data)
     b64 = base64.b64encode(scaled).decode("ascii")
     user_text = (
