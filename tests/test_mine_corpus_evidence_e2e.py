@@ -192,7 +192,7 @@ async def _seed():
         s.add(EntryRelation(
             id=new_id(), entry_a_id=a_id, entry_b_id=b_id,
             note="pre-existing reflect relation",
-            source_kind="reflect",
+            source_kind="mine_session_cooccurrence",
             last_observed_at=now, observation_count=2,
             created_at=now,
         ))
@@ -269,7 +269,7 @@ async def main():
         print("[2] rejected (paxos,bft) NOT written")
 
         # 1.c Pre-existing (raft,bft) was NOT included in candidates;
-        # only one row of source_kind=reflect remains intact.
+        # only the seeded mine_session_cooccurrence row remains intact.
         a_rb, b_rb = sorted((seeded["e_raft"], seeded["e_bft"]))
         rel_rb = (await s.execute(
             select(EntryRelation).where(

@@ -10,6 +10,7 @@ from typing import Any
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Index,
@@ -22,6 +23,11 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 from marginalia.db.models.base import Base, IdMixin, TimestampMixin
+from marginalia.db.models.enums import (
+    ENTRY_TAG_SOURCES,
+    TAG_FACETS,
+    _in_clause,
+)
 
 
 INBOX_CATALOG_ID = "00000000-0000-0000-0000-00000000inbx"
@@ -89,6 +95,7 @@ class Tag(Base, IdMixin, TimestampMixin):
         UniqueConstraint("name", "facet", name="uq_tags_name_facet"),
         Index("ix_tags_facet", "facet"),
         Index("ix_tags_alias_of", "alias_of"),
+        CheckConstraint(_in_clause("facet", TAG_FACETS), name="facet"),
     )
 
     name: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -126,7 +133,7 @@ class EntryTag(Base):
     """entry <-> tag association with provenance.
 
     Composite PK (entry_id, tag_id). `source` records HOW the tag was attached
-    (ingest / reflect / enrich_tags / dedup_seed). normalize_tags rewrites
+    (ingest / dedup_seed / enrich_tags). normalize_tags rewrites
     rows when merging duplicate tags.
     """
 
@@ -134,6 +141,7 @@ class EntryTag(Base):
     __table_args__ = (
         Index("ix_entry_tags_tag_id", "tag_id"),
         Index("ix_entry_tags_source", "source"),
+        CheckConstraint(_in_clause("source", ENTRY_TAG_SOURCES), name="source"),
     )
 
     entry_id: Mapped[str] = mapped_column(

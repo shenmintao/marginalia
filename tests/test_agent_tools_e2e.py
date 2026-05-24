@@ -169,7 +169,7 @@ async def _seed():
         s.add(EntryRelation(
             id=new_id(), entry_a_id=a, entry_b_id=b,
             note="Both papers compare consensus algorithms",
-            source_kind="reflect", last_observed_at=now,
+            source_kind="mine_session_cooccurrence", last_observed_at=now,
             observation_count=3, created_at=now,
         ))
 

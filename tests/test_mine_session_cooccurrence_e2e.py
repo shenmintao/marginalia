@@ -99,7 +99,7 @@ async def _seed():
             id=new_id(),
             entry_a_id=a_id, entry_b_id=c_id,
             note="seeded by reflect previously",
-            source_kind="reflect",
+            source_kind="mine_tag_overlap",
             last_observed_at=now - timedelta(days=10),
             observation_count=1,
             created_at=now - timedelta(days=10),

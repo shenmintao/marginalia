@@ -6,6 +6,7 @@ from typing import Any
 
 from sqlalchemy import (
     BigInteger,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Index,
@@ -18,6 +19,12 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 from marginalia.db.models.base import Base, IdMixin, TimestampMixin
+from marginalia.db.models.enums import (
+    ENTRY_LIFECYCLES,
+    FILE_KINDS,
+    INGEST_STATUSES,
+    _in_clause,
+)
 
 
 class Folder(Base, IdMixin, TimestampMixin):
@@ -51,6 +58,7 @@ class FileEntry(Base, IdMixin, TimestampMixin):
         Index("ix_file_entries_file_id", "file_id"),
         Index("ix_file_entries_lifecycle", "lifecycle"),
         Index("ix_file_entries_catalog_id", "catalog_id"),
+        CheckConstraint(_in_clause("lifecycle", ENTRY_LIFECYCLES), name="lifecycle"),
     )
 
     folder_id: Mapped[str] = mapped_column(
@@ -83,6 +91,11 @@ class File(Base, IdMixin, TimestampMixin):
     __table_args__ = (
         Index("ix_files_ingest_status", "ingest_status"),
         Index("ix_files_kind", "kind"),
+        CheckConstraint(_in_clause("ingest_status", INGEST_STATUSES), name="ingest_status"),
+        CheckConstraint(
+            f"kind IS NULL OR {_in_clause('kind', FILE_KINDS)}",
+            name="kind",
+        ),
     )
 
     storage_key: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)

@@ -11,6 +11,7 @@ from typing import Any
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Index,
@@ -23,6 +24,11 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 from marginalia.db.models.base import Base, IdMixin
+from marginalia.db.models.enums import (
+    ENTRY_RELATION_SOURCE_KINDS,
+    JOURNAL_SOURCE_KINDS,
+    _in_clause,
+)
 
 
 class EntryRelation(Base, IdMixin):
@@ -42,6 +48,10 @@ class EntryRelation(Base, IdMixin):
         Index("ix_entry_relations_a", "entry_a_id"),
         Index("ix_entry_relations_b", "entry_b_id"),
         Index("ix_entry_relations_observation_count", "observation_count"),
+        CheckConstraint(
+            _in_clause("source_kind", ENTRY_RELATION_SOURCE_KINDS),
+            name="source_kind",
+        ),
     )
 
     entry_a_id: Mapped[str] = mapped_column(
@@ -51,7 +61,7 @@ class EntryRelation(Base, IdMixin):
         String(36), ForeignKey("file_entries.id", ondelete="CASCADE"), nullable=False
     )
     note: Mapped[str] = mapped_column(Text, nullable=False)
-    source_kind: Mapped[str] = mapped_column(String(40), nullable=False, default="reflect")
+    source_kind: Mapped[str] = mapped_column(String(40), nullable=False)
     last_observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     observation_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     # vetted: NULL = not yet judged by vet_relations; True/False = LLM verdict.
@@ -97,6 +107,14 @@ class Journal(Base, IdMixin):
         Index("ix_journal_conversation_id", "conversation_id"),
         Index("ix_journal_created_at", "created_at"),
         Index("ix_journal_source_kind", "source_kind"),
+        CheckConstraint(
+            _in_clause("source_kind", JOURNAL_SOURCE_KINDS),
+            name="source_kind",
+        ),
+        CheckConstraint(
+            "source_kind = 'insight' OR superseded_by_id IS NULL",
+            name="supersede_only_on_insight",
+        ),
     )
 
     conversation_id: Mapped[str] = mapped_column(

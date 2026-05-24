@@ -3,10 +3,11 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, DateTime, Index, Integer, String, Text
+from sqlalchemy import CheckConstraint, JSON, DateTime, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from marginalia.db.models.base import Base, IdMixin
+from marginalia.db.models.enums import TASK_STATUSES, _in_clause
 
 
 class Task(Base, IdMixin):
@@ -22,6 +23,7 @@ class Task(Base, IdMixin):
         Index("ix_tasks_status_sched_priority", "status", "scheduled_at", "priority"),
         Index("ix_tasks_dedup_key_active", "dedup_key"),
         Index("ix_tasks_kind_status", "kind", "status"),
+        CheckConstraint(_in_clause("status", TASK_STATUSES), name="status"),
     )
 
     kind: Mapped[str] = mapped_column(String(64), nullable=False)

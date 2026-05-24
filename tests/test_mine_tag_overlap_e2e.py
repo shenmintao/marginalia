@@ -162,7 +162,7 @@ async def _seed():
             id=new_id(),
             entry_a_id=a_id, entry_b_id=b_id,
             note="seeded earlier",
-            source_kind="reflect",
+            source_kind="mine_session_cooccurrence",
             last_observed_at=now - timedelta(days=5),
             observation_count=1,
             created_at=now - timedelta(days=5),
