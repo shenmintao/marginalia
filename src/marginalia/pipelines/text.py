@@ -1,4 +1,4 @@
-"""Text pipeline (design.md §11.3, first batch).
+"""Text pipeline (DESIGN.md §11.3, first batch).
 
 Handles `text/markdown`, `text/plain`, and the `.txt` / `.md` / `.rst` extensions.
 Produces `description.sections` with heading-path / line-range anchors.

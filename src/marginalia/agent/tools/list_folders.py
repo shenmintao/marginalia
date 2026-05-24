@@ -1,4 +1,4 @@
-"""list_folders — design.md §10.1.
+"""list_folders — DESIGN.md §10.1.
 
 Walks the user's folder tree. Folders' `name` is a soft prior signal for the
 agent (the user named them).

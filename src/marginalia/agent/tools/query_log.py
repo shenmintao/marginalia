@@ -1,4 +1,4 @@
-"""query_log — design.md §10.1.
+"""query_log — DESIGN.md §10.1.
 
 Lightweight log filter — no SQL. Reads a log/text/jsonl file line-by-line
 from storage and applies user-supplied filters:

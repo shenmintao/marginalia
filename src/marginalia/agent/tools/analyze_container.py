@@ -1,4 +1,4 @@
-"""analyze_container — design.md §10.1.
+"""analyze_container — DESIGN.md §10.1.
 
 Lets the agent look INSIDE a container entry (zip / tar / 7z / rar /
 .gz / etc.) without ever materializing the inner files as standalone

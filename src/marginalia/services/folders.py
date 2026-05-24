@@ -148,7 +148,7 @@ async def list_child_folders(db: AsyncSession, parent_id: str) -> list[Folder]:
 async def get_folder(db: AsyncSession, folder_id: str) -> Folder | None:
     return await folders_repo.get_live(db, folder_id)
 
-# ---- user-side mutations (design.md §14.1) ---------------------------------
+# ---- user-side mutations (DESIGN.md §14.1) ---------------------------------
 
 class FolderNotFoundError(Exception):
     pass

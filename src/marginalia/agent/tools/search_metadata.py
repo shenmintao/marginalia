@@ -1,4 +1,4 @@
-"""search_metadata — design.md §10.1.
+"""search_metadata — DESIGN.md §10.1.
 
 Filters entries by combinations of text (ILIKE on summary + extras), tags,
 catalog scope, view, kind, lifecycle. The two catalog filters are mutually

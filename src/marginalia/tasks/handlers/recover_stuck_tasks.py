@@ -1,4 +1,4 @@
-"""recover_stuck_tasks — design.md §9.1.
+"""recover_stuck_tasks — DESIGN.md §9.1.
 
 Self-healing: when a worker dies mid-task (process crash, OOM, lease expired
 without heartbeat reaching DB), the row stays at status='running' forever

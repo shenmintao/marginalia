@@ -1,4 +1,4 @@
-"""Conversation export — design.md agent identity (citation footnotes).
+"""Conversation export — DESIGN.md agent identity (citation footnotes).
 
 The agent finishes a turn with `agent_response` markdown that contains
 `[^marker]` superscript references and footnotes of the form:
@@ -9,7 +9,7 @@ This service parses those footnotes, resolves them to live entries, and
 builds a zip plan: the report itself, each cited entry's file (deduped by
 entry_id), each cited entry's user-facing metadata, and a manifest.
 
-Boundary (design.md §14.3):
+Boundary (DESIGN.md §14.3):
   - The exported `references/<name>.metadata.json` is the same shape as
     GET /file-entries/{id}/metadata — i.e. user-visible fields plus the
     librarian's summary, NEVER catalog_id / description / extra / tags.

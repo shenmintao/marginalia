@@ -1,4 +1,4 @@
-"""normalize_tags — design.md §9.1 + §9.4 + §14.4.
+"""normalize_tags — DESIGN.md §9.1 + §9.4 + §14.4.
 
 LLM-driven controlled-vocabulary maintenance. Per facet, asks the LLM to
 identify synonym groups; applies the merges:

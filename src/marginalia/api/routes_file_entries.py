@@ -1,4 +1,4 @@
-"""User-side file_entry mutation routes — design.md §14.1.
+"""User-side file_entry mutation routes — DESIGN.md §14.1.
 
 Each mutation is its own sub-resource endpoint so the request body
 expresses exactly one intent. The previous omnibus `PATCH

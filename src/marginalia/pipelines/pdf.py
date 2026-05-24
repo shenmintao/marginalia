@@ -1,4 +1,4 @@
-"""PDF pipeline (design.md §11.3).
+"""PDF pipeline (DESIGN.md §11.3).
 
 Handles application/pdf and `.pdf`. Strategy: pypdf extracts the text
 layer page by page; significant images are concurrently described by

@@ -1,4 +1,4 @@
-"""Chat HTTP route — design.md §12.2 / plan §5.5.
+"""Chat HTTP route — DESIGN.md §12.2 / plan §5.5.
 
   POST /chat/{session_id}      — run one user turn as SSE event stream
 

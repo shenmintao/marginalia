@@ -1,4 +1,4 @@
-"""User-visible layer: folders, file_entries, files (design.md §8.1)."""
+"""User-visible layer: folders, file_entries, files (DESIGN.md §8.1)."""
 from __future__ import annotations
 
 from datetime import datetime

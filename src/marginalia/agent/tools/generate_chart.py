@@ -1,6 +1,6 @@
 """generate_chart — agent tool that emits a Vega-Lite v5 spec for the user.
 
-design.md §10.4 / B.6: charts are *single-directional*. The agent decides
+DESIGN.md §10.4 / B.6: charts are *single-directional*. The agent decides
 "a picture would help here" and calls this tool with controlled inputs;
 we assemble the spec server-side and ship it to the user via the SSE
 side-channel. The model gets back only `{chart_id, caption}` — the full

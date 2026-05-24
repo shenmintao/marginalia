@@ -1,4 +1,4 @@
-"""Repository layer — design.md §7.
+"""Repository layer — DESIGN.md §7.
 
 Each module here exposes module-level async functions that own all
 SQLAlchemy access for a single domain. Services orchestrate; repositories

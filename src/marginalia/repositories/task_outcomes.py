@@ -1,4 +1,4 @@
-"""task_outcomes repository — design.md §8.4.
+"""task_outcomes repository — DESIGN.md §8.4.
 
 INSERT-only fact table for "what did task X do to object Y when?".
 Read by infrastructure (idempotence / recency lookups), pruned on a

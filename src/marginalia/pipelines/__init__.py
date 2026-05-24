@@ -1,6 +1,6 @@
 """Pipeline framework: contract + registry + first concrete (text).
 
-Per design.md §11.2 each pipeline produces, from one LLM call:
+Per DESIGN.md §11.2 each pipeline produces, from one LLM call:
   - files.summary   (write-once, content-only)
   - files.description  (write-once, structured JSON)
   - files.kind      (write-once, content-only)

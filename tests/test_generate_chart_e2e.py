@@ -1,7 +1,7 @@
 """Side-channel test for generate_chart and the runtime's __user_only__
 plumbing.
 
-The contract under test (design.md §10.4 / B.6):
+The contract under test (DESIGN.md §10.4 / B.6):
   1. generate_chart returns a result containing __user_only__ with the
      full Vega-Lite spec.
   2. The runtime emits a `user_artifact` SSE event carrying that payload.

@@ -1,4 +1,4 @@
-"""periodic_tick — the dispatcher (design.md §9.1 + §9.3).
+"""periodic_tick — the dispatcher (DESIGN.md §9.1 + §9.3).
 
 This is the lowest-priority task in the system (priority 300). Its job each
 firing:

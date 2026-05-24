@@ -1,4 +1,4 @@
-"""list_catalogs — design.md §10.1.
+"""list_catalogs — DESIGN.md §10.1.
 
 Walks the AI-internal catalog tree by parent. Soft-deleted nodes hidden.
 """

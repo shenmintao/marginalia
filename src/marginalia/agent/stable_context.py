@@ -1,4 +1,4 @@
-"""Stable context for the agent — design.md §10.2.
+"""Stable context for the agent — DESIGN.md §10.2.
 
 Each turn's LLM call gets the same identity-shaped system prompt prefix
 followed by a snapshot of the catalog tree + view list + tag vocabulary +
@@ -15,7 +15,7 @@ filtering `created_at < session.started_at`. This both:
 
 V1: rebuilt on every turn (cheap; the underlying queries take a handful
 of milliseconds). The catalog/views/tags slices are NOT logically frozen
-— per design.md §4.2 the offline writers don't run during live sessions,
+— per DESIGN.md §4.2 the offline writers don't run during live sessions,
 so in practice they don't drift.
 """
 from __future__ import annotations

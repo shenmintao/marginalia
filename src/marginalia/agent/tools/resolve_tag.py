@@ -1,4 +1,4 @@
-"""resolve_tag — design.md §10.1.
+"""resolve_tag — DESIGN.md §10.1.
 
 Maps any spelling (incl. aliases) to a canonical tag id + facet. Walks
 tag_aliases when no direct hit, and follows tags.alias_of one step.

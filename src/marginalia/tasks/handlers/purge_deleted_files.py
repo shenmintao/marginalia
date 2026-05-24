@@ -1,4 +1,4 @@
-"""purge_deleted_files — design.md §9.4 + §14.2.2.
+"""purge_deleted_files — DESIGN.md §9.4 + §14.2.2.
 
 Honor user soft-delete intent. Walks file_entries that are past their
 `purge_after` timestamp and physically deletes them. If a file has no live

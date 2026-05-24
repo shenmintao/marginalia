@@ -1,4 +1,4 @@
-"""mine_relations — unified miner dispatcher (design.md §9.x).
+"""mine_relations — unified miner dispatcher (DESIGN.md §9.x).
 
 Four miners share a daily slot. They write into entry_relations rows that
 vet_relations later judges:

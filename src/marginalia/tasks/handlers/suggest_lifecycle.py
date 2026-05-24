@@ -1,6 +1,6 @@
 """suggest_lifecycle — unified active→demoted→archived stepper.
 
-design.md §9.1 + §9.4 + §14.4 #4.
+DESIGN.md §9.1 + §9.4 + §14.4 #4.
 
 One periodic kind walks BOTH transitions in lockstep:
   active   →  demoted   (via _select_demotion_candidates)

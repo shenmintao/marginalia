@@ -1,4 +1,4 @@
-"""Session HTTP routes — design.md §12.2.
+"""Session HTTP routes — DESIGN.md §12.2.
 
   POST /sessions               — open a new session
   POST /sessions/{id}/close    — close a session, return totals

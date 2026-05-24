@@ -1,4 +1,4 @@
-"""Audit layer: audit_events, sessions, conversations (design.md §8.2).
+"""Audit layer: audit_events, sessions, conversations (DESIGN.md §8.2).
 
 Shared infrastructure tables. Agent NEVER reads these — AI's "past experience"
 flows through the journal table. Humans read these via admin tooling; the

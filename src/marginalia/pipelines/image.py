@@ -1,4 +1,4 @@
-"""Image pipeline (design.md §11.3).
+"""Image pipeline (DESIGN.md §11.3).
 
 Handles raster images: image/png / image/jpeg / image/gif / image/webp.
 Uses the `vision` LLM profile (a multimodal model) and feeds the image

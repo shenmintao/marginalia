@@ -1,4 +1,4 @@
-"""search_journal — design.md §10.1.
+"""search_journal — DESIGN.md §10.1.
 
 The investigator's first move: "did I work on something like this before?"
 

@@ -1,4 +1,4 @@
-"""materialize_view — design.md §10.1.
+"""materialize_view — DESIGN.md §10.1.
 
 Realises a view's filter_spec into a concrete entry list. Supports:
   - catalog_subtree: list of catalog ids; entries whose catalog is any of

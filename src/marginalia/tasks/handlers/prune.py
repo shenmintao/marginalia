@@ -1,6 +1,6 @@
 """prune — unified retention pruner for audit_events + task_outcomes.
 
-design.md §9.1 + §14.2.3 + §14.2.3a.
+DESIGN.md §9.1 + §14.2.3 + §14.2.3a.
 
 Two retention windows live in this one handler:
   - audit_events       : 90d (the audit log)

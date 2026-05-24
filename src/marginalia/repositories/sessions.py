@@ -1,4 +1,4 @@
-"""sessions / conversations service — design.md §8.2 + §10.2 + §12.2.
+"""sessions / conversations service — DESIGN.md §8.2 + §10.2 + §12.2.
 
 Wraps reads/writes against the audit-layer container tables (sessions and
 conversations). Keeps the runtime free of bookkeeping noise.

@@ -1,6 +1,6 @@
 """tag_quality — unified tag-vocabulary maintenance.
 
-design.md §9.1 + §9.4 + §14.4.
+DESIGN.md §9.1 + §9.4 + §14.4.
 
 Two LLM-driven phases that always run in this order:
   1. normalize_tags — synonym/case/spelling merges (must precede enrich)

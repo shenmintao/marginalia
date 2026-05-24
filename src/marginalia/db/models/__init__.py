@@ -1,6 +1,6 @@
 """SQLAlchemy ORM models for Marginalia.
 
-14 business tables organized by the four-layer architecture (design.md §7):
+14 business tables organized by the four-layer architecture (DESIGN.md §7):
 
 User-visible (3):
   - folders, file_entries, files

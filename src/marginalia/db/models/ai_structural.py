@@ -1,5 +1,5 @@
 """AI-internal structural layer: catalogs, views, tags, tag_aliases, entry_tags
-(design.md §8.3 — first 5 tables).
+(DESIGN.md §8.3 — first 5 tables).
 
 Written by 🏛️ librarian (offline tasks). User layer NEVER reads these.
 """

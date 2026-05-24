@@ -1,4 +1,4 @@
-"""Conversation export route — design.md citation/export semantics.
+"""Conversation export route — DESIGN.md citation/export semantics.
 
 GET /conversations/latest
   → 200 {conversation_id, session_id, started_at, ended_at, user_message_preview}

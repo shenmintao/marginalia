@@ -1,4 +1,4 @@
-"""ingest_file handler — design.md §9.4 + §11.
+"""ingest_file handler — DESIGN.md §9.4 + §11.
 
 Flow per task:
   1. SELECT files row + the entry that triggered the upload (any one is fine —

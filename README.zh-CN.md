@@ -1,212 +1,208 @@
 # Marginalia
 
 > English: [README.md](README.md)
+> 设计文档:[DESIGN.md](DESIGN.md)
 
-一个受图书馆学启发的个人知识库系统。你上传文档，背后的图书馆员
-（一个 LLM agent）默默给它们编目、关联、归类。需要查什么时，调查员
-agent 会翻自己的笔记本（journal），整理上下文，给出带引用的回答。
+图书馆学风格的个人知识库系统。AI 在后台编目、归类、交叉引用;你提问,
+调查员 agent 翻自己的笔记本(journal)、收集上下文,给出带引用的回答。
 
-## 为什么叫"图书馆学"
+**不用向量库、不嵌入、不切块。** 检索靠结构化访问点(分类树 / tags /
+views)+ metadata 搜索 + agent 直接读原文。LLM 提供语义理解,schema
+负责账本。
 
-大多数"AI 搜本地文件"系统是 RAG 问答——AI 只是被动的检索消费者。
-Marginalia 把 AI 当成图书馆员：分类树、tag、交叉引用、journal 都归
-它管。文件本身保留你自己的文件夹结构；其他东西（catalog、tags、
-relations、summary）属于 agent，由使用过程慢慢塑造成形。
+## 它怎么工作
 
-## 5 分钟入门
+三种身份,严格分离:
+
+- **🏛️ 图书馆员** —— 离线批处理。入册新文件、归并同义 tag、重整
+  catalog。AI 内部状态绝大部分由它写。
+- **🔍 调查员** —— 在线 agent。Plan → 工具调用 → 带引用的答案。每轮
+  对话结束写 journal + 观察到的 entry 关联。
+- **👤 你** —— 上传、整理文件夹、归档、删除。库是你的;AI 的工作产物
+  独立存放。
+
+调查员的笔记本是真的一张表(`journal`),图书馆员后续重整时会读它——
+这个反馈回路就是库越用越懂你的机制。
+
+文件按内容寻址(sha256)。每一处摆放(folder + display_name)各自有
+独立的 AI 字段(catalog / extra / tags),所以同一份 PDF 在
+`/工作` 和 `/研究` 下可以有完全不同的解读。
+
+## 快速开始
 
 ```bash
-# 1. 安装
 python -m venv .venv
 source .venv/Scripts/activate            # Windows: .venv\Scripts\activate
 pip install -e ".[dev]"
 
-# 2. 初始化工作目录（在你想放笔记的地方）
 mkdir my-library && cd my-library
-marginalia init                           # 生成 .env / data/ / .marginalia/
+marginalia init                          # 生成 .env / data/ / .marginalia/
 # 编辑 .env 填 LLM_DEFAULT_API_KEY
 alembic upgrade head
 
-# 3. 打开 marginalia
 marginalia
 marginalia> /upload paper.pdf /
-marginalia> 帮我对比 Raft 和 Paxos
+marginalia> 比较一下 raft 和 paxos
 ```
 
-`marginalia` 一个命令进程通吃——server、worker、CLI 都在同一进程
-里，跟 Claude Code、DeepSeek TUI 同样的形态。不用开两个终端。
+`marginalia` 命令是单进程——server / worker / CLI 全在里面,不需要开
+第二个终端。
 
-默认情况下你的文件以真实的文件夹树存在
-`~/Marginalia/library/research/llm/paper.pdf`，可以在 Finder 里浏览、用
-`rsync` 或 `git` 备份、用任何编辑器修改——这个文件夹**就是**你的库，
-marginalia 只是给它建索引。在 marginalia 之外动过文件后，跑 `/check`
-看差异、`/ingest --all` 同步 db 和磁盘。要把整套（db + library + 缓存）
-搬到别处，设 `MARGINALIA_HOME=/some/path` 即可。
+默认你的文件以真实文件夹形式存在 `~/Marginalia/library/...` 下。可以
+在 Finder 里浏览、用 `rsync` / `git` 备份、用任何编辑器修改——库就是
+你的文件夹,marginalia 只负责索引。在 marginalia 之外改了文件后,跑
+`/check` 看 diff,`/ingest --all` 同步。
 
-只有当你想多机共享同一个知识库（笔记本 + 台式机）时，才把 server
-拆出来跑成独立进程，CLI 通过 `--server URL` 连过去。见下文"部署
-形态"。
+`MARGINALIA_HOME=/some/path` 把整个目录(db + library + cache)挪到
+任意位置。
 
-## CLI 长这样
+## CLI
 
-`marginalia` 是 Claude Code 风格的 REPL。`/` 开头是 slash 命令，其他
-内容直接转给 agent 当对话。
+`marginalia` 是 Claude-Code 风格的 REPL。`/` 开头是 slash 命令,其他
+内容直接发给 agent。
 
 ```
-/help                                  列出所有命令
-/upload <本地> <远端>                  从 vault 外把文件拷进 vault
-/upload "<含空格的路径>" "<远端>"       含空格的路径都加引号（本地、远端都一样）
-/check                                  对比 vault 磁盘和 db 的差异（只读）
-/ingest <vault_path>                    把 vault 内某个文件同步到 db
-/ingest --all                           整个 vault 一次性同步（git add -A 风格）
-/discover <entry_id> [N] [--all]        展示语料里跟这个文件关联的其它文件（随机游走；--all = 包含未审核边）
-/tree                                  文件夹树
-/ls [parent_id]                        列子文件夹
-/cd <path>                             切换"远端 cwd"，影响 /upload 的相对路径
-/search <q>                            按文件名 + 摘要召回
-/info <entry_id>                       用户可见 metadata + 一句话摘要
-/download <entry_id|folder_id>         文件 → 字节流；文件夹 → zip
-/export [<conv_id>]                    把对话 + 引用文件打包成 zip
-/on-conflict rename|error|skip         切换重名策略
-/clear / /new                          关闭 / 开启对话 session
+/help                           列出所有命令
+/upload <local> <remote>        从外部拷文件进库
+/check                          对比磁盘和 db(只读)
+/ingest <vault_path>            同步单个文件
+/ingest --all                   同步整个库
+/discover <entry_id> [N]        查看语料库为它链接到的 entry
+/tree                           文件夹树
+/ls [parent_id]                 列文件夹
+/cd <path>                      切换"远端 cwd"(用于相对路径上传)
+/search <query>                 按文件名 + summary 召回
+/info <entry_id>                查看 entry 的用户可见 metadata + summary
+/download <entry_id|folder_id>  文件 → 字节;文件夹 → zip
+/export [<conv_id>]             把对话 + 引用打包成 zip
+/on-conflict rename|error|skip  设置重名策略
+/clear  /  /new                 结束 / 开始 chat session
 /quit
 ```
 
-跟 agent 对话时不是死等的 spinner——是带状态反馈的事件流：
+一次对话 turn 渲染成事件流:
 
 ```
-marginalia> 帮我对比 Raft 和 Paxos
-⠋ 制定调查计划...
-⠋ 调用 search_journal(q="raft consensus")
-⠋ 调用 read_files(entry_id=...)
-⠋ 调查员思考中...
-✓ 回答已就绪
+marginalia> 比较一下 raft 和 paxos
+⠋ planning the investigation...
+⠋ calling search_journal(q="raft consensus")
+⠋ calling read_files(entry_id=...)
+⠋ investigator thinking...
+✓ answer ready
 
 # Raft vs Paxos
-Raft 把 Paxos 拆成了三个相对独立的子问题...
+Raft 把 Paxos 拆成三个相对独立的子问题……
 [^a]: entry_id=...
 
   [tokens in=3300 out=340 tools=2 llm_calls=3 4521ms]
 ```
 
-## 架构一句话概括
+## 架构
+
+**14 张表,4 层**:
 
 ```
-五层数据：
-  audit_events            数据变化事件流（仅人类审计）
-  sessions/conversations  容器 + 累计指标
-  AI-internal             catalogs / tags / journal / entry_relations
-  user-visible            folders / file_entries / files
-  基础设施                tasks / task_outcomes
+audit_events                — 事件流(90 天滚动)
+sessions / conversations    — 容器 + 累计指标
+catalogs / views / tags /   — AI 内部:图书馆员的工作知识
+  tag_aliases / entry_tags /  (用户看不到这层)
+  entry_relations / journal
+folders / file_entries /    — 用户可见
+  files
+tasks / task_outcomes       — 基础设施
 ```
 
-```
-三个 LLM 角色：
-  🔍 investigator  在线 agent — 翻 journal、调工具、回答
-  🏛 librarian     离线 batch — ingest / normalize_tags / restructure...
-  📋 reflector     每轮对话后 — 写 journal 给将来的自己用
-```
+**11 种任务,13 个 agent 工具,8 条 ingest pipeline**:
+
+- text / pdf(含扫描件 OCR via VLM)/ image(VLM 缩放)
+- docx / spreadsheet / log(含 logrotate 变种)
+- archive(zip / tar.* / 7z / rar / .gz / .bz2 / .xz / iso / cab,50+ 种 via py7zz)
+
+### Discovery(减少 agent 循环次数)
+
+调查员一旦找到一个相关 entry,discovery 层立即把可能的邻居塞给它——
+下一步不需要再烧一轮 search + read_files。三个 miner + 一个 LLM 关卡
+喂养 `entry_relations`;random walk 服务消费 vetted 后的图;结果预填
+进 search 和 metadata 响应。
 
 ```
-14 个 task / 12 个 agent 工具 / 8 条 ingest pipeline
-  text / pdf（含扫描版 PDF 走 VLM OCR）/ image（VLM 输入自动下采样）
-  docx / spreadsheet / log（含 logrotate 变体）
-  archive（zip / tar.* / 7z / rar / .gz / .bz2 / .xz / iso / cab，py7zz 50+ 格式）
-```
-
-### 发现层（缩短 agent loop）
-
-agent 找到一份相关文件之后，发现层立刻把它的"邻居"喂回来——
-不用再跑一轮 search + read_files 才能找到相邻材料。三个挖掘 task
-从不同信号写 `entry_relations`，一个 LLM gate（vet_relations）做
-语义审核，随机游走服务消费**已审核**的图，结果直接预填进 search /
-get_metadata 的响应里——agent 完全不用决策。
-
-```
-mine_session_cooccurrence    journal note 把 X 和 Y 归在同一会话里
-mine_tag_overlap             Jaccard ≥ 0.30 且共享 tag ≥ 2
-mine_citation_graph          X 和 Y 在同一个 agent 回答里被一起引用
+mine_session_cooccurrence    journal 里 X 和 Y 在同一对话中被提及
+mine_tag_overlap             Jaccard ≥ 0.30 且共享 ≥ 2 个 tag
+mine_citation_graph          X 和 Y 在同一 agent 答案中被同时引用
                 ↓
-       entry_relations (原始信号，按 source_kind 区分)
+       entry_relations(原始,带 source_kind)
                 ↓
-   vet_relations              LLM gate——读两端 summary + tag + 信号
-                              来源，判定 vetted=True/False；记录
-                              observation_count 快照用于增长后重审
+   vet_relations              LLM 关卡,逐对判断 → vetted=True/False
                 ↓
-       entry_relations.vetted=True（干净图）
+       entry_relations.vetted=True(干净的图)
                 ↓
-   services.recommend.find_related   随机游走 + 重启 (alpha=0.15)
+   services.recommend.find_related   带重启的 random walk,alpha=0.15
                 ↓
-   /discover <entry_id>           CLI 入口给用户用
-   search/get_metadata.related_entries
-                                  自动在响应里预填 top-3 / top-8 邻居，
-                                  agent 不用调任何工具就能看到
+   /discover <entry_id>            CLI 入口
+   search/get_metadata.related_entries   预填 top-3 / top-8
 ```
 
-四个挖掘 + vet 都在 `/tend` 链里夜里跑；随机游走和预填是查询时算法，只读。
+Miner + vet 由 periodic dispatcher 驱动(默认每天;`/tend` 也会触发)。
+Random walk 是查询时的只读操作。
 
-完整设计见 [`design.md`](design.md)。架构概览随 samples 一起：
-`samples/architecture.md`。
+完整设计见 [`DESIGN.md`](DESIGN.md)。
 
 ## API
 
-REST 端点全部在 `/v1/` 前缀下：
+业务 endpoint 全在 `/v1/`:
 
 ```
-POST /v1/upload                         上传文件
-GET  /v1/folders                        文件夹树
-GET  /v1/file-entries/{id}/...          单文件操作
-GET  /v1/search                         元数据召回
-POST /v1/sessions                       开 session
-POST /v1/chat/{session_id}              聊天（SSE 流）
-POST /v1/sessions/{id}/close            关 session
-GET  /v1/conversations/{id}/export      导出对话 zip
-GET  /health                            探活（不带 v1，监控惯例）
+POST /v1/upload                        上传文件
+GET  /v1/folders                       文件夹树
+GET  /v1/file-entries/{id}/...         单文件操作
+GET  /v1/search                        metadata 召回
+POST /v1/sessions                      开 chat session
+POST /v1/chat/{session_id}             chat(SSE 流)
+POST /v1/sessions/{id}/close
+GET  /v1/conversations/{id}/export     导出对话 zip
+GET  /health                           liveness probe(无版本)
 ```
 
-`POST /v1/chat/{session_id}` 返回 `text/event-stream`，事件类型：
+`POST /v1/chat/{session_id}` 返回 `text/event-stream`。事件:
 `conversation` / `planning` / `plan` / `thinking` / `tool_call` /
-`tool_result` / `answer` / `error` / `done`。这是 CLI 状态机渲染的
-基础。
+`tool_result` / `answer` / `error` / `done`。CLI 状态机就是按这些事件
+渲染的。
 
 ## 配置
 
-所有设置走 `.env`。重点：
+`.env`:
 
 ```ini
-MARGINALIA_HOME=~/Marginalia     # 单一根目录；db + library + objects 都在这下面
+MARGINALIA_HOME=~/Marginalia     # 一个根目录;db + library + objects 都在这下面
 DB_BACKEND=sqlite                # 或 postgres
 SQLITE_PATH=                     # 留空 → <home>/marginalia.db
 
-STORAGE_BACKEND=mirror           # 默认。用户可读的文件夹树
-                                 # <home>/library/research/llm/paper.pdf
-                                 # 配合 /check 和 /ingest 跟磁盘双向同步。
-                                 # 备选：'local'（UUID 散列、开 dedup、高 churn
-                                 # 场景下快约 5 倍），'s3'（多机部署）。
+STORAGE_BACKEND=mirror           # 默认。文件以可读文件夹形式存:
+                                 #   <home>/library/research/llm/paper.pdf
+                                 # 备选:'local'(UUID 扁平,dedup,
+                                 # 高频改写场景快约 5 倍)/ 's3'
 MIRROR_VAULT_ROOT=               # 留空 → <home>/library
-LOCAL_STORAGE_ROOT=              # 留空 → <home>/objects（仅 local 用）
+LOCAL_STORAGE_ROOT=              # 留空 → <home>/objects(仅 local 用)
 
-WORKER_ENABLED=true              # embedded 模式默认；TaskRunner 跑在 CLI/server 进程内
+WORKER_ENABLED=true              # embedded 模式默认开
 
 LLM_DEFAULT_PROVIDER=openai      # 或 anthropic
 LLM_DEFAULT_API_KEY=sk-...
 LLM_DEFAULT_MODEL=gpt-4o-mini
-# 5 个 profile 的覆盖项（chat / reflect / ingest / vision / audio）：
 LLM_REFLECT_MODEL=gpt-4o
 LLM_VISION_MODEL=gpt-4o
 
-# 多机模式专用
-MARGINALIA_SERVER=               # 不空 = remote 模式，跳过 embedded
+MARGINALIA_SERVER=               # 非空 = 远程模式,跳过 embedded
 ```
 
-OpenAI-compatible 端点（Together、Groq、DeepSeek、本地 vLLM / ollama）
-通过 `LLM_*_BASE_URL` 支持。
+OpenAI 兼容 endpoint(Together / Groq / DeepSeek / 本地 vLLM / ollama)
+通过 `LLM_*_BASE_URL` 切换。
 
 ## 部署形态
 
-**默认（embedded）**：`marginalia` 一启动，FastAPI app + TaskRunner 都
-在同一进程里。HTTP 不出进程，`httpx.ASGITransport` 直接调 ASGI 函数。
-99% 的使用场景就是这样。
+**默认(embedded)**:`marginalia` 在自己进程里挂 FastAPI + TaskRunner。
+HTTP 不经过 socket——`httpx.ASGITransport` 直接调 ASGI app。99% 场景
+应该用这个。
 
 ```
    ┌──────────────────────────────────────┐
@@ -214,64 +210,66 @@ OpenAI-compatible 端点（Together、Groq、DeepSeek、本地 vLLM / ollama）
    └──────────────────────────────────────┘
 ```
 
-**多机共享**（可选）：把 server 拆成独立进程，CLI 通过 HTTP 连过去。
-SQLite 同时只能被一个进程写——多机请用 Postgres。
+**多机部署**(可选):server 拆成独立进程,CLI 通过 HTTP 连。SQLite
+同时只允许一个写进程——多机部署用 Postgres。
 
 ```
    ┌─────────────┐         ┌──────────────────┐
    │  marginalia │   HTTP  │  uvicorn server  │
    │     CLI     ├────────►│  marginalia.main │  (WORKER_ENABLED=true)
    └─────────────┘         └────────┬─────────┘
-                                    │  共享 Postgres + 对象存储
-                                    │
-                            其他客户端连同一 server
+                                    │  共享 Postgres + storage
 ```
-
-启动远端 server：
 
 ```bash
 uvicorn marginalia.main:app --host 0.0.0.0 --port 8000
-# CLI 端：
 marginalia --server http://server.lan:8000
-# 或写到 ~/.marginalia/.env：
-MARGINALIA_SERVER=http://server.lan:8000
+# 或写入持久配置: MARGINALIA_SERVER=http://server.lan:8000 -> ~/.marginalia/.env
 ```
+
+### Docker
+
+`docker-compose.yml` 启动 api + worker + Postgres + MinIO:
+
+```bash
+echo "LLM_DEFAULT_API_KEY=sk-..." > .env
+docker compose up -d
+marginalia --server http://localhost:8000
+```
+
+Compose 在 api 启动时跑 `alembic upgrade head`,通过一次性 init
+容器创建 MinIO bucket。卷(`pgdata` / `miniodata` / `margdata`)
+跨重启持久化。
 
 ## 开发
 
 ```bash
-# 跑单个 e2e 测试
 .venv/Scripts/python tests/test_agent_e2e.py
-
-# 跑所有 e2e（35 个）
 for t in tests/test_*_e2e.py; do .venv/Scripts/python "$t"; done
 ```
 
-35 个 e2e 测试覆盖：upload / ingest / reflect / dispatcher / purge /
-normalize_tags / enrich_tags / lifecycle / restructure / agent runtime /
-agent tools / user mgmt / CLI / image pipeline / user files / export /
-pdf / pdf-with-images / pdf-OCR / duckdb tools / worker daemon /
-mine_corpus_evidence / mine_session_cooccurrence / mine_tag_overlap /
-mine_citation_graph / vet_relations / related_entries 预填 /
-discover（random walk）/ propose_views / refresh_entry_extra /
-container / git repo / compression / archive / office (docx + spreadsheet) /
-mirror / storage migrate / scan + sync / cli upgrade。
+35 个 e2e 测试覆盖整个栈——upload / ingest / reflect / dispatcher /
+purge / normalize_tags / enrich_tags / lifecycle / restructure /
+agent runtime / agent tools / CLI / image / pdf / pdf-OCR / docx /
+spreadsheet / container / git / archive pipeline / mirror 存储 /
+scan + sync / discovery。
 
 ## 状态
 
-V1 端到端功能完整，但未在真实数据规模上压测。已知边界：
+v1:端到端可用,尚未对真实世界数据做硬化。
 
-- 没有语义 / embedding 检索。召回靠 name + summary + tags + FTS5，
-  外加 `entry_relations` 上的随机游走发现层（cooccurrence + tag-overlap +
-  citation graph 三种信号合流）。对个人库够用；如果你需要向量检索请另寻方案
-- 音视频文件能接收但还没 pipeline，语音转写排在未来 cycle
+已知缺口:
 
-## 许可证
+- 没有语义 / embedding 检索。召回靠文件名 + summary + tags + ingest
+  文本的 FTS5 + entry_relations 上的 random walk discovery。个人知识
+  库够用;不是向量检索的替代品。
+- 音视频文件能上传但没有 pipeline。语音转写是未来的工作。
+
+## License
 
 Copyright (c) 2026 shenmintao
 
-Marginalia 采用 GNU Affero General Public License v3.0 或更新版本
-(AGPL-3.0-or-later) 授权。完整条款见 [LICENSE](LICENSE)。
+AGPL-3.0-or-later。完整条款见 [LICENSE](LICENSE)。
 
-如果你以网络服务形式运行 Marginalia 的修改版本，AGPL 要求你必须向
-使用该服务的用户提供对应源码。
+如果你以网络服务的形式运行修改过的 Marginalia,AGPL 要求你向你的用户
+公开对应源码。

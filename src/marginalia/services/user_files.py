@@ -1,4 +1,4 @@
-"""User-facing file operations — design.md §14.3 user view boundary.
+"""User-facing file operations — DESIGN.md §14.3 user view boundary.
 
 Three user-side capabilities:
   - search_entries(query):     find entries by free-text in user fields +
@@ -154,7 +154,7 @@ async def get_user_metadata(
             entry.updated_at.isoformat() if entry.updated_at else None
         ),
         # The "label card" — the librarian's one-line summary is shown to
-        # the user even though it is technically AI-written. design.md
+        # the user even though it is technically AI-written. DESIGN.md
         # §14.3 #4 carves this out as the legitimate cross-boundary view.
         "summary": file_row.summary,
         "preview": _description_preview(file_row.description),
@@ -170,7 +170,7 @@ def _description_preview(
     """Render the first few section summaries from `file_row.description`
     so `/info` can show what the file is *about* without a separate
     download. The librarian's section summaries are AI-written but the
-    same boundary carve-out as `summary` applies (design.md §14.3 #4).
+    same boundary carve-out as `summary` applies (DESIGN.md §14.3 #4).
 
     Returns up to `max_sections` `{title, summary}` pairs. Truncates each
     summary at `max_chars` so a verbose section can't blow up the panel.

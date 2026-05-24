@@ -1,4 +1,4 @@
-"""read_catalog — design.md §10.1.
+"""read_catalog — DESIGN.md §10.1.
 
 Returns a catalog node's full metadata + its direct children + sample
 entries linked to this node directly.

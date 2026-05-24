@@ -1,4 +1,4 @@
-"""task_outcomes — design.md §8.4.
+"""task_outcomes — DESIGN.md §8.4.
 
 Scheduling-side fact table. Records "what did task X do to object Y when?"
 so handlers can answer idempotence / recency questions WITHOUT reading

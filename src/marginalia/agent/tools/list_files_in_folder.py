@@ -1,4 +1,4 @@
-"""list_files_in_folder — design.md §10.1.
+"""list_files_in_folder — DESIGN.md §10.1.
 
 Lists live entries inside a folder. Returns minimal fields the agent needs
 to decide which entry to dive deeper on.

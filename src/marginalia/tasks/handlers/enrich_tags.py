@@ -1,4 +1,4 @@
-"""enrich_tags — design.md §9.1 + §9.4 + §14.
+"""enrich_tags — DESIGN.md §9.1 + §9.4 + §14.
 
 LLM-driven gap filler. Walks active entries that haven't been enriched
 recently and asks the LLM to pick additional tags FROM THE EXISTING
@@ -30,7 +30,7 @@ Writes:
   - record_outcome per entry (outcome='applied' if any tag added, 'noop'
     if nothing new) + one final summary row with object_kind='global'.
 
-design.md §14.3 forbids reading audit_events for business logic (including
+DESIGN.md §14.3 forbids reading audit_events for business logic (including
 recency / idempotence). All scheduling decisions read task_outcomes.
 """
 from __future__ import annotations
@@ -183,7 +183,7 @@ async def _select_candidates(*, cutoff: datetime, limit: int) -> list[dict[str, 
 
     "Recently enriched" is detected by a task_outcomes row with
     task_kind='enrich_tags', object_kind='file_entry', object_id=<entry_id>,
-    completed_at >= cutoff. design.md §14.3 forbids reading audit_events
+    completed_at >= cutoff. DESIGN.md §14.3 forbids reading audit_events
     for business logic.
     """
     async with session_scope() as session:

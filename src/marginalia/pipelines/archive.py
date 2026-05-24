@@ -1,4 +1,4 @@
-"""ArchivePipeline (design.md §11.4 — unified archive model).
+"""ArchivePipeline (DESIGN.md §11.4 — unified archive model).
 
 Replaces the old ContainerPipeline. Treats every archive shape as the
 same thing: zip / tar / tar.* / 7z / rar / .gz / .bz2 / .xz / iso / cab.

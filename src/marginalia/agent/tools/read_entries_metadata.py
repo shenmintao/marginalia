@@ -1,4 +1,4 @@
-"""read_entries_metadata — design.md §10.1.
+"""read_entries_metadata — DESIGN.md §10.1.
 
 Batch-fetches full metadata for a set of entry_ids and automatically attaches
 `related_entries` derived from entry_relations (top by observation_count).

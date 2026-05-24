@@ -1,6 +1,6 @@
 """Upload service: streaming sha256 + dedup + auto folder + name-conflict policy.
 
-Implements design.md §12.1 end-to-end. The route handler hands us:
+Implements DESIGN.md §12.1 end-to-end. The route handler hands us:
   - an async byte stream of the user's bytes
   - a fallback display_name (the local basename, used if remote path didn't
     specify one)

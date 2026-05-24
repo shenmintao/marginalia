@@ -1,4 +1,4 @@
-"""Pipeline contract (design.md §11.2).
+"""Pipeline contract (DESIGN.md §11.2).
 
 Pipelines are pure: they read bytes via storage, call the LLM, and
 return a `PipelineResult`. They never touch the DB — the handler does

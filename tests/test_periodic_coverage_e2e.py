@@ -40,7 +40,7 @@ from marginalia.tasks.kinds import (
 )
 
 
-# Kinds that the README and design.md describe as running on their own schedule.
+# Kinds that the README and DESIGN.md describe as running on their own schedule.
 # Source of truth lives here; if you change one, the dispatcher_e2e test will
 # also pick up the change automatically.
 EXPECTED_PERIODIC = {

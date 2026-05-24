@@ -1,4 +1,4 @@
-"""User-triggered maintenance pass — design.md §9 / §16.1.
+"""User-triggered maintenance pass — DESIGN.md §9 / §16.1.
 
 `POST /v1/tend` enqueues a one-shot run of the librarian's maintenance
 chain (tag_quality → restructure_catalogs → mine_relations →

@@ -1,4 +1,4 @@
-"""file_entry user-side service — design.md §14.1.
+"""file_entry user-side service — DESIGN.md §14.1.
 
 Operations:
   - rename_entry         change display_name (with on_conflict policy)

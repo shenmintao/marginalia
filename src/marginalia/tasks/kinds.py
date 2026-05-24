@@ -28,7 +28,7 @@ def registered_kinds() -> list[str]:
     return sorted(_REGISTRY)
 
 
-# 14 kinds: 13 business + 1 dispatcher (design.md §9.1).
+# 14 kinds: 13 business + 1 dispatcher (DESIGN.md §9.1).
 # Adding a new kind = registering a handler; this list is informational.
 
 # Online (user is waiting) ----------------------------------------------------
@@ -94,7 +94,7 @@ DEFAULT_PRIORITIES: Mapping[str, int] = {
 }
 
 
-# Periodic kinds and their re-enqueue intervals (design.md §9.3).
+# Periodic kinds and their re-enqueue intervals (DESIGN.md §9.3).
 # `periodic_tick` itself is not listed (it self-schedules every 10 min).
 # `summarize_session` is also not listed: it's per-session, dispatched in
 # periodic_tick._dispatch_summarize_sessions with dedup_key=f"...:{sid}".

@@ -1,4 +1,4 @@
-"""Agent runtime — design.md §10.2 + §12.2.
+"""Agent runtime — DESIGN.md §10.2 + §12.2.
 
 Plan-Execute loop, exposed as async generator yielding AgentEvent frames
 for SSE streaming. One `run_turn(session_id, user_message)` invocation:

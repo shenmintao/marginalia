@@ -1,4 +1,4 @@
-"""AI-internal recall layer: entry_relations, journal (design.md §8.3 — last 2).
+"""AI-internal recall layer: entry_relations, journal (DESIGN.md §8.3 — last 2).
 
 Written by 🔍 investigator (reflect_turn only). The agent reads journal at
 the start of each turn ("flip through my notebook") and reads entry_relations
