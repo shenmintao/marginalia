@@ -28,10 +28,12 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import AsyncIterator, Literal
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from marginalia.db.models import AuditEvent, EntryTag, File, FileEntry
+from marginalia.repositories import entries as entries_repo
+from marginalia.repositories import entry_tags as entry_tags_repo
+from marginalia.repositories import files as files_repo
 from marginalia.services.folders import (
     AmbiguousRemotePathError,
     parse_remote_folder,
@@ -107,24 +109,12 @@ def _split_extension(name: str) -> tuple[str, str]:
     return stem, f".{ext}"
 
 
-def _folder_clause(folder_id: str | None):
-    if folder_id is None:
-        return FileEntry.folder_id.is_(None)
-    return FileEntry.folder_id == folder_id
-
-
 async def _existing_entry_with_name(
     session: AsyncSession, folder_id: str | None, name: str
 ) -> FileEntry | None:
-    return (
-        await session.execute(
-            select(FileEntry).where(
-                _folder_clause(folder_id),
-                FileEntry.display_name == name,
-                FileEntry.deleted_at.is_(None),
-            )
-        )
-    ).scalar_one_or_none()
+    return await entries_repo.find_live_by_folder_and_name(
+        session, folder_id, name,
+    )
 
 
 async def _resolve_display_name(
@@ -220,9 +210,7 @@ async def upload(
     is_mirror = isinstance(storage, MirrorStorage)
 
     if not is_mirror:
-        existing_file = (
-            await session.execute(select(File).where(File.sha256 == sha256))
-        ).scalar_one_or_none()
+        existing_file = await files_repo.get_by_sha256(session, sha256)
         if existing_file is not None:
             await storage.delete(storage_key)
             return await _create_dedup_entry(
@@ -351,14 +339,7 @@ async def _create_dedup_entry(
     now: datetime,
 ) -> UploadResult:
     """sha256 already exists. Find a seed entry, copy AI fields, INSERT new entry."""
-    seed = (
-        await session.execute(
-            select(FileEntry)
-            .where(FileEntry.file_id == file.id, FileEntry.deleted_at.is_(None))
-            .order_by(FileEntry.created_at)
-            .limit(1)
-        )
-    ).scalar_one_or_none()
+    seed = await entries_repo.find_seed_by_file_id(session, file.id)
 
     final_name, auto_renamed = await _resolve_display_name(session, folder_id, desired_name)
     entry = FileEntry(
@@ -378,11 +359,7 @@ async def _create_dedup_entry(
     await session.flush()
 
     if seed is not None:
-        seed_tags = (
-            await session.execute(
-                select(EntryTag.tag_id).where(EntryTag.entry_id == seed.id)
-            )
-        ).scalars().all()
+        seed_tags = await entry_tags_repo.list_tag_ids_for_entry(session, seed.id)
         for tag_id in seed_tags:
             session.add(
                 EntryTag(

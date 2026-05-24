@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from marginalia.db.models import Session as SessionRow
 from marginalia.db.session import get_session
-from marginalia.services import sessions as session_service
+from marginalia.repositories import sessions as session_service
 
 router = APIRouter(tags=["sessions"])
 

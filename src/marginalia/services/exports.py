@@ -22,10 +22,10 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from marginalia.db.models import Conversation, File, FileEntry
+from marginalia.db.models import Conversation
+from marginalia.repositories import entries as entries_repo
 from marginalia.services.user_files import get_user_metadata
 
 
@@ -126,17 +126,7 @@ async def build_export_plan(
     # resolve live entry_ids referenced by citations
     entry_ids = list({c.entry_id for c in plan.citations})
     if entry_ids:
-        rows = (
-            await session.execute(
-                select(FileEntry, File)
-                .join(File, File.id == FileEntry.file_id)
-                .where(
-                    FileEntry.id.in_(entry_ids),
-                    FileEntry.deleted_at.is_(None),
-                    File.deleted_at.is_(None),
-                )
-            )
-        ).all()
+        rows = await entries_repo.list_live_with_file_by_ids(session, entry_ids)
         live_by_id = {e.id: (e, f) for e, f in rows}
         # Also fetch metadata blobs (in user-visible shape).
         for eid in entry_ids:

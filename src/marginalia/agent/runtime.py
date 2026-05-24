@@ -61,7 +61,7 @@ from marginalia.llm import (
     ToolUseBlock,
     get_chat_client,
 )
-from marginalia.services import sessions as session_service
+from marginalia.repositories import sessions as session_service
 from marginalia.repositories.task_outcomes import record_outcome
 from marginalia.tasks.enqueue import enqueue
 from marginalia.tasks.kinds import KIND_REFLECT_TURN

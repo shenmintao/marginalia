@@ -19,10 +19,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, AsyncIterator
 
-from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from marginalia.db.models import File, FileEntry, Folder
+from marginalia.repositories import entries as entries_repo
+from marginalia.repositories import folders as folders_repo
 from marginalia.storage import get_storage
 from marginalia.storage.base import StorageBackend
 
@@ -69,23 +70,7 @@ async def search_entries(
     limit = max(1, min(limit, SEARCH_LIMIT_MAX))
     like = f"%{q}%"
 
-    rows = (
-        await session.execute(
-            select(FileEntry, File)
-            .join(File, File.id == FileEntry.file_id)
-            .where(
-                FileEntry.deleted_at.is_(None),
-                File.deleted_at.is_(None),
-                or_(
-                    FileEntry.display_name.ilike(like),
-                    File.summary.ilike(like),
-                    File.original_ext.ilike(like),
-                ),
-            )
-            .order_by(FileEntry.updated_at.desc())
-            .limit(limit)
-        )
-    ).all()
+    rows = await entries_repo.search_with_file(session, like=like, limit=limit)
 
     out: list[dict[str, Any]] = []
     for entry, file_row in rows:
@@ -143,17 +128,7 @@ async def get_user_metadata(
     *,
     entry_id: str,
 ) -> dict[str, Any]:
-    pair = (
-        await session.execute(
-            select(FileEntry, File)
-            .join(File, File.id == FileEntry.file_id)
-            .where(
-                FileEntry.id == entry_id,
-                FileEntry.deleted_at.is_(None),
-                File.deleted_at.is_(None),
-            )
-        )
-    ).first()
+    pair = await entries_repo.get_live_with_file(session, entry_id)
     if pair is None:
         raise EntryNotFoundError(entry_id)
     entry, file_row = pair
@@ -227,17 +202,7 @@ async def open_for_download(
     entry_id: str,
     storage: StorageBackend | None = None,
 ) -> DownloadHandle:
-    pair = (
-        await session.execute(
-            select(FileEntry, File)
-            .join(File, File.id == FileEntry.file_id)
-            .where(
-                FileEntry.id == entry_id,
-                FileEntry.deleted_at.is_(None),
-                File.deleted_at.is_(None),
-            )
-        )
-    ).first()
+    pair = await entries_repo.get_live_with_file(session, entry_id)
     if pair is None:
         raise EntryNotFoundError(entry_id)
     entry, file_row = pair
@@ -278,14 +243,9 @@ async def collect_folder_entries(
     rel_paths: dict[str, str] = {root.id: ""}
     frontier = [root.id]
     while frontier:
-        children = (
-            await session.execute(
-                select(Folder).where(
-                    Folder.parent_id.in_(frontier),
-                    Folder.deleted_at.is_(None),
-                )
-            )
-        ).scalars().all()
+        children = await folders_repo.list_live_children_of_many(
+            session, frontier,
+        )
         if not children:
             break
         next_frontier: list[str] = []
@@ -298,18 +258,7 @@ async def collect_folder_entries(
     folder_ids = list(rel_paths.keys())
     if not folder_ids:
         return []
-    rows = (
-        await session.execute(
-            select(FileEntry, File)
-            .join(File, File.id == FileEntry.file_id)
-            .where(
-                FileEntry.folder_id.in_(folder_ids),
-                FileEntry.deleted_at.is_(None),
-                File.deleted_at.is_(None),
-            )
-            .order_by(FileEntry.folder_id, FileEntry.display_name)
-        )
-    ).all()
+    rows = await entries_repo.list_live_with_file_in_folders(session, folder_ids)
 
     result: list[tuple[str, FileEntry, File]] = []
     for entry, file_row in rows:

@@ -13,13 +13,17 @@ creating it (which they did, by naming it in the path).
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from marginalia.db.models import AuditEvent, Folder
+from marginalia.repositories import folders as folders_repo
 from marginalia.utils.ids import new_id
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 class AmbiguousRemotePathError(ValueError):
@@ -48,23 +52,23 @@ def split_remote_path(
     """Split `<remote>` into (folder_segments, display_name).
 
     Rules (Cycle 12 final):
-      1. trailing "/"               → ALL segments are folders. display_name = None
+      1. trailing "/"               -> ALL segments are folders. display_name = None
                                        (caller falls back to local basename).
-      2. last segment contains "."  → folders = parts[:-1], display_name = last.
+      2. last segment contains "."  -> folders = parts[:-1], display_name = last.
       3. otherwise (no "." AND no trailing "/"):
-         - if `display_name_override` given → folders = ALL parts, display_name = override
-         - else                              → AmbiguousRemotePathError
+         - if `display_name_override` given -> folders = ALL parts, display_name = override
+         - else                              -> AmbiguousRemotePathError
 
     The third rule resolves git-style ambiguity (LICENSE, Dockerfile, .env in
     the middle of a path): the client must EITHER mark the path as a folder
     with a trailing slash, OR pass an explicit display_name parameter.
 
     Examples:
-        ("/a/b/")                          → (["a","b"], None)
-        ("/a/b")                           → AmbiguousRemotePathError
-        ("/a/b", display_name_override=X)  → (["a","b"], X)
-        ("/a/b/foo.pdf")                   → (["a","b"], "foo.pdf")
-        ("")                               → ([], None)
+        ("/a/b/")                          -> (["a","b"], None)
+        ("/a/b")                           -> AmbiguousRemotePathError
+        ("/a/b", display_name_override=X)  -> (["a","b"], X)
+        ("/a/b/foo.pdf")                   -> (["a","b"], "foo.pdf")
+        ("")                               -> ([], None)
     """
     s = (remote or "").strip()
     if not s or s == "/":
@@ -76,15 +80,12 @@ def split_remote_path(
         return [], display_name_override
 
     if trailing_slash:
-        # path is purely a folder. display_name override still wins.
         return parts, display_name_override
 
     last = parts[-1]
     if "." in last:
-        # last segment looks like a filename. Override wins if both given.
         return parts[:-1], (display_name_override or last)
 
-    # ambiguous: no dot, no trailing slash
     if display_name_override is not None:
         return parts, display_name_override
     raise AmbiguousRemotePathError(remote)
@@ -100,7 +101,7 @@ def parse_remote_folder(remote: str) -> list[str]:
 
 
 async def resolve_or_create_folder(
-    session: AsyncSession, segments: list[str]
+    db: AsyncSession, segments: list[str]
 ) -> Folder | None:
     """Walk / create the folder chain. Returns the deepest folder (or None for root).
 
@@ -109,27 +110,23 @@ async def resolve_or_create_folder(
     """
     if not segments:
         return None
-
     parent: Folder | None = None
     for name in segments:
-        parent = await _find_or_create_child(session, parent, name)
+        parent = await _find_or_create_child(db, parent, name)
     return parent
 
 
 async def _find_or_create_child(
-    session: AsyncSession, parent: Folder | None, name: str
+    db: AsyncSession, parent: Folder | None, name: str
 ) -> Folder:
     parent_id = parent.id if parent is not None else None
-    stmt = select(Folder).where(
-        Folder.parent_id.is_(parent_id) if parent_id is None else Folder.parent_id == parent_id,
-        Folder.name == name,
-        Folder.deleted_at.is_(None),
+    existing = await folders_repo.find_child_by_name(
+        db, parent_id=parent_id, name=name,
     )
-    existing = (await session.execute(stmt)).scalar_one_or_none()
     if existing is not None:
         return existing
 
-    now = datetime.now(timezone.utc)
+    now = _utcnow()
     folder = Folder(
         id=new_id(),
         parent_id=parent_id,
@@ -137,49 +134,27 @@ async def _find_or_create_child(
         created_at=now,
         updated_at=now,
     )
-    session.add(folder)
-    await session.flush()
+    db.add(folder)
+    await db.flush()
     await AuditEvent.append(
-        session,
-        kind="folder_created",
-        payload={
-            "folder_id": folder.id,
-            "parent_id": parent_id,
-            "name": name,
-            "auto_created": True,
+        db, kind="folder_created", payload={
+            "folder_id": folder.id, "parent_id": parent_id,
+            "name": name, "auto_created": True,
         },
     )
     return folder
 
 
-async def list_root_folders(session: AsyncSession) -> list[Folder]:
-    return await _list_children(session, None)
+async def list_root_folders(db: AsyncSession) -> list[Folder]:
+    return await folders_repo.list_children(db, None)
 
 
-async def list_child_folders(session: AsyncSession, parent_id: str) -> list[Folder]:
-    return await _list_children(session, parent_id)
+async def list_child_folders(db: AsyncSession, parent_id: str) -> list[Folder]:
+    return await folders_repo.list_children(db, parent_id)
 
 
-async def _list_children(
-    session: AsyncSession, parent_id: str | None
-) -> list[Folder]:
-    stmt = (
-        select(Folder)
-        .where(
-            Folder.parent_id.is_(None) if parent_id is None else Folder.parent_id == parent_id,
-            Folder.deleted_at.is_(None),
-        )
-        .order_by(Folder.name)
-    )
-    return list((await session.execute(stmt)).scalars().all())
-
-
-async def get_folder(session: AsyncSession, folder_id: str) -> Folder | None:
-    return (
-        await session.execute(
-            select(Folder).where(Folder.id == folder_id, Folder.deleted_at.is_(None))
-        )
-    ).scalar_one_or_none()
+async def get_folder(db: AsyncSession, folder_id: str) -> Folder | None:
+    return await folders_repo.get_live(db, folder_id)
 
 
 # ---- user-side mutations (design.md §14.1) ---------------------------------
@@ -198,21 +173,8 @@ class FolderNameConflictError(Exception):
         self.existing_id = existing_id
 
 
-async def _name_taken(
-    session: AsyncSession, *, parent_id: str | None, name: str, exclude_id: str | None
-) -> str | None:
-    stmt = select(Folder.id).where(
-        Folder.parent_id.is_(None) if parent_id is None else Folder.parent_id == parent_id,
-        Folder.name == name,
-        Folder.deleted_at.is_(None),
-    )
-    if exclude_id is not None:
-        stmt = stmt.where(Folder.id != exclude_id)
-    return (await session.execute(stmt.limit(1))).scalar_one_or_none()
-
-
 async def _would_cycle(
-    session: AsyncSession, *, child_id: str, new_parent_id: str | None
+    db: AsyncSession, *, child_id: str, new_parent_id: str | None
 ) -> bool:
     if new_parent_id is None:
         return False
@@ -224,7 +186,7 @@ async def _would_cycle(
         if cur in seen:
             return True
         seen.add(cur)
-        f = await session.get(Folder, cur)
+        f = await db.get(Folder, cur)
         if f is None:
             return False
         cur = f.parent_id
@@ -232,27 +194,27 @@ async def _would_cycle(
 
 
 async def rename_folder(
-    session: AsyncSession, *, folder_id: str, new_name: str
+    db: AsyncSession, *, folder_id: str, new_name: str,
 ) -> Folder:
     new_name = new_name.strip()
     if not new_name:
         raise ValueError("folder name cannot be empty")
-    f = await get_folder(session, folder_id)
+    f = await folders_repo.get_live(db, folder_id)
     if f is None:
         raise FolderNotFoundError(folder_id)
     if f.name == new_name:
         return f
-    clash = await _name_taken(
-        session, parent_id=f.parent_id, name=new_name, exclude_id=f.id
+    clash = await folders_repo.find_sibling_id_by_name(
+        db, parent_id=f.parent_id, name=new_name, exclude_id=f.id,
     )
     if clash is not None:
         raise FolderNameConflictError(
-            parent_id=f.parent_id, name=new_name, existing_id=clash
+            parent_id=f.parent_id, name=new_name, existing_id=clash,
         )
     old = f.name
     f.name = new_name
-    f.updated_at = datetime.now(timezone.utc)
-    await AuditEvent.append(session, kind="folder_renamed", payload={
+    f.updated_at = _utcnow()
+    await AuditEvent.append(db, kind="folder_renamed", payload={
         "folder_id": f.id, "parent_id": f.parent_id,
         "old_name": old, "new_name": new_name,
     })
@@ -260,98 +222,69 @@ async def rename_folder(
 
 
 async def move_folder(
-    session: AsyncSession, *, folder_id: str, new_parent_id: str | None
+    db: AsyncSession, *, folder_id: str, new_parent_id: str | None,
 ) -> Folder:
-    f = await get_folder(session, folder_id)
+    f = await folders_repo.get_live(db, folder_id)
     if f is None:
         raise FolderNotFoundError(folder_id)
     if f.parent_id == new_parent_id:
         return f
     if new_parent_id is not None:
-        target = await get_folder(session, new_parent_id)
+        target = await folders_repo.get_live(db, new_parent_id)
         if target is None:
             raise FolderNotFoundError(new_parent_id)
-    if await _would_cycle(session, child_id=f.id, new_parent_id=new_parent_id):
-        raise ValueError(f"move would create folder cycle: {f.id} → {new_parent_id}")
-    clash = await _name_taken(
-        session, parent_id=new_parent_id, name=f.name, exclude_id=f.id
+    if await _would_cycle(db, child_id=f.id, new_parent_id=new_parent_id):
+        raise ValueError(f"move would create folder cycle: {f.id} -> {new_parent_id}")
+    clash = await folders_repo.find_sibling_id_by_name(
+        db, parent_id=new_parent_id, name=f.name, exclude_id=f.id,
     )
     if clash is not None:
         raise FolderNameConflictError(
-            parent_id=new_parent_id, name=f.name, existing_id=clash
+            parent_id=new_parent_id, name=f.name, existing_id=clash,
         )
     old_parent = f.parent_id
     f.parent_id = new_parent_id
-    f.updated_at = datetime.now(timezone.utc)
-    await AuditEvent.append(session, kind="folder_moved", payload={
+    f.updated_at = _utcnow()
+    await AuditEvent.append(db, kind="folder_moved", payload={
         "folder_id": f.id, "old_parent": old_parent, "new_parent": new_parent_id,
     })
     return f
 
 
 async def soft_delete_folder(
-    session: AsyncSession,
+    db: AsyncSession,
     *,
     folder_id: str,
     purge_after_seconds: int = 7 * 86400,
 ) -> Folder:
-    """Soft-delete a folder: set deleted_at on the folder and recursively
-    soft-delete all live descendants + entries inside (with the same
-    purge_after window). The actual storage / row deletion is done by
-    purge_deleted_files later."""
-    from datetime import timedelta
-
-    from marginalia.db.models import FileEntry
-
-    f = await get_folder(session, folder_id)
+    """Soft-delete a folder and recursively soft-delete every live descendant
+    folder + entries inside (with the same purge_after window). Storage / row
+    deletion happens later in purge_deleted_files."""
+    f = await folders_repo.get_live(db, folder_id)
     if f is None:
         raise FolderNotFoundError(folder_id)
 
-    now = datetime.now(timezone.utc)
+    now = _utcnow()
     purge_at = now + timedelta(seconds=max(0, purge_after_seconds))
 
-    # collect descendant folder ids (BFS over live children)
-    descendant_folder_ids: list[str] = [f.id]
-    frontier = [f.id]
-    while frontier:
-        children = (
-            await session.execute(
-                select(Folder.id).where(
-                    Folder.parent_id.in_(frontier),
-                    Folder.deleted_at.is_(None),
-                )
-            )
-        ).scalars().all()
-        if not children:
-            break
-        descendant_folder_ids.extend(children)
-        frontier = list(children)
+    descendant_ids = await folders_repo.list_live_descendant_ids(db, f.id)
 
-    # mark folders as deleted
     n_folders = 0
-    for fid in descendant_folder_ids:
-        fld = await session.get(Folder, fid)
+    for fid in descendant_ids:
+        fld = await db.get(Folder, fid)
         if fld is None or fld.deleted_at is not None:
             continue
         fld.deleted_at = now
         fld.updated_at = now
         n_folders += 1
 
-    # mark all live entries inside these folders as deleted
-    entries = (
-        await session.execute(
-            select(FileEntry).where(
-                FileEntry.folder_id.in_(descendant_folder_ids),
-                FileEntry.deleted_at.is_(None),
-            )
-        )
-    ).scalars().all()
+    entries = await folders_repo.list_live_entries_in(db, descendant_ids)
     for e in entries:
         e.deleted_at = now
         e.purge_after = purge_at
         e.updated_at = now
 
-    await AuditEvent.append(session, kind="folder_soft_deleted", payload={
+    await AuditEvent.append(db, kind="folder_soft_deleted", payload={
         "folder_id": f.id,
         "name": f.name,
         "descendant_folders_marked": n_folders,

@@ -40,10 +40,10 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Iterable
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from marginalia.db.models import EntryRelation, FileEntry
+from marginalia.repositories import entries as entries_repo
+from marginalia.repositories import entry_relations as relations_repo
 
 log = logging.getLogger(__name__)
 
@@ -142,36 +142,17 @@ async def _load_edges(
         gating, statistical noise from the miners (catch-all tags,
         passing references) shows up in recommendations.
     """
-    base = (
-        select(
-            EntryRelation.entry_a_id,
-            EntryRelation.entry_b_id,
-            EntryRelation.observation_count,
-        )
-        .join(
-            FileEntry,
-            FileEntry.id == EntryRelation.entry_a_id,
-        )
-        .where(FileEntry.deleted_at.is_(None))
+    rows = await relations_repo.list_edges_with_live_a(
+        db, vetted_only=not include_unvetted,
     )
-    if not include_unvetted:
-        base = base.where(EntryRelation.vetted.is_(True))
-    rows = (await db.execute(base)).all()
     if not rows:
         return {}
 
     # Filter the b side too. We do a second query rather than a self-
     # join with two filters because it's clearer and SQLite's planner
     # can't always optimise the double-FK case.
-    b_ids = {r[1] for r in rows}
-    live_b = (
-        await db.execute(
-            select(FileEntry.id).where(
-                FileEntry.id.in_(list(b_ids)),
-                FileEntry.deleted_at.is_(None),
-            )
-        )
-    ).scalars().all()
+    b_ids = {b for _, b, _ in rows}
+    live_b = await entries_repo.filter_live_ids(db, list(b_ids))
     live_b_set = set(live_b)
 
     edges: defaultdict[str, list[tuple[str, int]]] = defaultdict(list)
@@ -187,16 +168,7 @@ async def _load_edges(
 async def _resolve_display_names(
     db: AsyncSession, entry_ids: Iterable[str],
 ) -> dict[str, str]:
-    ids = list(entry_ids)
-    if not ids:
-        return {}
-    rows = (
-        await db.execute(
-            select(FileEntry.id, FileEntry.display_name)
-            .where(FileEntry.id.in_(ids))
-        )
-    ).all()
-    return {eid: name for eid, name in rows}
+    return await entries_repo.list_display_names(db, list(entry_ids))
 
 
 def _weighted_pick(

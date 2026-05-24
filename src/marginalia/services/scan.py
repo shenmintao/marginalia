@@ -26,11 +26,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from marginalia.db.engine import get_session_factory
 from marginalia.db.models import File, FileEntry
+from marginalia.repositories import entries as entries_repo
 from marginalia.services.entries import _build_folder_display_path
 
 
@@ -62,16 +62,7 @@ async def scan_vault(vault_root: Path) -> ScanReport:
 
     factory = get_session_factory()
     async with factory() as s:
-        live_entries = (
-            await s.execute(
-                select(FileEntry, File)
-                .join(File, FileEntry.file_id == File.id)
-                .where(
-                    FileEntry.deleted_at.is_(None),
-                    File.deleted_at.is_(None),
-                )
-            )
-        ).all()
+        live_entries = await entries_repo.list_live_with_file(s)
 
         report = ScanReport(vault_root=vault_root)
         seen_disk_paths: set[str] = set()
