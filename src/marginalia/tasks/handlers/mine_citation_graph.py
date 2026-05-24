@@ -49,8 +49,6 @@ from marginalia.services.task_outcomes import (
     record_outcome,
 )
 from marginalia.tasks.handlers._mining_helpers import upsert_relation_pair
-from marginalia.tasks.kinds import KIND_MINE_CITATION_GRAPH, task_handler
-
 log = logging.getLogger(__name__)
 
 CITATION_WINDOW_DAYS = 30
@@ -63,7 +61,6 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-@task_handler(KIND_MINE_CITATION_GRAPH)
 async def handle_mine_citation_graph(payload: Mapping[str, Any]) -> None:
     now = _utcnow()
     cutoff = now - timedelta(
@@ -136,7 +133,7 @@ async def handle_mine_citation_graph(payload: Mapping[str, Any]) -> None:
 
         await record_outcome(
             session,
-            task_kind=KIND_MINE_CITATION_GRAPH,
+            task_kind="mine_citation_graph",
             object_kind=GLOBAL_OBJECT_KIND,
             object_id=GLOBAL_OBJECT_ID,
             outcome="applied" if (new_relations or incremented) else "noop",

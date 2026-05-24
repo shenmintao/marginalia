@@ -38,7 +38,6 @@ from marginalia.services.task_outcomes import (
     GLOBAL_OBJECT_KIND,
     record_outcome,
 )
-from marginalia.tasks.kinds import KIND_NORMALIZE_TAGS, task_handler
 from marginalia.utils.ids import new_id
 
 log = logging.getLogger(__name__)
@@ -97,7 +96,6 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-@task_handler(KIND_NORMALIZE_TAGS)
 async def handle_normalize_tags(payload: Mapping[str, Any]) -> None:
     total_merges_applied = 0
     total_tags_redirected = 0
@@ -116,7 +114,7 @@ async def handle_normalize_tags(payload: Mapping[str, Any]) -> None:
         await _recompute_doc_counts(session)
         await record_outcome(
             session,
-            task_kind=KIND_NORMALIZE_TAGS,
+            task_kind="normalize_tags",
             object_kind=GLOBAL_OBJECT_KIND,
             object_id=GLOBAL_OBJECT_ID,
             outcome="applied" if total_merges_applied else "noop",

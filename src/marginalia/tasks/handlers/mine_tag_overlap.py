@@ -50,8 +50,6 @@ from marginalia.services.task_outcomes import (
     record_outcome,
 )
 from marginalia.tasks.handlers._mining_helpers import upsert_relation_pair
-from marginalia.tasks.kinds import KIND_MINE_TAG_OVERLAP, task_handler
-
 log = logging.getLogger(__name__)
 
 MIN_JACCARD = 0.30
@@ -69,7 +67,6 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-@task_handler(KIND_MINE_TAG_OVERLAP)
 async def handle_mine_tag_overlap(payload: Mapping[str, Any]) -> None:
     now = _utcnow()
     min_jaccard = float(payload.get("min_jaccard") or MIN_JACCARD)
@@ -174,7 +171,7 @@ async def handle_mine_tag_overlap(payload: Mapping[str, Any]) -> None:
 
         await record_outcome(
             session,
-            task_kind=KIND_MINE_TAG_OVERLAP,
+            task_kind="mine_tag_overlap",
             object_kind=GLOBAL_OBJECT_KIND,
             object_id=GLOBAL_OBJECT_ID,
             outcome="applied" if (new_relations or incremented) else "noop",

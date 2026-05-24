@@ -1,38 +1,24 @@
-"""suggest_demotion / suggest_archival — design.md §9.1 + §9.4 + §14.4 #4.
+"""suggest_lifecycle — unified active→demoted→archived stepper.
 
-Two pure-statistics handlers (no LLM). They walk the lifecycle state machine:
+design.md §9.1 + §9.4 + §14.4 #4.
 
-  active → demoted → archived
+One periodic kind walks BOTH transitions in lockstep:
+  active   →  demoted   (via _select_demotion_candidates)
+  demoted  →  archived  (via _select_archival_candidates)
 
-Triggers (design §9.4 #6 + §14.4 #4):
-  - active → demoted (suggest_demotion):
-      No `journal` row mentioning this entry_id within DEMOTE_INACTIVE_DAYS
-      (default 30d), AND the entry was created at least DEMOTE_MIN_AGE_DAYS
-      ago (default 14d, so freshly-uploaded files don't get demoted before
-      anyone has had a chance to use them).
-  - demoted → archived (suggest_archival):
-      Already demoted, no journal mention within ARCHIVE_INACTIVE_DAYS
-      (default 90d), AND demoted-state has been in place for at least
-      ARCHIVE_MIN_DEMOTED_DAYS (default 30d).
+Why merged: the two were always called by the same scheduler with adjacent
+intervals, share `_apply_decisions`, share the journal-as-activity-signal
+filter, and report the same per-entry outcome shape. Two kinds was bookkeeping
+without behavioural value.
 
-Why journal as the activity signal? Two reasons:
-  1. We never read audit_events for business logic (design §14.3).
-  2. journal is the canonical "agent touched this entry" record — every
-     reflect_turn writes the entry_ids it processed. That's exactly the
-     activity we want to count.
+Payload (all optional):
+  {"phases": ["demote", "archive"]}      # default: both, in this order
+  {"demote": {"inactive_days":30, "min_age_days":14, "cap":50}}
+  {"archive": {"inactive_days":90, "min_demoted_days":30, "cap":50}}
 
-Caveat: an entry that was used in a conversation but produced an empty
-reflect_turn (no journal rows, just `applied` in task_outcomes) won't be
-counted as active. Acceptable: the agent can always promote an entry by
-either reading it explicitly or by writing it into a future journal note.
-manual_active is the user's escape hatch.
-
-State-machine guarantees (design.md §14.4 #4):
-  - manual_active / manual_archived NEVER change automatically
-  - no auto-promotion (active ← demoted ← archived)
-
-Cap: at most LIFECYCLE_BATCH_CAP (50) transitions per run, ordered by
-"most stale first" (oldest journal mention or earliest created_at).
+Outcome rows still use phase-specific task_kind values
+("suggest_demotion" / "suggest_archival") for backwards-compat with
+existing audit/analytic queries that key off task_kind.
 """
 from __future__ import annotations
 
@@ -41,7 +27,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
-from sqlalchemy import and_, exists, not_, select, update
+from sqlalchemy import select, update
 
 from marginalia.db.models import AuditEvent, FileEntry, Journal
 from marginalia.db.session import session_scope
@@ -50,11 +36,7 @@ from marginalia.services.task_outcomes import (
     GLOBAL_OBJECT_KIND,
     record_outcome,
 )
-from marginalia.tasks.kinds import (
-    KIND_SUGGEST_ARCHIVAL,
-    KIND_SUGGEST_DEMOTION,
-    task_handler,
-)
+from marginalia.tasks.kinds import KIND_SUGGEST_LIFECYCLE, task_handler
 
 log = logging.getLogger(__name__)
 
@@ -63,6 +45,13 @@ DEMOTE_MIN_AGE_DAYS = 14
 ARCHIVE_INACTIVE_DAYS = 90
 ARCHIVE_MIN_DEMOTED_DAYS = 30
 LIFECYCLE_BATCH_CAP = 50
+
+# Outcome task_kind labels — kept distinct so analytics that group by
+# task_kind keep working.
+PHASE_OUTCOME_KIND = {
+    "demote": "suggest_demotion",
+    "archive": "suggest_archival",
+}
 
 
 def _utcnow() -> datetime:
@@ -77,9 +66,29 @@ class _Decision:
     reason: str
 
 
-@task_handler(KIND_SUGGEST_DEMOTION)
-async def handle_suggest_demotion(payload: Mapping[str, Any]) -> None:
+@task_handler(KIND_SUGGEST_LIFECYCLE)
+async def handle_suggest_lifecycle(payload: Mapping[str, Any]) -> None:
     now = _utcnow()
+    phases = list(payload.get("phases") or ["demote", "archive"])
+
+    summary: dict[str, Any] = {}
+    for phase in phases:
+        phase_payload = dict(payload.get(phase) or {})
+        if phase == "demote":
+            applied, candidates = await _run_demote(now, phase_payload)
+        elif phase == "archive":
+            applied, candidates = await _run_archive(now, phase_payload)
+        else:
+            log.warning("suggest_lifecycle: unknown phase %r — skipped", phase)
+            continue
+        summary[phase] = {"applied": applied, "candidates": candidates}
+
+    log.info("suggest_lifecycle: %s", summary)
+
+
+async def _run_demote(
+    now: datetime, payload: Mapping[str, Any]
+) -> tuple[int, int]:
     inactive_days = int(payload.get("inactive_days") or DEMOTE_INACTIVE_DAYS)
     min_age_days = int(payload.get("min_age_days") or DEMOTE_MIN_AGE_DAYS)
     cap = int(payload.get("cap") or LIFECYCLE_BATCH_CAP)
@@ -92,20 +101,20 @@ async def handle_suggest_demotion(payload: Mapping[str, Any]) -> None:
         cutoff_age=cutoff_age,
         cap=cap,
     )
-    await _apply_decisions(
+    return await _apply_decisions(
         decisions=decisions,
-        task_kind=KIND_SUGGEST_DEMOTION,
+        outcome_task_kind=PHASE_OUTCOME_KIND["demote"],
         now=now,
         summary_extra={
             "inactive_days": inactive_days,
             "min_age_days": min_age_days,
         },
-    )
+    ), len(decisions)
 
 
-@task_handler(KIND_SUGGEST_ARCHIVAL)
-async def handle_suggest_archival(payload: Mapping[str, Any]) -> None:
-    now = _utcnow()
+async def _run_archive(
+    now: datetime, payload: Mapping[str, Any]
+) -> tuple[int, int]:
     inactive_days = int(payload.get("inactive_days") or ARCHIVE_INACTIVE_DAYS)
     min_demoted_days = int(payload.get("min_demoted_days") or ARCHIVE_MIN_DEMOTED_DAYS)
     cap = int(payload.get("cap") or LIFECYCLE_BATCH_CAP)
@@ -118,41 +127,36 @@ async def handle_suggest_archival(payload: Mapping[str, Any]) -> None:
         cutoff_demoted=cutoff_demoted,
         cap=cap,
     )
-    await _apply_decisions(
+    return await _apply_decisions(
         decisions=decisions,
-        task_kind=KIND_SUGGEST_ARCHIVAL,
+        outcome_task_kind=PHASE_OUTCOME_KIND["archive"],
         now=now,
         summary_extra={
             "inactive_days": inactive_days,
             "min_demoted_days": min_demoted_days,
         },
-    )
+    ), len(decisions)
+
+
+async def _recent_entry_ids(session, cutoff: datetime) -> set[str]:
+    rows = (
+        await session.execute(
+            select(Journal.entry_ids).where(Journal.created_at >= cutoff)
+        )
+    ).scalars().all()
+    out: set[str] = set()
+    for row in rows:
+        for eid in (row or []):
+            if isinstance(eid, str):
+                out.add(eid)
+    return out
 
 
 async def _select_demotion_candidates(
-    *,
-    cutoff_recent_journal: datetime,
-    cutoff_age: datetime,
-    cap: int,
+    *, cutoff_recent_journal: datetime, cutoff_age: datetime, cap: int,
 ) -> list[_Decision]:
     async with session_scope() as session:
-        # Subquery: entry_ids that appear in any journal row written since
-        # cutoff_recent_journal. SQLite doesn't support ANY() over JSON arrays
-        # cleanly, so we do this server-side: pull recent journal rows,
-        # flatten entry_ids, then filter the SELECT in Python.
-        recent_rows = (
-            await session.execute(
-                select(Journal.entry_ids).where(Journal.created_at >= cutoff_recent_journal)
-            )
-        ).scalars().all()
-        recent_entry_ids: set[str] = set()
-        for row in recent_rows:
-            for eid in (row or []):
-                if isinstance(eid, str):
-                    recent_entry_ids.add(eid)
-
-        # Candidate filter: lifecycle='active' (NOT manual_active),
-        # created_at <= cutoff_age, deleted_at IS NULL.
+        recent = await _recent_entry_ids(session, cutoff_recent_journal)
         rows = (
             await session.execute(
                 select(FileEntry.id, FileEntry.created_at)
@@ -164,14 +168,12 @@ async def _select_demotion_candidates(
                 .order_by(FileEntry.created_at.asc())
             )
         ).all()
-
         decisions: list[_Decision] = []
-        for entry_id, created_at in rows:
-            if entry_id in recent_entry_ids:
+        for entry_id, _created_at in rows:
+            if entry_id in recent:
                 continue
             decisions.append(_Decision(
-                entry_id=entry_id,
-                old_lifecycle="active",
+                entry_id=entry_id, old_lifecycle="active",
                 new_lifecycle="demoted",
                 reason=f"no journal mention since {cutoff_recent_journal.isoformat()}",
             ))
@@ -182,36 +184,10 @@ async def _select_demotion_candidates(
 
 
 async def _select_archival_candidates(
-    *,
-    cutoff_recent_journal: datetime,
-    cutoff_demoted: datetime,
-    cap: int,
+    *, cutoff_recent_journal: datetime, cutoff_demoted: datetime, cap: int,
 ) -> list[_Decision]:
     async with session_scope() as session:
-        recent_rows = (
-            await session.execute(
-                select(Journal.entry_ids).where(Journal.created_at >= cutoff_recent_journal)
-            )
-        ).scalars().all()
-        recent_entry_ids: set[str] = set()
-        for row in recent_rows:
-            for eid in (row or []):
-                if isinstance(eid, str):
-                    recent_entry_ids.add(eid)
-
-        # We approximate "demoted for >= min_demoted_days" by looking at the
-        # latest audit_events row of kind='lifecycle_changed' that set this
-        # entry to 'demoted'. Wait — design §14.3 forbids reading audit for
-        # business logic. So instead, use FileEntry.updated_at as the proxy:
-        # a row currently in 'demoted' state has updated_at = the time of
-        # last lifecycle change (or any other field change since). If
-        # updated_at is older than cutoff_demoted, the entry has been "stably
-        # demoted" for at least that long.
-        #
-        # Edge case: any other UPDATE on the row resets updated_at, which
-        # may delay archival. Acceptable: archival is conservative on
-        # purpose, and any user / AI activity touching the entry is precisely
-        # the kind of signal we don't want to override.
+        recent = await _recent_entry_ids(session, cutoff_recent_journal)
         rows = (
             await session.execute(
                 select(FileEntry.id, FileEntry.updated_at)
@@ -223,14 +199,12 @@ async def _select_archival_candidates(
                 .order_by(FileEntry.updated_at.asc())
             )
         ).all()
-
         decisions: list[_Decision] = []
         for entry_id, _updated_at in rows:
-            if entry_id in recent_entry_ids:
+            if entry_id in recent:
                 continue
             decisions.append(_Decision(
-                entry_id=entry_id,
-                old_lifecycle="demoted",
+                entry_id=entry_id, old_lifecycle="demoted",
                 new_lifecycle="archived",
                 reason=f"no journal mention since {cutoff_recent_journal.isoformat()}",
             ))
@@ -243,10 +217,10 @@ async def _select_archival_candidates(
 async def _apply_decisions(
     *,
     decisions: list[_Decision],
-    task_kind: str,
+    outcome_task_kind: str,
     now: datetime,
     summary_extra: dict[str, Any],
-) -> None:
+) -> int:
     applied = 0
     async with session_scope() as session:
         for d in decisions:
@@ -260,11 +234,9 @@ async def _apply_decisions(
                 .values(lifecycle=d.new_lifecycle, updated_at=now)
             )
             if not result.rowcount:
-                # Lost a race (entry was just touched, deleted, or already
-                # transitioned). Record as deferred for visibility.
                 await record_outcome(
                     session,
-                    task_kind=task_kind,
+                    task_kind=outcome_task_kind,
                     object_kind="file_entry",
                     object_id=d.entry_id,
                     outcome="deferred",
@@ -283,13 +255,13 @@ async def _apply_decisions(
                     "entry_id": d.entry_id,
                     "old": d.old_lifecycle,
                     "new": d.new_lifecycle,
-                    "trigger": task_kind,
+                    "trigger": outcome_task_kind,
                     "reason": d.reason,
                 },
             )
             await record_outcome(
                 session,
-                task_kind=task_kind,
+                task_kind=outcome_task_kind,
                 object_kind="file_entry",
                 object_id=d.entry_id,
                 outcome="applied",
@@ -303,7 +275,7 @@ async def _apply_decisions(
 
         await record_outcome(
             session,
-            task_kind=task_kind,
+            task_kind=outcome_task_kind,
             object_kind=GLOBAL_OBJECT_KIND,
             object_id=GLOBAL_OBJECT_ID,
             outcome="applied" if applied else "noop",
@@ -316,4 +288,6 @@ async def _apply_decisions(
         await session.commit()
 
     if applied:
-        log.info("%s: applied=%d / candidates=%d", task_kind, applied, len(decisions))
+        log.info("%s: applied=%d / candidates=%d",
+                 outcome_task_kind, applied, len(decisions))
+    return applied

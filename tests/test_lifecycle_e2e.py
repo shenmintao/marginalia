@@ -186,12 +186,12 @@ async def main():
     seeded = await _seed()
     factory = get_session_factory()
 
-    from marginalia.tasks.handlers.lifecycle import (
-        handle_suggest_archival, handle_suggest_demotion,
+    from marginalia.tasks.handlers.suggest_lifecycle import (
+        handle_suggest_lifecycle,
     )
 
-    # --- 1. suggest_demotion -----------------------------------------------
-    await handle_suggest_demotion({})
+    # --- 1. demote phase ---------------------------------------------------
+    await handle_suggest_lifecycle({"phases": ["demote"]})
 
     state = {k: await _state(v) for k, v in seeded.items()}
     print("[1] state after demotion:", state)
@@ -210,12 +210,12 @@ async def main():
     assert state["demoted_used"] == "demoted"
     assert state["manual_archived"] == "manual_archived"
 
-    # --- 2. suggest_archival ------------------------------------------------
+    # --- 2. archive phase --------------------------------------------------
     # The newly-demoted "demote" entry has updated_at = now, so it is too
     # fresh to be archived in the same run. We adjust its updated_at to
     # simulate "stably demoted for 60 days" so it picks up archival path
     # for fixture e_archive only — leave 'demote' alone (it's just transitioned).
-    await handle_suggest_archival({})
+    await handle_suggest_lifecycle({"phases": ["archive"]})
 
     state = {k: await _state(v) for k, v in seeded.items()}
     print("[2] state after archival:", state)
@@ -258,8 +258,8 @@ async def main():
         assert breakdown.get(("suggest_archival", "global", "applied")) == 1
 
     # --- 5. idempotence: re-running on the same data should be a no-op ----
-    await handle_suggest_demotion({})
-    await handle_suggest_archival({})
+    await handle_suggest_lifecycle({"phases": ["demote"]})
+    await handle_suggest_lifecycle({"phases": ["archive"]})
     state = {k: await _state(v) for k, v in seeded.items()}
     # nothing flips back; manual_* still locked; protected entries still active
     assert state["manual_active"] == "manual_active"

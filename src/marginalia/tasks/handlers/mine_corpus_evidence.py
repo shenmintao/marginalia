@@ -58,7 +58,6 @@ from marginalia.services.task_outcomes import (
     GLOBAL_OBJECT_KIND,
     record_outcome,
 )
-from marginalia.tasks.kinds import KIND_MINE_CORPUS_EVIDENCE, task_handler
 from marginalia.utils.ids import new_id
 
 log = logging.getLogger(__name__)
@@ -124,7 +123,6 @@ def _pair_id(a: str, b: str) -> str:
     return f"{pa}|{pb}"
 
 
-@task_handler(KIND_MINE_CORPUS_EVIDENCE)
 async def handle_mine_corpus_evidence(payload: Mapping[str, Any]) -> None:
     max_pairs = int(payload.get("max_pairs") or MAX_PAIRS)
     dry_run = bool(payload.get("dry_run") or False)
@@ -134,7 +132,7 @@ async def handle_mine_corpus_evidence(payload: Mapping[str, Any]) -> None:
         async with session_scope() as session:
             await record_outcome(
                 session,
-                task_kind=KIND_MINE_CORPUS_EVIDENCE,
+                task_kind="mine_corpus_evidence",
                 object_kind=GLOBAL_OBJECT_KIND, object_id=GLOBAL_OBJECT_ID,
                 outcome="noop",
                 detail={"candidates": 0,
@@ -148,7 +146,7 @@ async def handle_mine_corpus_evidence(payload: Mapping[str, Any]) -> None:
         async with session_scope() as session:
             await record_outcome(
                 session,
-                task_kind=KIND_MINE_CORPUS_EVIDENCE,
+                task_kind="mine_corpus_evidence",
                 object_kind=GLOBAL_OBJECT_KIND, object_id=GLOBAL_OBJECT_ID,
                 outcome="rejected",
                 detail={"candidates": len(candidates),
@@ -197,7 +195,7 @@ async def handle_mine_corpus_evidence(payload: Mapping[str, Any]) -> None:
                 )
                 await record_outcome(
                     session,
-                    task_kind=KIND_MINE_CORPUS_EVIDENCE,
+                    task_kind="mine_corpus_evidence",
                     object_kind="entry_pair", object_id=pair_id,
                     outcome="applied",
                     detail={
@@ -210,7 +208,7 @@ async def handle_mine_corpus_evidence(payload: Mapping[str, Any]) -> None:
                 rejected += 1
                 await record_outcome(
                     session,
-                    task_kind=KIND_MINE_CORPUS_EVIDENCE,
+                    task_kind="mine_corpus_evidence",
                     object_kind="entry_pair", object_id=pair_id,
                     outcome="rejected",
                     detail={
@@ -222,7 +220,7 @@ async def handle_mine_corpus_evidence(payload: Mapping[str, Any]) -> None:
 
         await record_outcome(
             session,
-            task_kind=KIND_MINE_CORPUS_EVIDENCE,
+            task_kind="mine_corpus_evidence",
             object_kind=GLOBAL_OBJECT_KIND, object_id=GLOBAL_OBJECT_ID,
             outcome="applied" if accepted else ("noop" if not rejected else "rejected"),
             detail={
@@ -244,7 +242,7 @@ async def _build_candidate_pool(*, max_pairs: int) -> list[dict[str, Any]]:
         already_evaluated_ids: set[str] = set(
             (await session.execute(
                 select(TaskOutcome.object_id).where(
-                    TaskOutcome.task_kind == KIND_MINE_CORPUS_EVIDENCE,
+                    TaskOutcome.task_kind == "mine_corpus_evidence",
                     TaskOutcome.object_kind == "entry_pair",
                 )
             )).scalars().all()

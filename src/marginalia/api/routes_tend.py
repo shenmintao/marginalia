@@ -1,13 +1,13 @@
 """User-triggered maintenance pass — design.md §9 / §16.1.
 
 `POST /v1/tend` enqueues a one-shot run of the librarian's maintenance
-chain (normalize_tags → enrich_tags → restructure_catalogs →
-mine_corpus_evidence → mine_session_cooccurrence → propose_views →
-refresh_entry_extra). Returns immediately with a run_id and the list of
-task ids that will execute. Progress is queried via GET /v1/tend/{id}.
+chain (tag_quality → restructure_catalogs → mine_relations →
+vet_relations → propose_views → refresh_entry_extra). Returns immediately
+with a run_id and the list of task ids that will execute. Progress is
+queried via GET /v1/tend/{id}.
 
 Why this exists: most users don't want to wait days for the periodic
-dispatcher to run normalize_tags every 6 hours. After bulk-ingesting a
+dispatcher to run tag_quality every 6 hours. After bulk-ingesting a
 batch of files, calling /tend once forces a tidy-up pass right now.
 
 Dedup: if a periodic equivalent of any of these tasks is already
@@ -30,15 +30,11 @@ from marginalia.db.session import get_session
 from marginalia.services.task_outcomes import record_outcome
 from marginalia.tasks.enqueue import enqueue
 from marginalia.tasks.kinds import (
-    KIND_ENRICH_TAGS,
-    KIND_MINE_CITATION_GRAPH,
-    KIND_MINE_CORPUS_EVIDENCE,
-    KIND_MINE_SESSION_COOCCURRENCE,
-    KIND_MINE_TAG_OVERLAP,
-    KIND_NORMALIZE_TAGS,
+    KIND_MINE_RELATIONS,
     KIND_PROPOSE_VIEWS,
     KIND_REFRESH_ENTRY_EXTRA,
     KIND_RESTRUCTURE_CATALOGS,
+    KIND_TAG_QUALITY,
     KIND_VET_RELATIONS,
 )
 from marginalia.utils.ids import new_id
@@ -47,24 +43,15 @@ log = logging.getLogger(__name__)
 
 router = APIRouter(tags=["tend"])
 
-# Order is the priority chain from kinds.py. normalize first (tags must be
-# clean before enrich); restructure after enrich (catalogs need stable tags);
-# the three relation miners run in parallel-shape after structural settling
-# (each writes entry_relations from a different signal: cooccurrence reads
-# journals, tag_overlap reads entry_tags, citation_graph reads conversation
-# citations). vet_relations runs after the miners — LLM gate on the raw
-# graph; only vetted=True edges are visible to find_related and the
-# related_entries pre-fill in search/get_metadata. propose_views runs
-# after vetting so it sees the clean graph; refresh closes out using
-# everything that came before.
+# Order is the priority chain from kinds.py. tag_quality first (normalize
+# then enrich, both inside this kind); restructure after enrich (catalogs
+# need stable tags); mine_relations runs the four miners back-to-back;
+# vet_relations gates the raw graph; propose_views sees the clean graph;
+# refresh closes out using everything that came before.
 TEND_CHAIN: tuple[str, ...] = (
-    KIND_NORMALIZE_TAGS,
-    KIND_ENRICH_TAGS,
+    KIND_TAG_QUALITY,
     KIND_RESTRUCTURE_CATALOGS,
-    KIND_MINE_CORPUS_EVIDENCE,
-    KIND_MINE_SESSION_COOCCURRENCE,
-    KIND_MINE_TAG_OVERLAP,
-    KIND_MINE_CITATION_GRAPH,
+    KIND_MINE_RELATIONS,
     KIND_VET_RELATIONS,
     KIND_PROPOSE_VIEWS,
     KIND_REFRESH_ENTRY_EXTRA,

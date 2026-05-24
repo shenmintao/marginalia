@@ -11,11 +11,12 @@ Verifies:
      interval window does NOT re-enqueue.
   4. recover_stuck_tasks promotes a row stuck at running+expired-lease back
      to pending (or marks it dead at attempts>=max).
-  5. prune_audit_events deletes audit rows older than the retention window.
+  5. prune (unified handler) deletes audit rows older than the retention window.
 """
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shutil
 import sys
@@ -48,10 +49,10 @@ from marginalia.tasks.handlers.periodic_tick import (
     handle_periodic_tick,
     KIND_PERIODIC_TICK,
 )
-from marginalia.tasks.handlers.prune_audit_events import handle_prune_audit_events
+from marginalia.tasks.handlers.prune import handle_prune
 from marginalia.tasks.handlers.recover_stuck_tasks import handle_recover_stuck_tasks
 from marginalia.tasks.kinds import (
-    KIND_PRUNE_AUDIT_EVENTS,
+    KIND_PRUNE,
     KIND_RECOVER_STUCK_TASKS,
     PERIODIC_INTERVALS,
 )
@@ -198,7 +199,7 @@ async def main():
         assert "task_recovered" in kinds
         assert "task_marked_dead" in kinds
 
-    # --- 5. prune_audit_events ---------------------------------------------
+    # --- 5. prune (unified) ------------------------------------------------
     # Insert one ancient event well outside retention.
     async with factory() as s:
         ancient = AuditEvent(
@@ -215,17 +216,25 @@ async def main():
         n_before = (await s.execute(
             text("SELECT COUNT(*) FROM audit_events")
         )).scalar()
-    await handle_prune_audit_events({})
+    await handle_prune({})
     async with factory() as s:
         gone = await s.get(AuditEvent, ancient_id)
         assert gone is None, "ancient audit_events row was not pruned"
-        # The prune handler now records its outcome to task_outcomes (not audit).
-        prune_outcome = (await s.execute(text(
+        # Unified prune writes one summary row to task_outcomes with per_target detail.
+        prune_outcome_raw = (await s.execute(text(
             "SELECT detail FROM task_outcomes "
-            "WHERE task_kind='prune_audit_events' ORDER BY completed_at DESC"
-        ))).scalars().first()
-        assert prune_outcome is not None
-        print("[5] prune_audit_events outcome:", prune_outcome)
+            "WHERE task_kind=:k ORDER BY completed_at DESC"
+        ), {"k": KIND_PRUNE})).scalars().first()
+        assert prune_outcome_raw is not None
+        # raw text() bypasses ORM JSON decoding on SQLite — handle both shapes.
+        prune_outcome = (
+            json.loads(prune_outcome_raw)
+            if isinstance(prune_outcome_raw, str)
+            else prune_outcome_raw
+        )
+        assert "per_target" in prune_outcome, prune_outcome
+        assert "audit_events" in prune_outcome["per_target"], prune_outcome
+        print("[5] prune outcome:", prune_outcome)
 
     print("\nALL DISPATCHER E2E CHECKS PASSED")
 

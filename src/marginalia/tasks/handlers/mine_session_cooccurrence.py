@@ -50,8 +50,6 @@ from marginalia.services.task_outcomes import (
     GLOBAL_OBJECT_KIND,
     record_outcome,
 )
-from marginalia.tasks.kinds import KIND_MINE_SESSION_COOCCURRENCE, task_handler
-
 log = logging.getLogger(__name__)
 
 JOURNAL_WINDOW_DAYS = 30
@@ -64,7 +62,6 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-@task_handler(KIND_MINE_SESSION_COOCCURRENCE)
 async def handle_mine_session_cooccurrence(payload: Mapping[str, Any]) -> None:
     now = _utcnow()
     cutoff = now - timedelta(
@@ -135,7 +132,7 @@ async def handle_mine_session_cooccurrence(payload: Mapping[str, Any]) -> None:
 
         await record_outcome(
             session,
-            task_kind=KIND_MINE_SESSION_COOCCURRENCE,
+            task_kind="mine_session_cooccurrence",
             object_kind=GLOBAL_OBJECT_KIND,
             object_id=GLOBAL_OBJECT_ID,
             outcome="applied" if (new_relations or incremented) else "noop",

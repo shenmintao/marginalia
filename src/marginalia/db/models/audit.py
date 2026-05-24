@@ -31,7 +31,7 @@ class AuditEvent(Base, IdMixin):
     """Database-change event stream (90-day rolling).
 
     Records every state-changing action against the DB. INSERT-only —
-    `prune_audit_events` is the sole delete path.
+    `prune` is the sole delete path.
 
     `kind` examples: file_created / entry_created / lifecycle_changed /
     journal_entry_written / tag_created / tag_merged / catalog_moved /

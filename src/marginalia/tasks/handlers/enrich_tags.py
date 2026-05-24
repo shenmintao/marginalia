@@ -56,7 +56,7 @@ from marginalia.services.task_outcomes import (
     GLOBAL_OBJECT_KIND,
     record_outcome,
 )
-from marginalia.tasks.kinds import KIND_ENRICH_TAGS, task_handler
+ENRICH_TASK_KIND = "enrich_tags"
 
 log = logging.getLogger(__name__)
 
@@ -110,7 +110,6 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-@task_handler(KIND_ENRICH_TAGS)
 async def handle_enrich_tags(payload: Mapping[str, Any]) -> None:
     now = _utcnow()
     cutoff = now - ENRICH_INTERVAL
@@ -120,7 +119,7 @@ async def handle_enrich_tags(payload: Mapping[str, Any]) -> None:
         async with session_scope() as session:
             await record_outcome(
                 session,
-                task_kind=KIND_ENRICH_TAGS,
+                task_kind=ENRICH_TASK_KIND,
                 object_kind=GLOBAL_OBJECT_KIND,
                 object_id=GLOBAL_OBJECT_ID,
                 outcome="noop",
@@ -134,7 +133,7 @@ async def handle_enrich_tags(payload: Mapping[str, Any]) -> None:
         async with session_scope() as session:
             await record_outcome(
                 session,
-                task_kind=KIND_ENRICH_TAGS,
+                task_kind=ENRICH_TASK_KIND,
                 object_kind=GLOBAL_OBJECT_KIND,
                 object_id=GLOBAL_OBJECT_ID,
                 outcome="noop",
@@ -167,7 +166,7 @@ async def handle_enrich_tags(payload: Mapping[str, Any]) -> None:
     async with session_scope() as session:
         await record_outcome(
             session,
-            task_kind=KIND_ENRICH_TAGS,
+            task_kind=ENRICH_TASK_KIND,
             object_kind=GLOBAL_OBJECT_KIND,
             object_id=GLOBAL_OBJECT_ID,
             outcome="applied" if total_added else "noop",
@@ -196,7 +195,7 @@ async def _select_candidates(*, cutoff: datetime, limit: int) -> list[dict[str, 
         recently_enriched_subq = (
             select(TaskOutcome.object_id)
             .where(
-                TaskOutcome.task_kind == KIND_ENRICH_TAGS,
+                TaskOutcome.task_kind == ENRICH_TASK_KIND,
                 TaskOutcome.object_kind == "file_entry",
                 TaskOutcome.completed_at >= cutoff,
             )
@@ -368,7 +367,7 @@ async def _apply_assignments(
 
             await record_outcome(
                 session,
-                task_kind=KIND_ENRICH_TAGS,
+                task_kind=ENRICH_TASK_KIND,
                 object_kind="file_entry",
                 object_id=entry_id,
                 outcome="applied" if new_picks else "noop",

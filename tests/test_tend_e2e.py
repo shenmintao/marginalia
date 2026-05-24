@@ -4,7 +4,7 @@ Run:
     .venv/Scripts/python tests/test_tend_e2e.py
 
 Verifies:
-  1. POST /v1/tend enqueues all 7 kinds in TEND_CHAIN with priority + dedup
+  1. POST /v1/tend enqueues all 6 kinds in TEND_CHAIN with priority + dedup
      reused if a periodic kind is already in flight.
   2. Each enqueued task has payload['tend_run_id'] = run_id.
   3. A `task_outcomes` dispatch row is written with task_kind=tend_dispatch

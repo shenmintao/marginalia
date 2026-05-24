@@ -24,22 +24,16 @@ import marginalia.tasks.handlers  # noqa: F401
 
 from marginalia.tasks.kinds import (
     DEFAULT_PRIORITIES,
-    KIND_ENRICH_TAGS,
-    KIND_MINE_CITATION_GRAPH,
-    KIND_MINE_CORPUS_EVIDENCE,
-    KIND_MINE_SESSION_COOCCURRENCE,
-    KIND_MINE_TAG_OVERLAP,
-    KIND_NORMALIZE_TAGS,
+    KIND_MINE_RELATIONS,
     KIND_PERIODIC_TICK,
     KIND_PROPOSE_VIEWS,
-    KIND_PRUNE_AUDIT_EVENTS,
-    KIND_PRUNE_TASK_OUTCOMES,
+    KIND_PRUNE,
     KIND_PURGE_DELETED_FILES,
     KIND_RECOVER_STUCK_TASKS,
     KIND_REFRESH_ENTRY_EXTRA,
     KIND_RESTRUCTURE_CATALOGS,
-    KIND_SUGGEST_ARCHIVAL,
-    KIND_SUGGEST_DEMOTION,
+    KIND_SUGGEST_LIFECYCLE,
+    KIND_TAG_QUALITY,
     KIND_VET_RELATIONS,
     PERIODIC_INTERVALS,
     registered_kinds,
@@ -52,20 +46,14 @@ from marginalia.tasks.kinds import (
 EXPECTED_PERIODIC = {
     KIND_RECOVER_STUCK_TASKS,
     KIND_PURGE_DELETED_FILES,
-    KIND_NORMALIZE_TAGS,
-    KIND_ENRICH_TAGS,
+    KIND_TAG_QUALITY,
     KIND_RESTRUCTURE_CATALOGS,
-    KIND_SUGGEST_DEMOTION,
-    KIND_SUGGEST_ARCHIVAL,
-    KIND_MINE_SESSION_COOCCURRENCE,
-    KIND_MINE_TAG_OVERLAP,
-    KIND_MINE_CITATION_GRAPH,
-    KIND_MINE_CORPUS_EVIDENCE,
+    KIND_SUGGEST_LIFECYCLE,
+    KIND_MINE_RELATIONS,
     KIND_VET_RELATIONS,
     KIND_PROPOSE_VIEWS,
     KIND_REFRESH_ENTRY_EXTRA,
-    KIND_PRUNE_AUDIT_EVENTS,
-    KIND_PRUNE_TASK_OUTCOMES,
+    KIND_PRUNE,
 }
 
 
@@ -74,6 +62,11 @@ EXPECTED_PERIODIC = {
 EXPECTED_NON_PERIODIC = {
     "reflect_turn",
     "ingest_file",
+    # summarize_session is per-session: periodic_tick scans for eligible
+    # sessions and enqueues one task per session with a session-scoped
+    # dedup_key. It does NOT live in PERIODIC_INTERVALS (which only handles
+    # global one-task-per-kind dispatch).
+    "summarize_session",
     KIND_PERIODIC_TICK,
 }
 

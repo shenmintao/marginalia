@@ -3,7 +3,7 @@
 Scheduling-side fact table. Records "what did task X do to object Y when?"
 so handlers can answer idempotence / recency questions WITHOUT reading
 audit_events. Read by infrastructure only; INSERT-only; pruned on a 30-day
-rolling window by `prune_task_outcomes`.
+rolling window by `prune` (task_outcomes target).
 
 Why a separate table instead of audit_events:
   - audit_events is the "data-change event stream" — read by humans for
@@ -30,7 +30,7 @@ class TaskOutcome(Base, IdMixin):
 
     `object_kind='global'` + `object_id='global'` is used by tasks that
     don't operate on a single object (e.g. `normalize_tags` runs across
-    every facet; `prune_audit_events` cleans the whole table).
+    every facet; `prune` cleans the whole audit table).
     """
 
     __tablename__ = "task_outcomes"
