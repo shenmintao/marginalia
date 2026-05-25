@@ -1,0 +1,18 @@
+# Editors / OS
+.DS_Store
+.vscode/*
+!.vscode/extensions.json
+
+# Build output
+node_modules/
+dist/
+dist-ssr/
+*.local
+*.tsbuildinfo
+
+# Tauri (added when src-tauri/ is generated)
+src-tauri/target/
+src-tauri/gen/
+
+# Env
+.env.local

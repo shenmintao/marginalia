@@ -128,6 +128,21 @@ async def list_canonical_summaries(
     return [(n, f, dc) for n, f, dc in rows]
 
 
+async def name_by_ids(
+    db: AsyncSession, ids: list[str],
+) -> dict[str, str]:
+    """Map `tag_id -> name` for the given ids. Used by the agent runtime
+    so tool_call display can render `tags 'concept-id'` as `tags 'foo'`."""
+    if not ids:
+        return {}
+    rows = (
+        await db.execute(
+            select(Tag.id, Tag.name).where(Tag.id.in_(ids))
+        )
+    ).all()
+    return {tid: n for tid, n in rows}
+
+
 async def list_canonical_id_name(
     db: AsyncSession,
 ) -> list[tuple[str, str]]:

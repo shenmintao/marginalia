@@ -771,10 +771,18 @@ async def chat(ctx: CliContext, message: str) -> None:
                     payload = json.loads(ev.data)
                 except (ValueError, TypeError):
                     payload = {}
-                _swap(_format_tool_call(
-                    payload.get("name", "?"),
-                    payload.get("arguments") or {},
-                ))
+                # Backend now sends a kb-lite-style `display` one-liner
+                # with entry_ids resolved to display names. Use it when
+                # present; older payloads fall through to the local
+                # JSON-style formatter.
+                display = payload.get("display")
+                if display:
+                    _swap(f"calling {display}")
+                else:
+                    _swap(_format_tool_call(
+                        payload.get("name", "?"),
+                        payload.get("arguments") or {},
+                    ))
             elif ev.event_type == "tool_result":
                 # Tool spinner stays open until the next phase event commits
                 # it. Surface failure inline so the cause is visible.

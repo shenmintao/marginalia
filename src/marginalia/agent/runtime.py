@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -61,9 +62,12 @@ from marginalia.llm import (
 )
 from marginalia.config import get_settings
 from marginalia.repositories import sessions as session_service
+from marginalia.repositories import entries as entries_repo
+from marginalia.repositories import tags as tags_repo
 from marginalia.repositories.task_outcomes import record_outcome
 from marginalia.tasks.enqueue import enqueue
 from marginalia.tasks.kinds import KIND_REFLECT_TURN
+from marginalia.agent import tool_display
 
 log = logging.getLogger(__name__)
 
@@ -179,13 +183,17 @@ async def run_turn(
 
     yield AgentEvent(event_type="conversation", data=conversation_id)
 
-    system_prompt = render_system_prompt(snapshot)
+    # Two disjoint prompts (kb-lite-style). Each phase only sees the rules
+    # that apply to it, so plan can't be tempted to write a markdown answer
+    # under "must always use [^a] footnotes" instructions.
+    plan_system = render_system_prompt(snapshot, phase="plan")
+    execute_system = render_system_prompt(snapshot, phase="execute")
     chat = get_chat_client("chat")
 
     yield AgentEvent(event_type="planning")
     plan_text = await _run_plan_phase(
         chat=chat,
-        system_prompt=system_prompt,
+        system_prompt=plan_system,
         user_message=user_message,
         conversation_id=conversation_id,
     )
@@ -198,11 +206,14 @@ async def run_turn(
         # still emit one fake "thinking" so the SSE stream shape stays
         # consistent for clients, and an "answer" with the planner's text.
         outcome.answer = no_plan_answer
-        yield AgentEvent(event_type="answer", data=no_plan_answer)
+        yield AgentEvent(
+            event_type="answer",
+            data=await _rewrite_footnotes_for_display(no_plan_answer),
+        )
     else:
         async for ev in _run_execute_phase(
             chat=chat,
-            system_prompt=system_prompt,
+            system_prompt=execute_system,
             plan_text=plan_text,
             user_message=user_message,
             conversation_id=conversation_id,
@@ -338,6 +349,73 @@ async def _run_plan_phase(
     return plan_text
 
 
+# ---- live-render footnote rewrite ----------------------------------------
+
+# Same shape as services/exports.py:_FOOTNOTE_RE — agent emits citation
+# defs as `[^a]: entry_id=<uuid>[, section_id=<sid>] - reason`. For the
+# live SSE answer we resolve the uuid to display_name and rewrite to a
+# user-friendly form. The persisted `agent_response` (and therefore
+# downstream exports) keep the raw form so the export parser still works.
+#
+# UUID is matched strictly so the regex doesn't greedy-backtrack and eat
+# the trailing `, section_id=...` / parenthetical / em-dash + reason.
+_LIVE_FOOTNOTE_RE = re.compile(
+    r"^\[\^([^\]]+)\]:\s*entry_id\s*=\s*"
+    r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
+    r"(?:\s*,\s*section_id\s*=\s*(\S+?))?"
+    r"(?:\s+\([^)]*\))?"
+    r"(?:\s*[-—–]\s*(.+?))?"
+    r"\s*$",
+    re.MULTILINE,
+)
+
+
+async def _rewrite_footnotes_for_display(answer: str) -> str:
+    """Resolve `[^a]: entry_id=<uuid>...` defs to `[^a]: [name](entry:<short>)...`.
+
+    Same logic as services/exports.py:render_inline_markdown but for live
+    streaming — looks up display_name in one DB round trip and rewrites
+    each definition. Missing entries fall back to `(entry <short> unavailable)`.
+    Body `[^a]` markers are untouched so GFM footnote linking still works.
+    """
+    if not answer or "entry_id" not in answer:
+        return answer
+    matches = list(_LIVE_FOOTNOTE_RE.finditer(answer))
+    if not matches:
+        return answer
+
+    entry_ids = list({m.group(2).strip() for m in matches})
+    name_by_id: dict[str, str] = {}
+    try:
+        async with session_scope() as db:
+            rows = await entries_repo.list_live_with_file_by_ids(db, entry_ids)
+            name_by_id = {entry.id: entry.display_name for entry, _ in rows}
+    except Exception:
+        log.exception("footnote rewrite: entry lookup failed; keeping raw form")
+        return answer
+
+    def _replace(m: re.Match[str]) -> str:
+        marker = m.group(1)
+        eid = m.group(2).strip()
+        section_id = m.group(3).strip() if m.group(3) else None
+        reason = m.group(4).strip() if m.group(4) else None
+        short = eid[:8]
+        name = name_by_id.get(eid)
+        if name is None:
+            head = f"(entry {short} unavailable)"
+        else:
+            head = f"[{name}](entry:{short})"
+        parts = [head]
+        if section_id:
+            parts.append(f"section {section_id}")
+        tail = ", ".join(parts)
+        if reason:
+            tail = f"{tail} — {reason}"
+        return f"[^{marker}]: {tail}"
+
+    return _LIVE_FOOTNOTE_RE.sub(_replace, answer)
+
+
 # ---- execute --------------------------------------------------------------
 
 async def _run_execute_phase(
@@ -432,13 +510,19 @@ async def _run_execute_phase(
         if resp.stop_reason in ("end_turn", "stop_sequence"):
             answer = _strip_leaked_no_plan(resp.text or last_text or "(无回答)")
             outcome.answer = answer
-            yield AgentEvent(event_type="answer", data=answer)
+            yield AgentEvent(
+                event_type="answer",
+                data=await _rewrite_footnotes_for_display(answer),
+            )
             return
         if resp.stop_reason == "max_tokens":
             log.warning("execute turn %d hit max_tokens; treating as final", turn)
             answer = _strip_leaked_no_plan(resp.text or last_text or "(无回答)")
             outcome.answer = answer
-            yield AgentEvent(event_type="answer", data=answer)
+            yield AgentEvent(
+                event_type="answer",
+                data=await _rewrite_footnotes_for_display(answer),
+            )
             return
 
     log.warning("conversation %s hit MAX_EXECUTE_TURNS=%d", conversation_id,
@@ -449,7 +533,10 @@ async def _run_execute_phase(
     )
     outcome.truncated = True
     outcome.answer = fallback
-    yield AgentEvent(event_type="answer", data=fallback)
+    yield AgentEvent(
+        event_type="answer",
+        data=await _rewrite_footnotes_for_display(fallback),
+    )
 
 
 def _budget_tail(*, turn: int) -> str | None:
@@ -543,11 +630,42 @@ async def _dispatch_tool_calls(
     """
     nudge_pending = False
     for tc in tool_calls:
+        # Pre-resolve any entry_ids referenced in args so the display
+        # one-liner can show filenames instead of raw uuids. One DB
+        # round trip per tool call (skipped when no entry_ids present).
+        eids = tool_display.collect_entry_ids(tc.name, tc.arguments)
+        tids = tool_display.collect_tag_ids(tc.name, tc.arguments)
+        name_by_id: dict[str, str] = {}
+        tag_name_by_id: dict[str, str] = {}
+        if eids or tids:
+            try:
+                async with session_scope() as _db:
+                    if eids:
+                        rows = await entries_repo.list_live_with_file_by_ids(
+                            _db, list(set(eids))
+                        )
+                        name_by_id = {entry.id: entry.display_name for entry, _ in rows}
+                    if tids:
+                        tag_name_by_id = await tags_repo.name_by_ids(
+                            _db, list(set(tids))
+                        )
+            except Exception:
+                log.exception("tool_call display: entry/tag lookup failed")
+
+        display = tool_display.format_tool_call(
+            tc.name, tc.arguments,
+            resolver=name_by_id.get,
+            tag_resolver=tag_name_by_id.get,
+        )
+
         yield AgentEvent(
             event_type="tool_call",
             data=json.dumps({
                 "name": tc.name,
                 "arguments": tc.arguments,
+                "display": display,
+                "entry_names": name_by_id,
+                "tag_names": tag_name_by_id,
             }, ensure_ascii=False),
         )
 
