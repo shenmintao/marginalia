@@ -150,14 +150,14 @@ def test_init_project_creates_artifacts() -> None:
     names = {a.name: a.status for a in artifacts}
     assert ".env" in names and names[".env"] == _Status.CREATED
     assert "data/" in names and names["data/"] == _Status.CREATED
-    assert "data/objects/" in names and names["data/objects/"] == _Status.CREATED
+    assert "data/library/" in names and names["data/library/"] == _Status.CREATED
     assert ".marginalia/" in names and names[".marginalia/"] == _Status.CREATED
     assert ".gitignore" in names and names[".gitignore"] == _Status.CREATED
 
     # File system reality checks
     assert (tgt / ".env").is_file()
     assert (tgt / "data").is_dir()
-    assert (tgt / "data" / "objects").is_dir()
+    assert (tgt / "data" / "library").is_dir()
     assert (tgt / ".marginalia").is_dir()
     gi = (tgt / ".gitignore").read_text(encoding="utf-8")
     for entry in (".env", "data/", ".marginalia/", "*.db", "*.db-shm", "*.db-wal"):
@@ -178,7 +178,7 @@ def test_init_project_idempotent() -> None:
     artifacts = init_project(tgt)
     statuses = {a.name: a.status for a in artifacts}
     # Everything already exists → SKIPPED
-    for n in (".env", "data/", "data/objects/", ".marginalia/"):
+    for n in (".env", "data/", "data/library/", ".marginalia/"):
         assert statuses[n] == _Status.SKIPPED, f"{n} not skipped on rerun"
     # .gitignore: all entries present → SKIPPED (not UPDATED)
     assert statuses[".gitignore"] == _Status.SKIPPED
@@ -291,8 +291,7 @@ def test_repl_fallback_when_not_tty() -> None:
     # Carve a fresh DB sandbox just for this test
     sandbox = _TEST_ROOT / "repl_fallback"
     sandbox.mkdir(parents=True)
-    os.environ["SQLITE_PATH"] = str(sandbox / "marginalia.db")
-    os.environ["LOCAL_STORAGE_ROOT"] = str(sandbox / "objects")
+    os.environ["MARGINALIA_HOME"] = str(sandbox)
     os.environ["STORAGE_BACKEND"] = "local"
     os.environ["WORKER_ENABLED"] = "false"
     os.environ["LLM_DEFAULT_API_KEY"] = "sk-fake"
@@ -375,8 +374,7 @@ def test_embedded_mode_starts_lifespan_and_exits_cleanly() -> None:
 
     sandbox = _TEST_ROOT / "embedded_mode"
     sandbox.mkdir(parents=True)
-    os.environ["SQLITE_PATH"] = str(sandbox / "marginalia.db")
-    os.environ["LOCAL_STORAGE_ROOT"] = str(sandbox / "objects")
+    os.environ["MARGINALIA_HOME"] = str(sandbox)
     os.environ["WORKER_ENABLED"] = "true"
     os.environ["LLM_DEFAULT_API_KEY"] = "sk-fake"
     os.environ["LLM_DEFAULT_MODEL"] = "fake-model"

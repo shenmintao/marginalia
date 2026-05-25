@@ -1,40 +1,29 @@
-"""Minimal markdown→ANSI renderer in Claude Code's spirit.
+"""marginalia CLI rendering: glowpy-backed markdown + spinner.
 
-Rules:
-  - Headings (#  ##  ###) → reverse video on the title text only,
-    flushed left, single line. No big bordered blocks.
-  - Code fences ``` → indented block, dim color, no boxes.
-  - Inline `code` → cyan.
-  - **bold** / __bold__ → bold. *italic* / _italic_ → italic.
-  - Lists ('- ' / '* ' / '1. ') → keep as-is, lightly indent nested.
-  - Blockquotes (> ) → vertical bar prefix in dim.
-  - Footnote refs `[^a]` → kept literal (Marginalia agent uses these).
-  - Links `[text](url)` → text underlined; url shown afterwards in dim.
-  - Tables → aligned column output with dim borders.
-  - Hr (---) → dim '────'.
+Markdown is rendered by glowpy with the `claude-code` theme as the default,
+plus a marginalia-flavoured override that keeps `[^a]` footnote refs as a
+blue-bold tag (the agent uses these heavily and they need to pop visually).
 
-Designed to be readable in monospace terminals. No third-party dependency.
-
-Spinner / progress indicators inspired by claw-code's `render.rs`.
+Spinner / progress indicators are local, kb-lite-style.
 """
 from __future__ import annotations
 
 import itertools
 import os
-import re
 import sys
 import threading
 import time
 from contextlib import contextmanager
 
-# ---- ANSI codes ------------------------------------------------------------
+from glowpy import ColorDepth, Theme, get_theme, render as _glow_render
+
+# ---- ANSI codes (kept for spinner + commands.py imports) ------------------
 
 RESET = "\x1b[0m"
 BOLD = "\x1b[1m"
 DIM = "\x1b[2m"
 ITALIC = "\x1b[3m"
 UNDER = "\x1b[4m"
-REV = "\x1b[7m"
 
 CYAN = "\x1b[36m"
 GREEN = "\x1b[32m"
@@ -47,25 +36,13 @@ CLEAR_LINE = "\x1b[2K"
 CR = "\r"
 
 
-def _osc8(text: str, url: str) -> str:
-    """OSC-8 hyperlink. Falls back to plain underline + dim url when colour
-    is unsupported."""
-    if not _COLOR:
-        return text + " (" + url + ")"
-    return f"\x1b]8;;{url}\x1b\\{UNDER}{text}{RESET}\x1b]8;;\x1b\\"
-
-
 def _enable_windows_vt() -> bool:
-    """Flip on ENABLE_VIRTUAL_TERMINAL_PROCESSING for both stdout and stderr
-    consoles. No-op (returns True) on non-Windows. Returns False if the call
-    fails — caller falls back to plain text."""
     if os.name != "nt":
         return True
     try:
         import ctypes
 
         kernel32 = ctypes.windll.kernel32
-        # GetStdHandle: -11 = STD_OUTPUT_HANDLE, -12 = STD_ERROR_HANDLE
         for std_id in (-11, -12):
             handle = kernel32.GetStdHandle(std_id)
             if handle in (0, -1):
@@ -73,7 +50,6 @@ def _enable_windows_vt() -> bool:
             mode = ctypes.c_uint32()
             if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
                 continue
-            # ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
             kernel32.SetConsoleMode(handle, mode.value | 0x0004)
         return True
     except Exception:
@@ -95,243 +71,209 @@ def _supports_color() -> bool:
 _COLOR = _supports_color()
 
 
-def _wrap(s: str, *codes: str) -> str:
-    if not _COLOR or not s:
-        return s
-    return "".join(codes) + s + RESET
+# ---- Theme: claude-code with a marginalia footnote accent -----------------
+
+def _build_theme() -> Theme:
+    base = get_theme("claude-code")
+    # Footnote refs/defs in marginalia are heavy-use citation markers — the
+    # default italic-grey is too subtle. Use blue + bold so the eye picks them
+    # out as a tag, matching the prior hand-rolled renderer's contract.
+    base.footnote.color = "#7AB4E8"
+    base.footnote.bold = True
+    base.footnote.italic = False
+    return base
 
 
-# ---- inline rendering ------------------------------------------------------
-
-_INLINE_CODE = re.compile(r"`([^`]+)`")
-_BOLD = re.compile(r"\*\*([^*]+)\*\*|__([^_]+)__")
-_ITALIC = re.compile(r"(?<![*\w])\*([^*]+)\*(?!\w)|(?<![_\w])_([^_]+)_(?!\w)")
-_LINK = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
-_FOOTNOTE_REF = re.compile(r"\[\^([^\]]+)\]")
-_FOOTNOTE_DEF = re.compile(r"^(\[\^[^\]]+\]:)\s*(.*)$")
+_THEME = _build_theme()
 
 
-def _render_inline(text: str) -> str:
-    # link first — later passes inject ANSI '[' bytes that confuse _LINK.
-    text = _LINK.sub(lambda m: _osc8(m.group(1), m.group(2)), text)
-    # footnote refs render as a small blue-bold tag, distinct from a bare
-    # `[a]` literal so the eye picks them up as citation markers.
-    text = _FOOTNOTE_REF.sub(
-        lambda m: _wrap(f"[^{m.group(1)}]", BLUE, BOLD), text,
-    )
-    text = _INLINE_CODE.sub(lambda m: _wrap(m.group(1), BLUE), text)
-    text = _BOLD.sub(lambda m: _wrap(m.group(1) or m.group(2), BOLD), text)
-    text = _ITALIC.sub(lambda m: _wrap(m.group(1) or m.group(2), ITALIC), text)
-    return text
+def _theme_accent() -> str:
+    """ANSI sequence for the theme's H1 colour — banner border + title use
+    this so the box harmonises with the rest of glowpy's output. Falls back
+    to standard blue if the theme didn't set one."""
+    hex_color = _THEME.h1.color or "#BD93F9"
+    h = hex_color.lstrip("#")
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    return f"\x1b[38;2;{r};{g};{b}m"
 
 
-# ---- block rendering ------------------------------------------------------
+# Spelled-out so the banner can call it without re-parsing every render
+_THEME_ACCENT = _theme_accent()
 
-_HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
-_HR = re.compile(r"^\s*([-*_])\s*\1\s*\1\s*$")
-_FENCE = re.compile(r"^\s*```([^\s`]*)\s*$")
-_BLOCKQUOTE = re.compile(r"^>\s?(.*)$")
 
+# ---- markdown rendering ---------------------------------------------------
 
 def render_markdown(md: str) -> str:
-    """Return an ANSI-coloured rendering of `md`. Always returns a string;
-    when colour is unsupported the markup is stripped to plain text.
+    """Return an ANSI-rendered version of `md` using the claude-code theme.
 
-    Blocks (heading / paragraph / code-fence / blockquote / list / table /
-    hr) are separated by a single blank line — runs of list items or
-    blockquote lines stay tight."""
-    blocks: list[list[str]] = []
-    cur: list[str] = []
-    last_kind: str | None = None
-
-    def _flush(kind: str | None) -> None:
-        nonlocal cur, last_kind
-        if cur:
-            blocks.append(cur)
-            cur = []
-        last_kind = kind
-
-    in_fence = False
-    table_buf: list[str] = []
-
-    for raw in md.splitlines():
-        if in_fence:
-            if _FENCE.match(raw):
-                in_fence = False
-                continue
-            cur.append(_wrap("    " + raw, DIM_GREY))
-            continue
-
-        m = _FENCE.match(raw)
-        if m:
-            if last_kind != "code":
-                _flush("code")
-            in_fence = True
-            lang = m.group(1) or None
-            if lang:
-                cur.append(_wrap(f"    {lang}", DIM))
-            last_kind = "code"
-            continue
-
-        if _looks_like_table_row(raw):
-            table_buf.append(raw)
-            continue
-        elif table_buf:
-            _flush("table")
-            cur.append(render_table(table_buf))
-            table_buf.clear()
-            _flush("table")
-
-        m = _HEADING.match(raw)
-        if m:
-            _flush("heading")
-            level = len(m.group(1))
-            title = m.group(2)
-            if level == 1:
-                cur.append(_wrap(title, BOLD, ITALIC, UNDER))
-            else:
-                cur.append(_wrap(title, BOLD))
-            _flush("heading")
-            continue
-
-        m = _BLOCKQUOTE.match(raw)
-        if m:
-            if last_kind != "quote":
-                _flush("quote")
-            inner = _render_inline(m.group(1))
-            cur.append(_wrap("│", DIM_GREY) + " " + _wrap(inner, ITALIC))
-            last_kind = "quote"
-            continue
-
-        m = _FOOTNOTE_DEF.match(raw)
-        if m:
-            if last_kind != "footnote":
-                _flush("footnote")
-            marker = _wrap(m.group(1), BLUE, BOLD)
-            body = _wrap(_render_inline(m.group(2)), DIM)
-            cur.append(marker + " " + body)
-            last_kind = "footnote"
-            continue
-
-        if _HR.match(raw):
-            _flush("hr")
-            cur.append("---")
-            _flush("hr")
-            continue
-
-        if not raw.strip():
-            _flush(None)
-            continue
-
-        # list item: keep adjacent items in the same block (no gap between).
-        stripped = raw.lstrip()
-        is_list = (
-            stripped.startswith(("- ", "* ", "+ "))
-            or bool(re.match(r"^\d+\.\s", stripped))
-        )
-        if is_list:
-            if last_kind != "list":
-                _flush("list")
-            cur.append(_render_inline(raw))
-            last_kind = "list"
-            continue
-
-        # paragraph: flush if previous was a different block.
-        if last_kind not in (None, "para"):
-            _flush("para")
-        cur.append(_render_inline(raw))
-        last_kind = "para"
-
-    if table_buf:
-        _flush("table")
-        cur.append(render_table(table_buf))
-        table_buf.clear()
-    _flush(None)
-
-    return "\n\n".join("\n".join(b) for b in blocks)
+    When colour is unsupported (no TTY, NO_COLOR, TERM=dumb, or VT enable
+    fails on Windows), we still run the layout pass but emit no SGR codes —
+    callers like the table renderer rely on the visible structure (borders,
+    indentation) regardless of whether colour is on."""
+    try:
+        depth = None if _COLOR else ColorDepth.NONE
+        return _glow_render(
+            md, theme=_THEME, hyperlinks=_COLOR, color_depth=depth
+        ).rstrip("\n")
+    except Exception:
+        return md
 
 
 def print_markdown(md: str) -> None:
     print(render_markdown(md))
 
 
-# ---- table rendering ------------------------------------------------------
-
-_TABLE_ROW_RE = re.compile(r"^\s*\|.*\|\s*$")
-_TABLE_SEPARATOR_RE = re.compile(r"^\s*\|?\s*[:\- ]+\s*(\|\s*[:\- ]+\s*)*\|?\s*$")
-
-
-def _looks_like_table_row(line: str) -> bool:
-    """A markdown table row starts and ends with `|`."""
-    return bool(_TABLE_ROW_RE.match(line))
-
-
-def _split_row(line: str) -> list[str]:
-    line = line.strip()
-    if line.startswith("|"):
-        line = line[1:]
-    if line.endswith("|"):
-        line = line[:-1]
-    return [c.strip() for c in line.split("|")]
-
-
 def render_table(rows: list[str]) -> str:
-    """Render markdown table lines with `|` column separators and a `-`
-    header rule. No outer frame — matches Claude Code's `applyMarkdown`."""
+    """Render a list of pipe-delimited markdown table rows.
+
+    Kept for backward compat: a few callers and tests pass raw `| a | b |`
+    lines without a separator row. We re-join them as a markdown fragment
+    and let glowpy handle layout."""
     if not rows:
         return ""
-    parsed: list[list[str]] = []
-    has_header = False
-    for i, line in enumerate(rows):
-        if i == 1 and _TABLE_SEPARATOR_RE.match(line):
-            has_header = True
+    md = "\n".join(rows)
+    # glowpy/markdown-it requires a separator row to recognise a table;
+    # synthesise one from the first row's column count when missing.
+    first = rows[0].strip()
+    cols = max(1, first.count("|") - 1)
+    sep = "|" + "|".join([" --- "] * cols) + "|"
+    md_with_sep = rows[0] + "\n" + sep + "\n" + "\n".join(rows[1:])
+    depth = None if _COLOR else ColorDepth.NONE
+    out = _glow_render(
+        md_with_sep, theme=_THEME, hyperlinks=False, color_depth=depth
+    )
+    return out.rstrip("\n")
+
+
+# ---- startup banner (claude-code-style rounded box) ----------------------
+
+# claude-code uses a rounded rectangle borrowing its theme `claude` color for
+# the border and a small ASCII mascot inside. We borrow the structure but
+# keep marginalia's own visual identity — a stack of dog-eared pages, since
+# this is a personal library. The whole thing degrades to plain text when
+# colour is off (NO_COLOR / pipes / Windows VT off).
+
+_BANNER_BOX_TOP_L = "╭"
+_BANNER_BOX_TOP_R = "╮"
+_BANNER_BOX_BOT_L = "╰"
+_BANNER_BOX_BOT_R = "╯"
+_BANNER_BOX_H = "─"
+_BANNER_BOX_V = "│"
+
+_BANNER_BOX_ASCII = {
+    _BANNER_BOX_TOP_L: "+", _BANNER_BOX_TOP_R: "+",
+    _BANNER_BOX_BOT_L: "+", _BANNER_BOX_BOT_R: "+",
+    _BANNER_BOX_H: "-", _BANNER_BOX_V: "|",
+}
+
+
+def _banner_glyphs() -> dict[str, str]:
+    """Pick box-drawing chars the current stdout encoding can actually
+    print. Modern terminals (Windows Terminal, iTerm, gnome-terminal)
+    handle the rounded box; legacy cmd.exe under cp936/cp1252 can encode
+    these to bytes via its codepage but the glyphs render as mojibake,
+    so fall back to ASCII for anything other than UTF-8."""
+    enc = (getattr(sys.stdout, "encoding", "") or "").lower().replace("-", "")
+    if enc in ("utf8", "utf16", "utf32") or enc.startswith("utf"):
+        return {ch: ch for ch in _BANNER_BOX_ASCII}
+    return dict(_BANNER_BOX_ASCII)
+
+_BANNER_MASCOT = (
+    "  .------.  ",
+    "  |======|  ",
+    "  |------|  ",
+    "  '------'  ",
+)
+
+
+def _ansi_strip_len(s: str) -> int:
+    """Visible length, ignoring ANSI SGR escapes — needed for box padding."""
+    out = []
+    skip = False
+    for ch in s:
+        if skip:
+            if ch == "m":
+                skip = False
             continue
-        parsed.append(_split_row(line))
-    if not parsed:
-        return ""
-    n_cols = max(len(r) for r in parsed)
-    for r in parsed:
-        while len(r) < n_cols:
-            r.append("")
-    widths = [
-        max(_visible_len(r[c]) for r in parsed)
-        for c in range(n_cols)
-    ]
-
-    def _fmt_row(cells: list[str], *, bold: bool = False) -> str:
-        formatted: list[str] = []
-        for c, cell in enumerate(cells):
-            pad = widths[c] - _visible_len(cell)
-            inner = cell + " " * pad
-            if bold:
-                inner = _wrap(inner, BOLD)
-            formatted.append(" " + inner + " ")
-        return "|" + "|".join(formatted) + "|"
-
-    out_lines: list[str] = []
-    for i, row in enumerate(parsed):
-        out_lines.append(_fmt_row(row, bold=(has_header and i == 0)))
-        if has_header and i == 0:
-            sep_cells = ["-" * (w + 2) for w in widths]
-            out_lines.append("|" + "|".join(sep_cells) + "|")
-    return "\n".join(out_lines)
+        if ch == "\x1b":
+            skip = True
+            continue
+        out.append(ch)
+    # Treat box-drawing / CJK width as 1 here; banner content is ASCII.
+    return len(out)
 
 
-_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
+def render_banner(
+    title: str,
+    lines: list[str],
+    *,
+    width: int = 62,
+) -> str:
+    """Render a rounded-box banner with `title` in the top border and
+    `lines` (already-coloured strings) inside. Mascot tucks against the
+    right edge of the inner area when there's room."""
+    color = _THEME_ACCENT if _COLOR else ""
+    reset = RESET if _COLOR else ""
+    g = _banner_glyphs()
+    tl, tr = g[_BANNER_BOX_TOP_L], g[_BANNER_BOX_TOP_R]
+    bl, br = g[_BANNER_BOX_BOT_L], g[_BANNER_BOX_BOT_R]
+    h, v = g[_BANNER_BOX_H], g[_BANNER_BOX_V]
+
+    # Top border: ╭─ <title> ──────╮
+    title_text = f" {title} "
+    title_inner = f"{BOLD}{title_text}{RESET}" if _COLOR else title_text
+    fill = max(2, width - 2 - len(title_text) - 1)
+    top = (
+        f"{color}{tl}{h}{reset}"
+        f"{title_inner}"
+        f"{color}{h * fill}{tr}{reset}"
+    )
+
+    # Body rows: │  <line>                     <mascot row>  │
+    inner_w = width - 4  # two side borders + one space padding each side
+    mascot_w = len(_BANNER_MASCOT[0])
+    body_rows: list[str] = []
+    nrows = max(len(lines), len(_BANNER_MASCOT))
+    for i in range(nrows):
+        text = lines[i] if i < len(lines) else ""
+        mascot = _BANNER_MASCOT[i] if i < len(_BANNER_MASCOT) else " " * mascot_w
+        text_w = _ansi_strip_len(text)
+        gap = max(1, inner_w - text_w - mascot_w)
+        line = f"{text}{' ' * gap}{color}{mascot}{reset}"
+        body_rows.append(
+            f"{color}{v}{reset} {line} {color}{v}{reset}"
+        )
+
+    bottom = f"{color}{bl}{h * (width - 2)}{br}{reset}"
+    return "\n".join([top, *body_rows, bottom])
 
 
-def _visible_len(s: str) -> int:
-    """Length of `s` excluding ANSI escape sequences."""
-    return len(_ANSI_ESCAPE_RE.sub("", s))
+def print_banner(title: str, lines: list[str], *, width: int = 62) -> None:
+    print(render_banner(title, lines, width=width))
 
 
-# ---- spinner --------------------------------------------------------------
+# ---- spinner (claude-code style: breathing star + rotating verb) ---------
 
-SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+# Mirrors claude-code/components/Spinner/utils.ts:getDefaultCharacters().
+# `*` instead of `✳` on non-darwin keeps cmd.exe / Windows Terminal happy.
+_BASE_FRAMES = ("·", "✢", "*", "✶", "✻", "✽")
+SPINNER_FRAMES = _BASE_FRAMES + tuple(reversed(_BASE_FRAMES))
+
+# Subset of claude-code's SPINNER_VERBS (constants/spinnerVerbs.ts) — enough
+# variety that the spinner doesn't feel canned, short enough that the eye
+# doesn't need to chase a long word as it cycles.
+SPINNER_VERBS = (
+    "Brewing", "Cooking", "Crafting", "Composing", "Computing",
+    "Considering", "Contemplating", "Crunching", "Deliberating",
+    "Deciphering", "Distilling", "Forging", "Mulling", "Musing",
+    "Pondering", "Processing", "Reasoning", "Reflecting", "Resolving",
+    "Synthesizing", "Thinking", "Weaving", "Working", "Wrangling",
+)
+_VERB_TICK_S = 3.0  # rotate verb every ~3s while spinning
 
 
 def short_duration(seconds: float) -> str:
-    """Short human duration: `Nms` / `X.Ys` / `XmYs` / `XhYm`."""
+    """`Nms` / `X.Ys` / `XmYs` / `XhYm`."""
     if seconds < 1:
         return f"{int(seconds * 1000)}ms"
     if seconds < 60:
@@ -346,17 +288,12 @@ def short_duration(seconds: float) -> str:
 
 
 class Spinner:
-    """Animates one indented step line, kb-lite style.
+    """Animates one indented step line.
 
     Render pattern:
       while running:   `  ⠋ <label>  3.1s`        (BLUE spinner + DIM elapsed)
-      after finish():  `  -> <label>  3.1s`       (whole line DIM, kept in scrollback)
+      after finish():  `  <label>  3.1s`          (whole line dim, kept in scrollback)
       after fail():    `  ✗  <label>  3.1s`        (RED marker, message kept)
-
-    A single fixed indent (default 2 spaces) is used for every step so the
-    column stays aligned regardless of phase. `update()` swaps the label
-    in place; `finish()` / `fail()` commit the line and emit a newline so
-    the next step starts below.
 
     No-op when stdout is not a TTY so piped output stays clean.
     """
@@ -365,6 +302,9 @@ class Spinner:
         self._label = label
         self._indent = " " * indent
         self._frames = itertools.cycle(SPINNER_FRAMES)
+        self._verbs = itertools.cycle(SPINNER_VERBS)
+        self._verb = next(self._verbs)
+        self._verb_at = time.monotonic()
         self._stop_event: threading.Event | None = None
         self._thread: threading.Thread | None = None
         self._t0 = time.monotonic()
@@ -389,13 +329,18 @@ class Spinner:
     def _run(self) -> None:
         while self._stop_event is not None and not self._stop_event.is_set():
             frame = next(self._frames)
-            elapsed = short_duration(time.monotonic() - self._t0)
+            now = time.monotonic()
+            if now - self._verb_at >= _VERB_TICK_S:
+                self._verb = next(self._verbs)
+                self._verb_at = now
+            elapsed = short_duration(now - self._t0)
+            label = self._label or f"{self._verb}…"
             sys.stdout.write(
                 f"{CR}{CLEAR_LINE}{self._indent}{BLUE}{frame}{RESET} "
-                f"{self._label}  {DIM}{elapsed}{RESET}"
+                f"{label}  {DIM}{elapsed}{RESET}"
             )
             sys.stdout.flush()
-            time.sleep(0.08)
+            time.sleep(0.12)
 
     def _stop(self) -> None:
         if self._stop_event is not None:
@@ -415,9 +360,6 @@ class Spinner:
         msg = label if label is not None else self._label
         elapsed = short_duration(time.monotonic() - self._t0)
         if color is None:
-            # kb-lite-style: whole line dimmed, no marker. The committed
-            # line is just the same indented label, dim, with the final
-            # elapsed appended — leaves a clean trail in scrollback.
             line = f"{DIM}{self._indent}{msg}  {elapsed}{RESET}"
         else:
             line = (
@@ -445,7 +387,6 @@ class Spinner:
 
 @contextmanager
 def spinner(label: str):
-    """Functional shortcut: `with spinner('working...'): ...`."""
     sp = Spinner(label).start()
     try:
         yield sp

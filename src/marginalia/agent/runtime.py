@@ -59,6 +59,7 @@ from marginalia.llm import (
     ToolUseBlock,
     get_chat_client,
 )
+from marginalia.config import get_settings
 from marginalia.repositories import sessions as session_service
 from marginalia.repositories.task_outcomes import record_outcome
 from marginalia.tasks.enqueue import enqueue
@@ -69,6 +70,9 @@ log = logging.getLogger(__name__)
 MAX_EXECUTE_TURNS = 15
 EXECUTE_NUDGE_FROM = 11
 MAX_TOOL_RESULT_LEN = 50_000
+# Default token budgets — overridable per-deploy via AGENT_PLAN_MAX_TOKENS /
+# AGENT_EXECUTE_MAX_TOKENS in settings. Sized for gpt-4o-class models; bump
+# for long-context backends (DeepSeek-V3, Claude 3.5 Sonnet, etc.).
 PLAN_MAX_TOKENS = 1024
 EXECUTE_MAX_TOKENS = 2048
 TOOL_RESULT_PREVIEW_LEN = 240
@@ -310,7 +314,7 @@ async def _run_plan_phase(
     resp = await chat.complete(ChatRequest(
         system=system_prompt,
         messages=[ChatMessage(role="user", content=user_message)],
-        max_tokens=PLAN_MAX_TOKENS,
+        max_tokens=get_settings().agent_plan_max_tokens,
         tools=None,            # Plan phase: zero tools (design §10.2).
         json_schema=None,
         temperature=0.3,
@@ -378,7 +382,7 @@ async def _run_execute_phase(
         resp = await chat.complete(ChatRequest(
             system=system_prompt,
             messages=loop_messages,
-            max_tokens=EXECUTE_MAX_TOKENS,
+            max_tokens=get_settings().agent_execute_max_tokens,
             tools=tool_defs,
             tool_choice="auto",
             json_schema=None,

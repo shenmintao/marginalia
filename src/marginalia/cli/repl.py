@@ -38,9 +38,15 @@ from marginalia.cli.commands import (
     dispatch,
     list_commands,
 )
-from marginalia.cli.render import GREEN, RESET
+from marginalia.cli.render import (
+    BOLD,
+    DIM,
+    DIM_GREY,
+    RESET,
+    print_banner,
+)
 
-PROMPT = f"{GREEN}>{RESET} "
+PROMPT = f"{DIM_GREY}❯{RESET} "
 HISTORY_PATH = Path.home() / ".marginalia_history"
 EMBEDDED_BASE_URL = "http://embedded"
 EMBEDDED_MARKER = "embedded"
@@ -48,7 +54,7 @@ ENV_SERVER = "MARGINALIA_SERVER"
 
 
 def _build_prompt(ctx: CliContext, *, pending: int = 0) -> str:
-    """Compose the REPL prompt — a green `>` and nothing else.
+    """Compose the REPL prompt — a green `❯` and nothing else.
 
     Backend / cwd / busy-count used to be inlined here; they cluttered the
     line and froze the screen rhythm. Use `/busy` and `/cd` to query that
@@ -57,20 +63,40 @@ def _build_prompt(ctx: CliContext, *, pending: int = 0) -> str:
     return PROMPT
 
 
+def _build_toolbar(ctx: CliContext, *, pending: int = 0) -> str:
+    """Single-line status bar shown at the bottom of the prompt.
+
+    Mirrors claude-code's PromptInputFooter spirit: cwd on the left,
+    a couple of hints on the right. Kept dim so it doesn't pull focus
+    from the answer stream above it.
+    """
+    cwd = ctx.cwd_remote or "/"
+    busy = f"  {pending} busy" if pending > 0 else ""
+    hint = "/help  Alt+Enter newline  Ctrl+D exit"
+    return f"{DIM_GREY}{cwd}{busy}    {hint}{RESET}"
+
+
 def _print_banner(ctx: CliContext, mode: str) -> None:
-    print()
-    print("Marginalia CLI")
+    try:
+        from marginalia import __version__ as _ver
+    except Exception:
+        _ver = ""
+    title = f"Marginalia{(' v' + _ver) if _ver else ''}"
+
     if mode == EMBEDDED_MARKER:
-        print(f"  mode: embedded (server runs in this process)")
+        backend = "embedded"
     else:
-        print(f"  server: {ctx.client.base_url}")
-    print(f"  cwd:    {ctx.cwd_remote}")
+        backend = ctx.client.base_url
+    storage = ctx.storage_backend or "?"
+
+    lines = [
+        f"{BOLD}Welcome to Marginalia{RESET}  {DIM}- a personal library{RESET}",
+        f"{DIM_GREY}backend{RESET} {backend}    {DIM_GREY}storage{RESET} {storage}",
+        f"{DIM_GREY}cwd{RESET}     {ctx.cwd_remote}",
+        f"{DIM}/help for commands. Or just type a question.{RESET}",
+    ]
     print()
-    print("type /help for commands, or just type a question.")
-    print("  Tab        — complete /<command>")
-    print("  Ctrl-C     — cancel current line (or quit when empty)")
-    print("  Ctrl-D     — exit")
-    print("  Alt+Enter  — newline (multi-line input)")
+    print_banner(title, lines)
     print()
 
 
@@ -139,14 +165,15 @@ def _make_slash_completer(ctx: CliContext | None = None):
     return SlashCompleter()
 
 
-def _build_pt_session(prompt_fn, ctx: CliContext | None = None):
+def _build_pt_session(prompt_fn, ctx: CliContext | None = None, *, toolbar_fn=None):
     """Lazy-build a prompt_toolkit PromptSession with completion + history.
 
     `prompt_fn` is called once per prompt cycle to render the message
     string — this is how `marginalia[mirror /research • 12 busy]>` stays
     in sync without polling on every keystroke. `ctx` is passed to the
     completer so it can suggest entry-ids and folder paths the user has
-    already encountered.
+    already encountered. `toolbar_fn` (optional) renders a single-line
+    bottom toolbar — kept callable so it picks up live state on each redraw.
     """
     from prompt_toolkit import PromptSession
     from prompt_toolkit.formatted_text import ANSI
@@ -169,6 +196,7 @@ def _build_pt_session(prompt_fn, ctx: CliContext | None = None):
 
     return PromptSession(
         message=lambda: ANSI(prompt_fn()),
+        bottom_toolbar=(lambda: ANSI(toolbar_fn())) if toolbar_fn else None,
         completer=_make_slash_completer(ctx),
         history=FileHistory(str(history_path)) if history_path else None,
         key_bindings=bindings,
@@ -317,7 +345,9 @@ async def run_repl(
     use_pt = sys.stdin.isatty() and sys.stdout.isatty()
     pt_session = (
         _build_pt_session(
-            lambda: _build_prompt(ctx, pending=pending_count), ctx,
+            lambda: _build_prompt(ctx, pending=pending_count),
+            ctx,
+            toolbar_fn=lambda: _build_toolbar(ctx, pending=pending_count),
         )
         if use_pt else None
     )

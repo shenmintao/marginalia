@@ -182,14 +182,11 @@ renders against these.
 ```ini
 MARGINALIA_HOME=~/Marginalia     # one root; db + library + objects under here
 DB_BACKEND=sqlite                # or postgres
-SQLITE_PATH=                     # blank → <home>/marginalia.db
 
 STORAGE_BACKEND=mirror           # default. user-readable folder tree:
                                  #   <home>/library/research/llm/paper.pdf
                                  # alt: 'local' (UUID-flat, dedup on,
                                  # ~5x faster for high-churn) / 's3'
-MIRROR_VAULT_ROOT=               # blank → <home>/library
-LOCAL_STORAGE_ROOT=              # blank → <home>/objects (only for local)
 
 WORKER_ENABLED=true              # default in embedded mode
 

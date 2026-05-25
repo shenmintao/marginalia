@@ -40,8 +40,7 @@ _TEST_ROOT = Path(__file__).resolve().parent / "_user_mgmt_e2e_data"
 if _TEST_ROOT.exists():
     shutil.rmtree(_TEST_ROOT)
 _TEST_ROOT.mkdir(parents=True)
-os.environ["SQLITE_PATH"] = str(_TEST_ROOT / "marginalia.db")
-os.environ["LOCAL_STORAGE_ROOT"] = str(_TEST_ROOT / "objects")
+os.environ["MARGINALIA_HOME"] = str(_TEST_ROOT)
 os.environ["STORAGE_BACKEND"] = "local"
 os.environ["WORKER_ENABLED"] = "false"
 os.environ["LLM_DEFAULT_API_KEY"] = "sk-fake"

@@ -175,14 +175,11 @@ GET  /health                           liveness probe(无版本)
 ```ini
 MARGINALIA_HOME=~/Marginalia     # 一个根目录;db + library + objects 都在这下面
 DB_BACKEND=sqlite                # 或 postgres
-SQLITE_PATH=                     # 留空 → <home>/marginalia.db
 
 STORAGE_BACKEND=mirror           # 默认。文件以可读文件夹形式存:
                                  #   <home>/library/research/llm/paper.pdf
                                  # 备选:'local'(UUID 扁平,dedup,
                                  # 高频改写场景快约 5 倍)/ 's3'
-MIRROR_VAULT_ROOT=               # 留空 → <home>/library
-LOCAL_STORAGE_ROOT=              # 留空 → <home>/objects(仅 local 用)
 
 WORKER_ENABLED=true              # embedded 模式默认开
 

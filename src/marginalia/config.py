@@ -33,17 +33,17 @@ class Settings(BaseSettings):
     marginalia_home: str = ""  # resolved to ~/Marginalia at runtime
 
     db_backend: Literal["sqlite", "postgres"] = "sqlite"
-    sqlite_path: str = ""  # default: <home>/marginalia.db
+    # sqlite db file always lives at `<marginalia_home>/marginalia.db`. Not an
+    # env override — relocate the whole footprint via MARGINALIA_HOME instead.
     postgres_dsn: str = "postgresql+asyncpg://marginalia:marginalia@localhost:5432/marginalia"
 
     # mirror = folder-tree on disk matching the user's intent; default.
     # local  = UUID-flat object pool; faster, dedup-on, less human-friendly.
     # s3     = remote object storage for multi-host deployments.
+    # mirror/local always live under <marginalia_home>/{library,objects}.
+    # Relocate the whole footprint via MARGINALIA_HOME, or symlink a single
+    # subdir if you want db on SSD and library on a big disk.
     storage_backend: Literal["mirror", "local", "s3"] = "mirror"
-    # Used only by local backend. Default: <home>/objects/.
-    local_storage_root: str = ""
-    # Used only by mirror backend. Default: <home>/library/.
-    mirror_vault_root: str = ""
     s3_endpoint_url: str | None = None
     s3_bucket: str = "marginalia"
     s3_access_key: str | None = None
@@ -97,11 +97,32 @@ class Settings(BaseSettings):
     llm_audio_base_url: str | None = None
     llm_audio_model: str | None = None
 
+    # --- Agent token budgets ------------------------------------------------
+    # Per-call max_tokens for the planner / executor. Defaults sized for
+    # gpt-4o-class models (1024 / 2048). DeepSeek-V3 etc. can return 64K+ in
+    # one shot — bump these when running long-context models or you'll hit
+    # `stop_reason=max_tokens` and have a half-finished answer treated as
+    # final (see runtime.py:433).
+    agent_plan_max_tokens: int = 1024
+    agent_execute_max_tokens: int = 2048
+
     @property
     def database_url(self) -> str:
         if self.db_backend == "sqlite":
-            return f"sqlite+aiosqlite:///{self.sqlite_path}"
+            from pathlib import Path
+            home = Path(self.marginalia_home).expanduser()
+            return f"sqlite+aiosqlite:///{home / 'marginalia.db'}"
         return self.postgres_dsn
+
+    @property
+    def mirror_vault_root(self) -> str:
+        from pathlib import Path
+        return str(Path(self.marginalia_home).expanduser() / "library")
+
+    @property
+    def local_storage_root(self) -> str:
+        from pathlib import Path
+        return str(Path(self.marginalia_home).expanduser() / "objects")
 
 
 @dataclass(slots=True, frozen=True)
@@ -170,19 +191,20 @@ def _default_home() -> str:
 
 
 def _resolve_paths(settings: "Settings") -> None:
-    """In-place: fill blank path fields from marginalia_home so the
-    user only needs to set MARGINALIA_HOME (or nothing) to relocate the
-    whole on-disk footprint."""
+    """In-place: resolve `marginalia_home` to an absolute path and ensure
+    it exists.
+
+    Without the mkdir, an unset / fresh-install MARGINALIA_HOME blows up at
+    the first sqlite connect with `unable to open database file` because
+    aiosqlite refuses to mkdir for you. Storage backends (mirror/local)
+    handle their own subdir creation lazily, so the home dir itself is the
+    only thing we guarantee here.
+    """
     from pathlib import Path
     home = settings.marginalia_home or _default_home()
     home_path = Path(home).expanduser()
     settings.marginalia_home = str(home_path)
-    if not settings.sqlite_path:
-        settings.sqlite_path = str(home_path / "marginalia.db")
-    if not settings.local_storage_root:
-        settings.local_storage_root = str(home_path / "objects")
-    if not settings.mirror_vault_root:
-        settings.mirror_vault_root = str(home_path / "library")
+    home_path.mkdir(parents=True, exist_ok=True)
 
 
 @lru_cache(maxsize=1)

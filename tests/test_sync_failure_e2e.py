@@ -26,8 +26,6 @@ if _TEST_ROOT.exists():
     shutil.rmtree(_TEST_ROOT)
 _TEST_ROOT.mkdir(parents=True)
 os.environ["MARGINALIA_HOME"] = str(_TEST_ROOT)
-os.environ["SQLITE_PATH"] = str(_TEST_ROOT / "marginalia.db")
-os.environ["MIRROR_VAULT_ROOT"] = str(_VAULT)
 os.environ["STORAGE_BACKEND"] = "mirror"
 os.environ["WORKER_ENABLED"] = "false"
 os.environ["LLM_DEFAULT_API_KEY"] = "sk-fake"

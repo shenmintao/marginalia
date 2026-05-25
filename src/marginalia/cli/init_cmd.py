@@ -24,11 +24,16 @@ from typing import Iterable
 _STARTER_ENV = """\
 # Marginalia configuration. See README.md for the full set.
 
-DB_BACKEND=sqlite
-SQLITE_PATH=./data/marginalia.db
+# Project-local home — db, library, and objects all live under ./data/.
+# Comment this out (or change to ~/Marginalia) to use the user-global home.
+MARGINALIA_HOME=./data
 
-STORAGE_BACKEND=local
-LOCAL_STORAGE_ROOT=./data/objects
+DB_BACKEND=sqlite
+
+# mirror = folder-tree on disk matching the user's intent (default)
+# local  = UUID-flat object pool; faster, dedup-on, less human-friendly
+# s3     = remote object storage; configure S3_* below
+STORAGE_BACKEND=mirror
 
 # Set WORKER_ENABLED=true for development mode (TaskRunner runs in the
 # uvicorn process). Production: keep this false and run `marginalia-worker`
@@ -76,7 +81,7 @@ def init_project(cwd: Path) -> list[_Artifact]:
 
     out.append(_Artifact(".env", _write_if_missing(cwd / ".env", _STARTER_ENV)))
     out.append(_Artifact("data/", _ensure_dir(cwd / "data")))
-    out.append(_Artifact("data/objects/", _ensure_dir(cwd / "data" / "objects")))
+    out.append(_Artifact("data/library/", _ensure_dir(cwd / "data" / "library")))
     out.append(_Artifact(".marginalia/", _ensure_dir(cwd / ".marginalia")))
     out.append(_Artifact(".gitignore", _ensure_gitignore(cwd / ".gitignore")))
     return out

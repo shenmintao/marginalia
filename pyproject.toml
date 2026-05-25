@@ -40,6 +40,7 @@ dependencies = [
     "python-docx>=1.1",
     "openpyxl>=3.1",
     "py7zz>=1.0",
+    "glowpy @ git+https://github.com/shenmintao/glowpy.git@main",
 ]
 
 [project.scripts]
@@ -56,6 +57,9 @@ dev = [
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/marginalia"]
