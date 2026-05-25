@@ -77,6 +77,32 @@ async def file_entry_metadata(
         raise HTTPException(status_code=404, detail="entry not found")
 
 
+@router.get("/file-entries/{entry_id}/content")
+async def file_entry_content(
+    entry_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> StreamingResponse:
+    """Inline-disposition variant of `/download` — used by the viewer
+    iframe so PDFs and images render in the browser instead of getting
+    saved to disk. The `/download` endpoint still exists for the
+    explicit Download button (forces save-as)."""
+    try:
+        handle = await open_for_download(session, entry_id=entry_id)
+    except EntryNotFoundError:
+        raise HTTPException(status_code=404, detail="entry not found")
+
+    headers = {
+        "Content-Disposition": f'inline; filename="{handle.display_name}"',
+        "X-File-Id": handle.file_id,
+        "X-Size-Bytes": str(handle.size_bytes),
+    }
+    return StreamingResponse(
+        handle.stream,
+        media_type=handle.mime_type,
+        headers=headers,
+    )
+
+
 @router.get("/file-entries/{entry_id}/download")
 async def file_entry_download(
     entry_id: str,

@@ -15,6 +15,12 @@ from marginalia.services import folders as folder_service
 router = APIRouter(prefix="/folders", tags=["folders"])
 
 
+class CreateFolderBody(BaseModel):
+    """Create an empty folder. parent_id=None means root."""
+    parent_id: str | None = None
+    name: str
+
+
 class PatchFolderBody(BaseModel):
     """If `name` is None it is left unchanged. If `parent_id` is the string
     'root' the folder is moved to root (parent_id=NULL). Otherwise it is
@@ -55,6 +61,36 @@ async def list_folders(
     else:
         rows = await folder_service.list_child_folders(session, parent_id)
     return {"folders": [_serialize_folder(f) for f in rows]}
+
+
+@router.post("", status_code=201)
+async def create_folder(
+    body: CreateFolderBody,
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """Create an empty folder. The CLI/API style of "folders are path
+    side-effects" is preserved for upload, but the GUI needs an explicit
+    create-folder action so users can build a classification skeleton
+    before placing files."""
+    try:
+        f = await folder_service.create_folder(
+            session, parent_id=body.parent_id, name=body.name,
+        )
+    except folder_service.FolderNotFoundError:
+        await session.rollback()
+        raise HTTPException(status_code=404, detail="parent folder not found")
+    except folder_service.FolderNameConflictError as e:
+        await session.rollback()
+        raise HTTPException(status_code=409, detail={
+            "error": "folder_name_conflict",
+            "name": e.name, "parent_id": e.parent_id,
+            "existing_id": e.existing_id,
+        })
+    except ValueError as e:
+        await session.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+    await session.commit()
+    return _serialize_folder(f)
 
 
 @router.get("/{folder_id}")

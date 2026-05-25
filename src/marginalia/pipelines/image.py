@@ -23,6 +23,7 @@ import json
 import logging
 from typing import Any
 
+from marginalia.config import has_vision_profile
 from marginalia.llm import (
     ChatMessage,
     ChatRequest,
@@ -185,6 +186,15 @@ class ImagePipeline(Pipeline):
         ctx: PipelineContext,
         storage: StorageBackend,
     ) -> PipelineResult:
+        if not has_vision_profile():
+            # Image indexing fundamentally needs a VLM. Raise a clean
+            # message so the file is marked ingest_status='failed' with
+            # a reason the user can act on.
+            raise RuntimeError(
+                "image pipeline requires the `vision` LLM profile; "
+                "set LLM_VISION_API_KEY (or LLM_DEFAULT_API_KEY for a VLM "
+                "provider) and re-ingest."
+            )
         body = await self._read_bytes(storage, ctx.storage_key)
         scaled, media_type = downscale_for_vlm(body)
         b64 = base64.b64encode(scaled).decode("ascii")

@@ -61,8 +61,8 @@ class FileEntry(Base, IdMixin, TimestampMixin):
         CheckConstraint(_in_clause("lifecycle", ENTRY_LIFECYCLES), name="lifecycle"),
     )
 
-    folder_id: Mapped[str] = mapped_column(
-        String(36), ForeignKey("folders.id", ondelete="RESTRICT"), nullable=False
+    folder_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("folders.id", ondelete="RESTRICT"), nullable=True,
     )
     file_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("files.id", ondelete="RESTRICT"), nullable=False

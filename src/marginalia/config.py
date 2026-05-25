@@ -135,9 +135,11 @@ class LlmProfile:
 
 
 LLM_PROFILES: tuple[str, ...] = ("chat", "reflect", "ingest", "vision", "audio")
-# Profiles users actually rely on out of the box. `audio` is opt-in (only used
-# when a media pipeline calls transcription) so we don't require it.
-_REQUIRED_PROFILES: tuple[str, ...] = ("chat", "reflect", "ingest", "vision")
+# Profiles users actually rely on out of the box. `vision` and `audio` are
+# opt-in: vision adds figure descriptions and OCR for scanned PDFs; audio
+# is only used by transcription pipelines. Pipelines that need them call
+# `has_vision_profile` / equivalent and degrade gracefully when absent.
+_REQUIRED_PROFILES: tuple[str, ...] = ("chat", "reflect", "ingest")
 
 
 def _profile_field(settings: Settings, profile: str, field: str) -> object:
@@ -157,6 +159,27 @@ def resolve_profile(settings: Settings, profile: str) -> LlmProfile:
         api_key=_profile_field(settings, profile, "api_key"),  # type: ignore[arg-type]
         base_url=_profile_field(settings, profile, "base_url"),  # type: ignore[arg-type]
         model=_profile_field(settings, profile, "model"),  # type: ignore[arg-type]
+    )
+
+
+def has_vision_profile(settings: Settings | None = None) -> bool:
+    """Whether the optional `vision` profile is *explicitly* configured.
+
+    True only when the user set at least one `LLM_VISION_*` override
+    (api_key / base_url / model). Inheriting the default api_key alone
+    is NOT enough: the default model is often text-only (DeepSeek-V3,
+    qwen-text), and silently routing vision calls to it produces 400
+    errors per page from the provider rather than a useful failure.
+
+    Pipelines that *augment* their output with VLM calls (PDF figure
+    captions, scanned-PDF OCR, image indexing) check this so they can
+    skip the VLM path entirely on installations that didn't configure
+    one — instead of crashing or filling logs with provider errors.
+    """
+    s = settings if settings is not None else get_settings()
+    return any(
+        getattr(s, f"llm_vision_{field}") not in (None, "")
+        for field in ("api_key", "base_url", "model")
     )
 
 

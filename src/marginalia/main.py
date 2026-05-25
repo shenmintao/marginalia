@@ -4,6 +4,7 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 import marginalia.tasks.handlers  # noqa: F401  (registers task handlers)
 from marginalia.api.routes_agent import router as sessions_router
@@ -99,6 +100,29 @@ class StorageBackendMismatchError(RuntimeError):
 
 
 app = FastAPI(title="Marginalia", lifespan=lifespan)
+
+# Browser-based GUI (desktop/) runs on Vite dev server (5173) or via
+# Tauri (tauri://localhost). Both differ in origin from the API host
+# and need CORS to read responses; the CLI client (httpx ASGITransport
+# or remote-mode httpx) bypasses the browser stack and is unaffected.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:1420",
+        "tauri://localhost",
+        "https://tauri.localhost",
+    ],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=[
+        "X-File-Id", "X-Size-Bytes", "X-Conversation-Id",
+        "X-Citation-Count", "X-Missing-Count", "X-Folder-Id",
+        "X-Member-Count",
+    ],
+)
 
 V1_PREFIX = "/v1"
 app.include_router(folders_router, prefix=V1_PREFIX)

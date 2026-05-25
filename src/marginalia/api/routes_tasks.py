@@ -69,11 +69,17 @@ async def list_active(
 
     def _row(t) -> dict:
         ref = t.started_at or t.scheduled_at
+        if ref is not None and ref.tzinfo is None:
+            # SQLite strips tzinfo on round-trip; the column stores UTC.
+            ref = ref.replace(tzinfo=timezone.utc)
         age_s = int((now - ref).total_seconds()) if ref else 0
+        payload = t.payload or {}
         return {
             "id": t.id,
             "kind": t.kind,
             "label": _payload_label(t.payload),
+            "file_id": payload.get("file_id"),
+            "entry_id": payload.get("entry_id"),
             "attempts": t.attempts,
             "age_s": max(age_s, 0),
         }

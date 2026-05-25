@@ -1,6 +1,12 @@
-"""Upload route: single endpoint, single file, single remote_path.
+"""Upload route: single endpoint, single file. Two destination styles:
 
 POST /upload?remote_path=/research/llm/foo.pdf[&on_conflict=rename|error|skip]
+  CLI/API style: path string, folders auto-created.
+
+POST /upload?folder_id=<id>[&display_name=foo.pdf][&on_conflict=...]
+  GUI style: target folder already selected; display_name defaults to local
+  filename.
+
   multipart/form-data  field "file"
   → 200 {file_id, entry_id, folder_id, display_name, deduped, auto_renamed, skipped}
   → 409 (on_conflict=error and target name taken)
@@ -13,7 +19,10 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from marginalia.db.session import get_session
-from marginalia.services.folders import AmbiguousRemotePathError
+from marginalia.services.folders import (
+    AmbiguousRemotePathError,
+    FolderNotFoundError,
+)
 from marginalia.services.upload import (
     DEFAULT_ON_CONFLICT,
     DisplayNameConflictError,
@@ -36,14 +45,17 @@ async def _stream_uploadfile(uf: UploadFile):
 
 @router.post("/upload", status_code=201)
 async def upload_endpoint(
-    remote_path: str = Query(..., description=(
-        "Virtual remote path. Four legal forms:\n"
+    remote_path: str | None = Query(default=None, description=(
+        "Virtual remote path (mutually exclusive with folder_id). "
+        "Folders along the path are auto-created. Four legal forms:\n"
         "  - /a/b/foo.pdf         file→file (display_name = foo.pdf)\n"
         "  - /a/b/                file→folder (display_name = local basename)\n"
         "  - /a/b                 folder OR file (must pass display_name to "
-        "disambiguate when last segment has no extension)\n"
-        "Use trailing '/' to mark a path as a folder when the last segment "
-        "has no extension (e.g. /repos/marginalia/)."
+        "disambiguate when last segment has no extension)"
+    )),
+    folder_id: str | None = Query(default=None, description=(
+        "Target folder id (mutually exclusive with remote_path). The folder "
+        "must already exist. display_name defaults to the local filename."
     )),
     display_name: str | None = Query(default=None, description=(
         "Optional override for the entry's display_name. Required when "
@@ -53,6 +65,11 @@ async def upload_endpoint(
     file: UploadFile = File(...),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
+    if (remote_path is None) == (folder_id is None):
+        raise HTTPException(status_code=400, detail={
+            "error": "invalid_destination",
+            "hint": "exactly one of remote_path or folder_id is required",
+        })
     storage = get_storage()
     try:
         result = await upload_service(
@@ -61,10 +78,14 @@ async def upload_endpoint(
             stream=_stream_uploadfile(file),
             fallback_name=file.filename or "upload.bin",
             remote_path=remote_path,
+            folder_id=folder_id,
             display_name=display_name,
             content_type=file.content_type,
             on_conflict=on_conflict,
         )
+    except FolderNotFoundError:
+        await session.rollback()
+        raise HTTPException(status_code=404, detail="folder not found")
     except AmbiguousRemotePathError as e:
         await session.rollback()
         raise HTTPException(status_code=400, detail={

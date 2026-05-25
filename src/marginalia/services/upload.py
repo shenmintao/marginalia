@@ -37,10 +37,12 @@ from marginalia.repositories import entry_tags as entry_tags_repo
 from marginalia.repositories import files as files_repo
 from marginalia.services.folders import (
     AmbiguousRemotePathError,
+    FolderNotFoundError,
     parse_remote_folder,
     resolve_or_create_folder,
     split_remote_path,
 )
+from marginalia.repositories import folders as folders_repo
 from marginalia.storage.base import StorageBackend
 from marginalia.storage.mirror import MirrorStorage
 from marginalia.tasks.enqueue import enqueue
@@ -128,39 +130,52 @@ async def upload(
     *,
     stream: AsyncIterator[bytes],
     fallback_name: str,
-    remote_path: str,
+    remote_path: str | None = None,
+    folder_id: str | None = None,
     display_name: str | None = None,
     content_type: str | None = None,
     on_conflict: _NameConflictPolicy = DEFAULT_ON_CONFLICT,
 ) -> UploadResult:
-    """Upload a single file. See split_remote_path for path-resolution rules.
+    """Upload a single file. Two destination styles, exactly one required:
 
-    `display_name` (when given) overrides any name derived from `remote_path`.
-    The four legal combinations:
-      - file → file        (`/a/b/foo.pdf`, no display_name)        → display = foo.pdf
-      - file → folder/     (`/a/b/`, no display_name)               → display = local basename
-      - file → folder      (`/a/b`, display_name="foo.pdf")         → display = foo.pdf
-      - file → folder/     (`/a/b/`, display_name="x.pdf")          → display = x.pdf (override)
-    The fifth combination (`/a/b` without display_name and no extension on
-    the last segment) raises AmbiguousRemotePathError — the caller must
-    disambiguate.
+      - `remote_path`: CLI/API style. See split_remote_path for the four
+        legal forms. Folders along the path are auto-created.
+      - `folder_id`: GUI style. Target folder already exists; display_name
+        defaults to fallback_name.
+
+    `display_name` (when given) overrides the name derived from either.
     """
-    folder_segments, derived_name = split_remote_path(
-        remote_path, display_name_override=display_name,
-    )
-    folder = await resolve_or_create_folder(session, folder_segments)
-    folder_id = folder.id if folder is not None else None
+    if (remote_path is None) == (folder_id is None):
+        raise ValueError("exactly one of remote_path or folder_id is required")
+
+    folder_segments: list[str]
+    derived_name: str | None
+    if folder_id is not None:
+        folder = await folders_repo.get_live(session, folder_id)
+        if folder is None:
+            raise FolderNotFoundError(folder_id)
+        folder_segments = []  # for display path; resolved folder_id used directly
+        derived_name = display_name
+        resolved_folder_id: str | None = folder.id
+    else:
+        folder_segments, derived_name = split_remote_path(
+            remote_path or "", display_name_override=display_name,
+        )
+        folder = await resolve_or_create_folder(session, folder_segments)
+        resolved_folder_id = folder.id if folder is not None else None
     desired_name = (derived_name or fallback_name).strip()
     if not desired_name:
         raise ValueError("display_name and fallback_name both empty")
 
+    folder_id_for_lookup = resolved_folder_id
+
     # --- early conflict check (skip / error short-circuit before reading bytes)
     if on_conflict in ("error", "skip"):
-        clash = await _existing_entry_with_name(session, folder_id, desired_name)
+        clash = await _existing_entry_with_name(session, folder_id_for_lookup, desired_name)
         if clash is not None:
             if on_conflict == "error":
                 raise DisplayNameConflictError(
-                    folder_id=folder_id,
+                    folder_id=folder_id_for_lookup,
                     display_name=desired_name,
                     existing_entry_id=clash.id,
                     existing_file_id=clash.file_id,
@@ -168,7 +183,7 @@ async def upload(
             return UploadResult(
                 file_id=clash.file_id,
                 entry_id=clash.id,
-                folder_id=folder_id,
+                folder_id=folder_id_for_lookup,
                 display_name=desired_name,
                 deduped=False,
                 auto_renamed=False,
@@ -207,7 +222,7 @@ async def upload(
             return await _create_dedup_entry(
                 session,
                 file=existing_file,
-                folder_id=folder_id,
+                folder_id=folder_id_for_lookup,
                 desired_name=desired_name,
                 now=now,
             )
@@ -220,7 +235,7 @@ async def upload(
         size=size,
         content_type=content_type,
         fallback_name=fallback_name,
-        folder_id=folder_id,
+        folder_id=folder_id_for_lookup,
         desired_name=desired_name,
         now=now,
     )
@@ -271,7 +286,7 @@ async def _create_new_file_entry(
     final_name, auto_renamed = await _resolve_display_name(session, folder_id, desired_name)
     entry = FileEntry(
         id=new_id(),
-        folder_id=folder_id or "",
+        folder_id=folder_id,
         file_id=file_row.id,
         display_name=final_name,
         lifecycle="active",
@@ -333,7 +348,7 @@ async def _create_dedup_entry(
     final_name, auto_renamed = await _resolve_display_name(session, folder_id, desired_name)
     entry = FileEntry(
         id=new_id(),
-        folder_id=folder_id or "",
+        folder_id=folder_id,
         file_id=file.id,
         display_name=final_name,
         lifecycle="active",

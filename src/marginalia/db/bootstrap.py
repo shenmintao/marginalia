@@ -45,6 +45,87 @@ def _apply_additive_columns(bind) -> None:
         bind.execute(sa.text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}"))
 
 
+def _relax_file_entries_folder_id_nullable(bind) -> None:
+    """Make file_entries.folder_id nullable on existing SQLite DBs.
+
+    SQLite has no `ALTER COLUMN DROP NOT NULL`, so we rebuild the table
+    when (and only when) the live schema still says NOT NULL. No-op on
+    Postgres (handled by alembic in a separate migration if/when needed)
+    and on freshly-created SQLite tables (already nullable from the model).
+    """
+    if bind.dialect.name != "sqlite":
+        return
+    inspector = sa.inspect(bind)
+    if "file_entries" not in inspector.get_table_names():
+        return
+    cols = {c["name"]: c for c in inspector.get_columns("file_entries")}
+    fid = cols.get("folder_id")
+    if fid is None or fid["nullable"]:
+        return
+    # Rebuild via Base.metadata.create_all on a renamed-old / new pattern.
+    # `legacy_alter_table=ON` keeps SQLite from rewriting referencing FK
+    # text in *other* tables when we RENAME — without it, every FK to
+    # `file_entries` would be silently retargeted to `_file_entries_old`
+    # and break the moment we drop the old table.
+    bind.execute(sa.text("PRAGMA legacy_alter_table = ON"))
+    bind.execute(sa.text("PRAGMA foreign_keys = OFF"))
+    try:
+        # SQLite carries indexes through RENAME (keeping their original names),
+        # so they would collide with create()'s recreated indexes. Drop them
+        # off the live table first; the renamed table doesn't need them.
+        for idx in inspector.get_indexes("file_entries"):
+            bind.execute(sa.text(f'DROP INDEX IF EXISTS "{idx["name"]}"'))
+        bind.execute(sa.text("ALTER TABLE file_entries RENAME TO _file_entries_old"))
+        Base.metadata.tables["file_entries"].create(bind=bind)
+        bind.execute(sa.text(
+            "INSERT INTO file_entries "
+            "(id, folder_id, file_id, display_name, lifecycle, catalog_id, "
+            " extra, deleted_at, purge_after, created_at, updated_at) "
+            "SELECT id, NULLIF(folder_id, ''), file_id, display_name, lifecycle, "
+            " catalog_id, extra, deleted_at, purge_after, created_at, updated_at "
+            "FROM _file_entries_old"
+        ))
+        bind.execute(sa.text("DROP TABLE _file_entries_old"))
+    finally:
+        bind.execute(sa.text("PRAGMA foreign_keys = ON"))
+        bind.execute(sa.text("PRAGMA legacy_alter_table = OFF"))
+
+
+def _repair_dangling_file_entries_fks(bind) -> None:
+    """One-shot repair: rebuild any table whose FK text still points at
+    the now-deleted `_file_entries_old`. This was caused by an earlier
+    bootstrap that renamed file_entries without `legacy_alter_table=ON`."""
+    if bind.dialect.name != "sqlite":
+        return
+    rows = bind.execute(sa.text(
+        "SELECT name FROM sqlite_master "
+        "WHERE type = 'table' AND sql LIKE '%_file_entries_old%'"
+    )).fetchall()
+    if not rows:
+        return
+    bind.execute(sa.text("PRAGMA legacy_alter_table = ON"))
+    bind.execute(sa.text("PRAGMA foreign_keys = OFF"))
+    try:
+        for (name,) in rows:
+            if name not in Base.metadata.tables:
+                continue
+            inspector = sa.inspect(bind)
+            cols = [c["name"] for c in inspector.get_columns(name)]
+            for idx in inspector.get_indexes(name):
+                bind.execute(sa.text(f'DROP INDEX IF EXISTS "{idx["name"]}"'))
+            bind.execute(sa.text(f'ALTER TABLE "{name}" RENAME TO "_{name}_old"'))
+            Base.metadata.tables[name].create(bind=bind)
+            col_list = ", ".join(f'"{c}"' for c in cols)
+            bind.execute(sa.text(
+                f'INSERT INTO "{name}" ({col_list}) '
+                f'SELECT {col_list} FROM "_{name}_old"'
+            ))
+            bind.execute(sa.text(f'DROP TABLE "_{name}_old"'))
+    finally:
+        bind.execute(sa.text("PRAGMA foreign_keys = ON"))
+        bind.execute(sa.text("PRAGMA legacy_alter_table = OFF"))
+
+
 def bootstrap_schema_sync(bind) -> None:
     """Synchronous variant — runs against a sync connection / engine.
 
@@ -53,6 +134,8 @@ def bootstrap_schema_sync(bind) -> None:
     """
     Base.metadata.create_all(bind=bind)
     _apply_additive_columns(bind)
+    _relax_file_entries_folder_id_nullable(bind)
+    _repair_dangling_file_entries_fks(bind)
     now = datetime.now(timezone.utc).isoformat()
     bind.execute(
         sa.text(

@@ -25,6 +25,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from marginalia.config import has_vision_profile
 from marginalia.llm import (
     ChatMessage,
     ChatRequest,
@@ -183,11 +184,19 @@ class PdfPipeline(Pipeline):
         body = await self._read_bytes(storage, ctx.storage_key)
         text_per_page = self._extract_text(body)
 
+        vlm_available = has_vision_profile()
+
         total_pages = len(text_per_page)
         total_chars = sum(len(t) for t in text_per_page)
         ocr_used = False
         ocr_pages_done = 0
         if total_pages > 0 and total_chars / max(total_pages, 1) < MIN_TEXT_PER_PAGE_FOR_TEXT_LAYER:
+            if not vlm_available:
+                # No VLM profile configured — can't OCR. Mark file as needing
+                # OCR so the user can retry once a vision model is wired up.
+                raise PdfNeedsOcrError(
+                    total_pages=total_pages, total_chars=total_chars,
+                )
             log.info(
                 "pdf %s appears scanned (pages=%d, avg_chars=%.1f); "
                 "running VLM OCR fallback",
@@ -209,7 +218,9 @@ class PdfPipeline(Pipeline):
         # call below still gets useful context.
         # Skip figure extraction in OCR mode — the page render IS the figure,
         # and we already have its OCR text.
-        if ocr_used:
+        # Skip entirely when no vision profile is configured: the figures
+        # would just produce "(figure description unavailable)" rows.
+        if ocr_used or not vlm_available:
             described = []
         else:
             images = extract_images(body)
@@ -577,8 +588,11 @@ def extract_images(pdf_bytes: bytes) -> list[ExtractedImage]:
     for page_num, page in enumerate(reader.pages, start=1):
         try:
             page_images = list(page.images)[:MAX_IMAGES_PER_PAGE]
-        except Exception:
-            log.exception("pypdf failed listing images on page %d", page_num)
+        except Exception as exc:
+            # Common when Pillow isn't installed: pypdf can't decode the
+            # image stream and raises. Once per-page is too noisy at WARNING.
+            log.debug("pypdf failed listing images on page %d: %s",
+                      page_num, exc)
             continue
 
         page_kept = 0

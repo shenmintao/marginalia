@@ -139,6 +139,51 @@ async def _find_or_create_child(
     )
     return folder
 
+async def create_folder(
+    db: AsyncSession, *, parent_id: str | None, name: str,
+) -> Folder:
+    """Create a single empty folder under `parent_id` (None = root).
+
+    Mirrors `_find_or_create_child` but never returns an existing match: a
+    name clash with a live sibling raises FolderNameConflictError. Audit
+    event records `auto_created=False` to distinguish from upload-driven
+    folder creation.
+    """
+    name = name.strip()
+    if not name:
+        raise ValueError("folder name cannot be empty")
+    if "/" in name or "\\" in name:
+        raise ValueError("folder name may not contain '/' or '\\'")
+    if parent_id is not None:
+        parent = await folders_repo.get_live(db, parent_id)
+        if parent is None:
+            raise FolderNotFoundError(parent_id)
+    clash = await folders_repo.find_child_by_name(
+        db, parent_id=parent_id, name=name,
+    )
+    if clash is not None:
+        raise FolderNameConflictError(
+            parent_id=parent_id, name=name, existing_id=clash.id,
+        )
+    now = _utcnow()
+    folder = Folder(
+        id=new_id(),
+        parent_id=parent_id,
+        name=name,
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(folder)
+    await db.flush()
+    await audit_events_repo.append(
+        db, kind="folder_created", payload={
+            "folder_id": folder.id, "parent_id": parent_id,
+            "name": name, "auto_created": False,
+        },
+    )
+    return folder
+
+
 async def list_root_folders(db: AsyncSession) -> list[Folder]:
     return await folders_repo.list_children(db, None)
 

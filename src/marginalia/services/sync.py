@@ -112,7 +112,7 @@ async def adopt_disk_file(path: Path, vault_root: Path) -> str:
 
             entry = FileEntry(
                 id=new_id(),
-                folder_id=folder_id or "",
+                folder_id=folder_id,
                 file_id=file_id,
                 display_name=display_name,
                 lifecycle="active",
