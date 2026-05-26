@@ -10,8 +10,8 @@
  *  it after the first turn of a new session lands so the entry shows
  *  up without a full reload.
  */
-import { useEffect, useState } from "react";
-import { Plus, MessageSquare, Loader2, Lock } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
+import { Plus, MessageSquare, Loader2, Lock, Trash2 } from "lucide-react";
 
 import { sessions as sessionsApi } from "@/api/client";
 import type { SessionListEntry } from "@/types/api";
@@ -29,6 +29,7 @@ export function SessionList({
 }: Props) {
   const [entries, setEntries] = useState<SessionListEntry[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -38,6 +39,28 @@ export function SessionList({
       .catch((e) => { if (!cancelled) setErr(e instanceof Error ? e.message : String(e)); });
     return () => { cancelled = true; };
   }, [refreshSignal]);
+
+  const handleDelete = useCallback(async (entry: SessionListEntry) => {
+    const label = entry.preview ? `"${entry.preview.slice(0, 60)}"` : "this session";
+    if (!confirm(
+      `Delete ${label}?\n\nIts conversation will be hidden from this list. ` +
+      `The agent's notes from these turns are kept so future sessions can still recall them.`
+    )) return;
+
+    setDeletingId(entry.session_id);
+    setErr(null);
+    try {
+      await sessionsApi.delete(entry.session_id);
+      setEntries((prev) =>
+        prev ? prev.filter((s) => s.session_id !== entry.session_id) : prev,
+      );
+      if (entry.session_id === activeSessionId) onNewChat();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setDeletingId(null);
+    }
+  }, [activeSessionId, onNewChat]);
 
   return (
     <aside className="flex h-full w-60 shrink-0 flex-col border-r border-border bg-bg-subtle">
@@ -71,7 +94,9 @@ export function SessionList({
             key={s.session_id}
             entry={s}
             active={s.session_id === activeSessionId}
+            deleting={deletingId === s.session_id}
             onClick={() => onSelect(s.session_id)}
+            onDelete={() => handleDelete(s)}
           />
         ))}
       </div>
@@ -80,36 +105,61 @@ export function SessionList({
 }
 
 function SessionRow({
-  entry, active, onClick,
-}: { entry: SessionListEntry; active: boolean; onClick: () => void }) {
+  entry, active, deleting, onClick, onDelete,
+}: {
+  entry: SessionListEntry;
+  active: boolean;
+  deleting: boolean;
+  onClick: () => void;
+  onDelete: () => void;
+}) {
   const closed = entry.ended_at !== null;
   const preview = entry.preview || "(empty session)";
   const when = entry.started_at ? formatRelative(entry.started_at) : "";
 
   return (
-    <button
-      onClick={onClick}
+    <div
       className={cn(
-        "group mb-0.5 flex w-full items-start gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors",
+        "group relative mb-0.5 flex items-start gap-2 rounded-md px-2 py-1.5 text-xs transition-colors",
         active
           ? "bg-accent-subtle text-accent"
           : "text-fg-muted hover:bg-bg-muted hover:text-fg-base",
       )}
-      title={preview}
     >
-      <MessageSquare size={12} className="mt-0.5 shrink-0" />
-      <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-1">
-          <div className="truncate font-medium">{preview}</div>
-          {closed && <Lock size={9} className="shrink-0 text-fg-subtle" />}
+      <button
+        onClick={onClick}
+        className="flex min-w-0 flex-1 items-start gap-2 text-left"
+        title={preview}
+      >
+        <MessageSquare size={12} className="mt-0.5 shrink-0" />
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-1">
+            <div className="truncate font-medium">{preview}</div>
+            {closed && <Lock size={9} className="shrink-0 text-fg-subtle" />}
+          </div>
+          <div className="mt-0.5 flex items-center gap-2 text-[10.5px] text-fg-subtle">
+            <span>{when}</span>
+            <span>·</span>
+            <span>{entry.turn_count} turn{entry.turn_count === 1 ? "" : "s"}</span>
+          </div>
         </div>
-        <div className="mt-0.5 flex items-center gap-2 text-[10.5px] text-fg-subtle">
-          <span>{when}</span>
-          <span>·</span>
-          <span>{entry.turn_count} turn{entry.turn_count === 1 ? "" : "s"}</span>
-        </div>
-      </div>
-    </button>
+      </button>
+      <button
+        onClick={(e) => { e.stopPropagation(); onDelete(); }}
+        disabled={deleting}
+        title="Delete session"
+        className={cn(
+          "shrink-0 self-center rounded p-1 text-fg-subtle transition-opacity",
+          "hover:bg-bg-base hover:text-danger",
+          "opacity-0 group-hover:opacity-100 focus:opacity-100",
+          deleting && "opacity-100",
+        )}
+      >
+        {deleting
+          ? <Loader2 size={11} className="animate-spin" />
+          : <Trash2 size={11} />}
+      </button>
+    </div>
   );
 }
 

@@ -46,6 +46,23 @@ async def get_live(db: AsyncSession, catalog_id: str) -> Catalog | None:
     ).scalar_one_or_none()
 
 
+async def name_by_ids(
+    db: AsyncSession, ids: list[str],
+) -> dict[str, str]:
+    """Map `catalog_id -> name`. Used by the agent runtime so tool_call
+    display can render `read_catalog "Algorithms"` instead of a uuid.
+    Includes soft-deleted catalogs so replay of older transcripts still
+    resolves."""
+    if not ids:
+        return {}
+    rows = (
+        await db.execute(
+            select(Catalog.id, Catalog.name).where(Catalog.id.in_(ids))
+        )
+    ).all()
+    return {cid: n for cid, n in rows}
+
+
 async def list_live_children(
     db: AsyncSession, parent_id: str | None,
 ) -> list[Catalog]:

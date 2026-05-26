@@ -21,9 +21,15 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from marginalia.agent.runtime import _rewrite_footnotes_for_display
+from marginalia.agent import tool_display
 from marginalia.db.models import Session as SessionRow
 from marginalia.db.session import get_session
+from marginalia.repositories import audit_events as audit_events_repo
+from marginalia.repositories import catalogs as catalogs_repo
+from marginalia.repositories import entries as entries_repo
+from marginalia.repositories import folders as folders_repo
 from marginalia.repositories import sessions as session_service
+from marginalia.repositories import tags as tags_repo
 
 router = APIRouter(tags=["sessions"])
 
@@ -51,7 +57,7 @@ async def close_session(
     session_id: str,
     db: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    s = await db.get(SessionRow, session_id)
+    s = await session_service.get_live(db, session_id)
     if s is None:
         raise HTTPException(status_code=404, detail="session not found")
     if s.ended_at is not None:
@@ -75,6 +81,35 @@ async def close_session(
     }
 
 
+@router.delete("/sessions/{session_id}", status_code=204)
+async def delete_session(
+    session_id: str,
+    db: AsyncSession = Depends(get_session),
+) -> None:
+    """Soft-delete a session — hides it from the sidebar but leaves
+    `conversations` and `journal` rows intact. Journal is the agent's
+    first-class memory across sessions; UI delete must not erase it.
+
+    If the session has never been explicitly closed (`ended_at IS NULL`)
+    we auto-close it as part of the delete: in practice the GUI never
+    calls /close, so every session in the user's DB looks "active"
+    forever otherwise. The trash icon clearly means "I am done with
+    this", so closing on the user's behalf is what they want.
+    """
+    s = await db.get(SessionRow, session_id)
+    if s is None or s.deleted_at is not None:
+        raise HTTPException(status_code=404, detail="session not found")
+    if s.ended_at is None:
+        await session_service.close_session(
+            db, session_id=session_id, end_reason="deleted"
+        )
+    await session_service.soft_delete(db, session_id)
+    await audit_events_repo.append(
+        db, kind="session_deleted", session_id=session_id, payload={},
+    )
+    await db.commit()
+
+
 @router.get("/sessions")
 async def list_sessions(
     limit: int = Query(50, ge=1, le=200),
@@ -88,6 +123,21 @@ async def list_sessions(
     started_at / ended_at, and the close reason if any.
     """
     rows = await session_service.list_sessions(db, limit=limit, offset=offset)
+
+    # Legacy sessions opened before write-side backfill have an empty
+    # `initiating_user_message`. Fill those previews from the first
+    # conversation's user_message in one batched query.
+    needs_fallback = [
+        s.id for s in rows if not (s.initiating_user_message or "").strip()
+    ]
+    fallbacks = await session_service.first_user_messages(db, needs_fallback)
+
+    def _preview(s: SessionRow) -> str:
+        text = (s.initiating_user_message or "").strip()
+        if not text:
+            text = (fallbacks.get(s.id) or "").strip()
+        return text[:160]
+
     return {
         "sessions": [
             {
@@ -95,7 +145,7 @@ async def list_sessions(
                 "started_at": s.started_at.isoformat() if s.started_at else None,
                 "ended_at": s.ended_at.isoformat() if s.ended_at else None,
                 "end_reason": s.end_reason,
-                "preview": (s.initiating_user_message or "").strip()[:160],
+                "preview": _preview(s),
                 "turn_count": s.turn_count or 0,
                 "total_input_tokens": s.total_input_tokens or 0,
                 "total_output_tokens": s.total_output_tokens or 0,
@@ -125,11 +175,44 @@ async def session_messages(
     `llm_calls[*]['extra']['plan_text']` when phase=='plan'. We surface
     it if present.
     """
-    s = await db.get(SessionRow, session_id)
+    s = await session_service.get_live(db, session_id)
     if s is None:
         raise HTTPException(status_code=404, detail="session not found")
 
     convs = await session_service.list_for_session_ordered(db, session_id)
+
+    # Pre-resolve every id referenced by any tool_call in this session
+    # so the replay payload mirrors the live SSE shape (each call gets a
+    # ready-to-render `display` string). Four batched lookups, regardless
+    # of turn count.
+    all_eids: set[str] = set()
+    all_tids: set[str] = set()
+    all_fids: set[str] = set()
+    all_cids: set[str] = set()
+    for c in convs:
+        for tc in c.tool_calls or []:
+            if not isinstance(tc, dict):
+                continue
+            args = tc.get("arguments") or {}
+            name = tc.get("name") or ""
+            all_eids.update(tool_display.collect_entry_ids(name, args))
+            all_tids.update(tool_display.collect_tag_ids(name, args))
+            all_fids.update(tool_display.collect_folder_ids(name, args))
+            all_cids.update(tool_display.collect_catalog_ids(name, args))
+
+    entry_names: dict[str, str] = {}
+    tag_names: dict[str, str] = {}
+    folder_names: dict[str, str] = {}
+    catalog_names: dict[str, str] = {}
+    if all_eids:
+        rows = await entries_repo.list_live_with_file_by_ids(db, list(all_eids))
+        entry_names = {entry.id: entry.display_name for entry, _ in rows}
+    if all_tids:
+        tag_names = await tags_repo.name_by_ids(db, list(all_tids))
+    if all_fids:
+        folder_names = await folders_repo.name_by_ids(db, list(all_fids))
+    if all_cids:
+        catalog_names = await catalogs_repo.name_by_ids(db, list(all_cids))
 
     turns: list[dict[str, Any]] = []
     for c in convs:
@@ -145,9 +228,19 @@ async def session_messages(
         for tc in c.tool_calls or []:
             if not isinstance(tc, dict):
                 continue
+            name = tc.get("name") or ""
+            args = tc.get("arguments") or {}
+            display = tool_display.format_tool_call(
+                name, args,
+                resolver=entry_names.get,
+                tag_resolver=tag_names.get,
+                folder_resolver=folder_names.get,
+                catalog_resolver=catalog_names.get,
+            )
             tool_calls.append({
-                "name": tc.get("name"),
-                "arguments": tc.get("arguments") or {},
+                "name": name,
+                "arguments": args,
+                "display": display,
                 "ok": tc.get("error") is None,
                 "error": tc.get("error"),
                 "duration_ms": tc.get("duration_ms"),

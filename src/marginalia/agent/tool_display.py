@@ -73,6 +73,37 @@ def _entry_ids_from_args(args: Mapping[str, Any]) -> list[str]:
     return out
 
 
+def _folder_ids_from_args(name: str, args: Mapping[str, Any]) -> list[str]:
+    """Pull folder ids out of folder-aware tools. The tool schemas use
+    different keys: list_folders → parent_id, list_files_in_folder →
+    folder_id. parent_id can also be null (root) — skip those."""
+    out: list[str] = []
+    if name == "list_folders":
+        v = args.get("parent_id")
+        if _looks_like_id(v):
+            out.append(str(v))
+    elif name == "list_files_in_folder":
+        v = args.get("folder_id") or args.get("folder_path")
+        if _looks_like_id(v):
+            out.append(str(v))
+    return out
+
+
+def _catalog_ids_from_args(name: str, args: Mapping[str, Any]) -> list[str]:
+    """Pull catalog ids out of catalog-aware tools. list_catalogs →
+    parent_id; read_catalog → id."""
+    out: list[str] = []
+    if name == "list_catalogs":
+        v = args.get("parent_id")
+        if _looks_like_id(v):
+            out.append(str(v))
+    elif name == "read_catalog":
+        v = args.get("id") or args.get("catalog_id") or args.get("catalog_path")
+        if _looks_like_id(v):
+            out.append(str(v))
+    return out
+
+
 def _tag_ids_from_args(args: Mapping[str, Any]) -> list[str]:
     """Pull tag_ids out of search_metadata-style args. We only collect
     uuid-shaped strings; bare names go through _tag_label unchanged."""
@@ -102,14 +133,35 @@ def collect_tag_ids(name: str, args: Mapping[str, Any]) -> list[str]:
     return _tag_ids_from_args(args)
 
 
+def collect_folder_ids(name: str, args: Mapping[str, Any]) -> list[str]:
+    """Return uuid-shaped folder ids referenced by this call so the
+    runtime can batch a single folders lookup."""
+    if not isinstance(args, dict):
+        return []
+    return _folder_ids_from_args(name, args)
+
+
+def collect_catalog_ids(name: str, args: Mapping[str, Any]) -> list[str]:
+    """Return uuid-shaped catalog ids referenced by this call so the
+    runtime can batch a single catalogs lookup."""
+    if not isinstance(args, dict):
+        return []
+    return _catalog_ids_from_args(name, args)
+
+
 def _quoted_csv(values: Iterable[Any]) -> str:
     return ", ".join(f'"{v}"' for v in values if v not in (None, ""))
 
 
 def _read_segment(seg: Mapping[str, Any]) -> str:
-    """Format one entry of a `reads` list as `pages 5-7` / `section s3`."""
-    if seg.get("section_id"):
-        return f"section {seg['section_id']}"
+    """Format one entry of a `reads` list as a human anchor.
+
+    `section_id` (s1/s2/…) is the LLM's internal handle; we don't
+    surface it. If the agent passes only a section_id, fall through to
+    showing the heading or another anchor it also includes; if there's
+    nothing else we'd rather render an empty string than a meaningless
+    `section s1`.
+    """
     if seg.get("heading"):
         return f"heading {seg['heading']!r}"
     if seg.get("page_start") is not None:
@@ -139,11 +191,18 @@ def format_tool_call(
     resolver: NameResolver | None = None,
     *,
     tag_resolver: NameResolver | None = None,
+    folder_resolver: NameResolver | None = None,
+    catalog_resolver: NameResolver | None = None,
 ) -> str:
     """Render a compact one-line description of a tool call.
 
-    `resolver` resolves entry_id → display_name; `tag_resolver` resolves
-    uuid-shaped tag_id → tag name (no-op for bare-name tag inputs).
+    Resolvers map ids to user-visible names so the live trace shows
+    "list_folders Papers" instead of the raw uuid the agent passed:
+      - `resolver` — entry_id → display_name
+      - `tag_resolver` — uuid-shaped tag_id → tag name (no-op for
+        bare-name tag inputs that the agent already typed by name)
+      - `folder_resolver` — folder_id → folder name
+      - `catalog_resolver` — catalog_id → catalog name
     """
     if not isinstance(args, Mapping):
         args = {}
@@ -201,27 +260,31 @@ def format_tool_call(
         return " ".join(parts)
 
     if name == "list_files_in_folder":
-        path = args.get("folder_path") or args.get("path") or args.get("folder_id")
-        if path:
-            parts.append(str(path))
+        v = args.get("folder_id") or args.get("folder_path") or args.get("path")
+        if v:
+            label = _name(str(v), folder_resolver) if _looks_like_id(v) else str(v)
+            parts.append(label)
         return " ".join(parts)
 
     if name == "list_folders":
-        parent = args.get("parent_path") or args.get("parent_id")
-        if parent:
-            parts.append(str(parent))
+        v = args.get("parent_id") or args.get("parent_path")
+        if v:
+            label = _name(str(v), folder_resolver) if _looks_like_id(v) else str(v)
+            parts.append(label)
         return " ".join(parts)
 
     if name == "list_catalogs":
-        pid = args.get("parent_id")
-        if pid:
-            parts.append(str(pid))
+        v = args.get("parent_id")
+        if v:
+            label = _name(str(v), catalog_resolver) if _looks_like_id(v) else str(v)
+            parts.append(label)
         return " ".join(parts)
 
     if name == "read_catalog":
-        cid = args.get("catalog_id") or args.get("catalog_path")
-        if cid:
-            parts.append(str(cid))
+        v = args.get("id") or args.get("catalog_id") or args.get("catalog_path")
+        if v:
+            label = _name(str(v), catalog_resolver) if _looks_like_id(v) else str(v)
+            parts.append(label)
         return " ".join(parts)
 
     if name == "resolve_tag":
@@ -276,3 +339,173 @@ def format_tool_call(
             line = line[:77] + "..."
         parts.append(line)
     return " ".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Tool-result preview rendering
+# ---------------------------------------------------------------------------
+#
+# `_dispatch_tool_calls` used to send the model's raw JSON result string as
+# the user-facing preview, which made the GUI's "expand result" panel a wall
+# of `{"folders":[{"id":"019e..."}]}`. Each tool emits a known shape, so we
+# can summarise it as one short line ("4 folders", "raft-paper.pdf · 3 reads").
+# The model still gets the full JSON; only the user-facing preview changes.
+
+
+def _ru(items: list[Any], unit: str, plural: str | None = None) -> str:
+    n = len(items)
+    if n == 1:
+        return f"1 {unit}"
+    return f"{n} {plural or unit + 's'}"
+
+
+def _truncate(s: str, n: int = 200) -> str:
+    s = s.replace("\n", " ").strip()
+    return s if len(s) <= n else s[: n - 3] + "..."
+
+
+def format_tool_result_preview(name: str, result: Any) -> str:
+    """Return a short human-readable summary of a tool result.
+
+    Falls back to a generic key:count line for unknown shapes so the
+    preview is never raw JSON. Errors come through with their `error`
+    field so the user can see why something failed without expanding.
+    """
+    if not isinstance(result, dict):
+        if isinstance(result, list):
+            return _ru(result, "item")
+        s = str(result) if result is not None else ""
+        return _truncate(s, 200)
+
+    if result.get("error"):
+        return f"error: {_truncate(str(result['error']), 160)}"
+
+    if name == "list_folders":
+        rows = result.get("folders") or []
+        if not rows:
+            return "no folders"
+        names = [r.get("name") or r.get("id", "") for r in rows[:5] if isinstance(r, dict)]
+        head = ", ".join(n for n in names if n)
+        more = "" if len(rows) <= 5 else f" +{len(rows) - 5} more"
+        return f"{_ru(rows, 'folder')}: {head}{more}"
+
+    if name == "list_files_in_folder":
+        rows = result.get("entries") or []
+        if not rows:
+            return "no files"
+        names = [r.get("display_name") or "" for r in rows[:5] if isinstance(r, dict)]
+        head = ", ".join(n for n in names if n)
+        more = "" if len(rows) <= 5 else f" +{len(rows) - 5} more"
+        return f"{_ru(rows, 'file')}: {head}{more}"
+
+    if name == "list_catalogs":
+        rows = result.get("catalogs") or []
+        if not rows:
+            return "no catalogs"
+        names = [r.get("name") or "" for r in rows[:5] if isinstance(r, dict)]
+        head = ", ".join(n for n in names if n)
+        more = "" if len(rows) <= 5 else f" +{len(rows) - 5} more"
+        return f"{_ru(rows, 'catalog')}: {head}{more}"
+
+    if name == "read_catalog":
+        cname = result.get("name") or "(unnamed)"
+        kids = result.get("children") or []
+        ents = result.get("entries") or []
+        bits = [cname]
+        if kids:
+            bits.append(_ru(kids, "subcatalog"))
+        if ents:
+            bits.append(_ru(ents, "entry", "entries"))
+        if not kids and not ents:
+            bits.append("empty")
+        return " · ".join(bits)
+
+    if name == "read_files":
+        results = result.get("results") or []
+        if not results:
+            return "no results"
+        chunks: list[str] = []
+        for r in results[:3]:
+            if not isinstance(r, dict):
+                continue
+            disp = r.get("display_name") or (r.get("entry_id", "")[:8])
+            if r.get("ok") is False:
+                chunks.append(f"{disp} failed")
+                continue
+            reads = r.get("reads") or []
+            chunks.append(f"{disp} · {_ru(reads, 'read')}" if reads else disp)
+        more = "" if len(results) <= 3 else f" +{len(results) - 3} more"
+        return "; ".join(chunks) + more
+
+    if name == "read_entries_metadata":
+        rows = result.get("entries") or []
+        if not rows:
+            return "no entries"
+        names = [r.get("display_name") or "" for r in rows[:5] if isinstance(r, dict)]
+        head = ", ".join(n for n in names if n)
+        more = "" if len(rows) <= 5 else f" +{len(rows) - 5} more"
+        return f"{_ru(rows, 'entry', 'entries')}: {head}{more}"
+
+    if name == "search_metadata":
+        rows = result.get("entries") or []
+        if not rows:
+            return "no matches"
+        names = [r.get("display_name") or "" for r in rows[:5] if isinstance(r, dict)]
+        head = ", ".join(n for n in names if n)
+        more = "" if len(rows) <= 5 else f" +{len(rows) - 5} more"
+        return f"{_ru(rows, 'match', 'matches')}: {head}{more}"
+
+    if name == "search_journal":
+        notes = result.get("notes") or []
+        if not notes:
+            return "no notes"
+        first = notes[0].get("note") if isinstance(notes[0], dict) else None
+        head = _truncate(first, 100) if first else ""
+        more = "" if len(notes) <= 1 else f" +{len(notes) - 1} more"
+        return f"{_ru(notes, 'note')}: {head}{more}" if head else _ru(notes, "note")
+
+    if name == "resolve_tag":
+        if result.get("found"):
+            n = result.get("name") or ""
+            f = result.get("facet") or ""
+            return f"found '{n}' ({f})" if f else f"found '{n}'"
+        suggestions = result.get("suggestions") or []
+        if suggestions:
+            sn = [s.get("name") or "" for s in suggestions[:3] if isinstance(s, dict)]
+            return "no exact match · suggestions: " + ", ".join(n for n in sn if n)
+        return "no match"
+
+    if name in ("query_sql", "query_log"):
+        rows = result.get("rows") or result.get("results") or []
+        if isinstance(rows, list):
+            return f"{_ru(rows, 'row')}"
+        if "count" in result:
+            return f"{result['count']} rows"
+        return "ok"
+
+    if name == "generate_chart":
+        cid = result.get("chart_id") or result.get("id")
+        ct = result.get("chart_type") or ""
+        if cid:
+            return f"{ct} chart" if ct else "chart"
+        return "ok"
+
+    if name == "analyze_container":
+        members = result.get("members") or result.get("entries") or []
+        if isinstance(members, list) and members:
+            return _ru(members, "member")
+        return "ok"
+
+    if name == "materialize_view":
+        ents = result.get("entries") or result.get("entry_ids") or []
+        if isinstance(ents, list):
+            return _ru(ents, "entry", "entries")
+        return "ok"
+
+    # Unknown / future tools — skim top-level shape.
+    if "count" in result and isinstance(result["count"], int):
+        return f"{result['count']} items"
+    keys = [k for k in result.keys() if not k.startswith("_")]
+    if not keys:
+        return "ok"
+    return _truncate("ok · " + ", ".join(keys[:6]), 160)

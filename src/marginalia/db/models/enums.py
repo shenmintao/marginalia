@@ -29,7 +29,7 @@ TAG_FACETS: tuple[str, ...] = (
 
 ENTRY_TAG_SOURCES: tuple[str, ...] = ("ingest", "dedup_seed", "enrich_tags")
 
-SESSION_END_REASONS: tuple[str, ...] = ("cleared", "normal", "unclean")
+SESSION_END_REASONS: tuple[str, ...] = ("cleared", "normal", "unclean", "deleted")
 
 JOURNAL_SOURCE_KINDS: tuple[str, ...] = ("reflect_turn", "insight")
 

@@ -66,6 +66,8 @@ class Session(Base, IdMixin):
       - cleared : user explicitly issued /clear
       - normal  : caller exited gracefully
       - unclean : process crash / lease expired (recover_stuck_tasks marks)
+      - deleted : closed implicitly by a UI delete (the GUI never calls
+                  /close, so the trash icon doubles as "stop this session")
     """
 
     __tablename__ = "sessions"
@@ -79,6 +81,9 @@ class Session(Base, IdMixin):
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     end_reason: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None,
+    )
     initiating_user_message: Mapped[str] = mapped_column(Text, nullable=False)
     turn_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     total_input_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

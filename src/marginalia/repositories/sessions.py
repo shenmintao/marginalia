@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Mapping
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from marginalia.db.models import Conversation, Session
@@ -123,16 +123,72 @@ async def list_for_session(
 async def list_sessions(
     db: AsyncSession, *, limit: int = 50, offset: int = 0,
 ) -> list[Session]:
-    """Sessions ordered most-recent-first, for the chat sidebar."""
+    """Sessions ordered most-recent-first, for the chat sidebar.
+    Soft-deleted rows are hidden."""
     rows = (
         await db.execute(
             select(Session)
+            .where(Session.deleted_at.is_(None))
             .order_by(Session.started_at.desc())
             .limit(limit)
             .offset(offset)
         )
     ).scalars().all()
     return list(rows)
+
+
+async def get_live(db: AsyncSession, session_id: str) -> Session | None:
+    """Load a session row, returning None if it's soft-deleted or missing.
+    Use instead of `db.get(Session, id)` on user-facing code paths."""
+    s = await db.get(Session, session_id)
+    if s is None or s.deleted_at is not None:
+        return None
+    return s
+
+
+async def soft_delete(db: AsyncSession, session_id: str) -> Session | None:
+    """Mark a session deleted_at=now. Returns the row on success, None if
+    missing or already deleted. Conversations + journal rows are kept;
+    journal is the agent's first-class memory and must survive UI deletes."""
+    s = await db.get(Session, session_id)
+    if s is None or s.deleted_at is not None:
+        return None
+    s.deleted_at = _utcnow()
+    return s
+
+
+async def first_user_messages(
+    db: AsyncSession, session_ids: list[str],
+) -> dict[str, str]:
+    """For each session id, the user_message of its lowest-turn_index
+    Conversation. Used as a read-side fallback for legacy sessions whose
+    `initiating_user_message` was never backfilled.
+
+    Returns a dict keyed by session_id; missing keys mean the session has
+    no conversations yet. Single batched query.
+    """
+    if not session_ids:
+        return {}
+    sub = (
+        select(
+            Conversation.session_id,
+            func.min(Conversation.turn_index).label("min_turn"),
+        )
+        .where(Conversation.session_id.in_(session_ids))
+        .group_by(Conversation.session_id)
+        .subquery()
+    )
+    rows = (
+        await db.execute(
+            select(Conversation.session_id, Conversation.user_message)
+            .join(
+                sub,
+                (Conversation.session_id == sub.c.session_id)
+                & (Conversation.turn_index == sub.c.min_turn),
+            )
+        )
+    ).all()
+    return {sid: msg for sid, msg in rows if msg}
 
 
 async def list_for_session_ordered(

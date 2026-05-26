@@ -64,6 +64,8 @@ from marginalia.config import get_settings
 from marginalia.repositories import sessions as session_service
 from marginalia.repositories import entries as entries_repo
 from marginalia.repositories import tags as tags_repo
+from marginalia.repositories import folders as folders_repo
+from marginalia.repositories import catalogs as catalogs_repo
 from marginalia.repositories.task_outcomes import record_outcome
 from marginalia.tasks.enqueue import enqueue
 from marginalia.tasks.kinds import KIND_REFLECT_TURN
@@ -114,14 +116,17 @@ def _canonical_args(arguments: Any) -> str:
 class _CallGuard:
     """Per-turn tracker for dedup + doom-loop detection."""
     seen: dict[str, str] = field(default_factory=dict)  # key -> prior result_text
+    seen_previews: dict[str, str] = field(default_factory=dict)  # key -> user-facing preview
     recent: deque[str] = field(default_factory=lambda: deque(maxlen=DOOM_LOOP_WINDOW))
     nudged: bool = False
 
     def key(self, name: str, arguments: Any) -> str:
         return f"{name}::{_canonical_args(arguments)}"
 
-    def remember(self, key: str, result_text: str) -> None:
+    def remember(self, key: str, result_text: str, preview: str = "") -> None:
         self.seen[key] = result_text
+        if preview:
+            self.seen_previews[key] = preview
         self.recent.append(key)
 
     def is_duplicate(self, key: str) -> bool:
@@ -485,7 +490,10 @@ async def _rewrite_footnotes_for_display(answer: str) -> str:
     def _replace(m: re.Match[str]) -> str:
         marker = m.group(1)
         eid = m.group(2).strip()
-        section_id = m.group(3).strip() if m.group(3) else None
+        # section_id (m.group(3)) is intentionally not surfaced in the
+        # user-visible footnote — it's an LLM-internal handle (s1, s2, …)
+        # that means nothing to a reader. The persisted footnote form
+        # still carries it for export/tool dispatch.
         reason = m.group(4).strip() if m.group(4) else None
         short = eid[:8]
         name = name_by_id.get(eid)
@@ -493,13 +501,9 @@ async def _rewrite_footnotes_for_display(answer: str) -> str:
             head = f"(entry {short} unavailable)"
         else:
             head = f"[{name}](entry:{short})"
-        parts = [head]
-        if section_id:
-            parts.append(f"section {section_id}")
-        tail = ", ".join(parts)
         if reason:
-            tail = f"{tail} — {reason}"
-        return f"[^{marker}]: {tail}"
+            return f"[^{marker}]: {head} — {reason}"
+        return f"[^{marker}]: {head}"
 
     return _LIVE_FOOTNOTE_RE.sub(_replace, answer)
 
@@ -724,14 +728,18 @@ async def _dispatch_tool_calls(
     """
     nudge_pending = False
     for tc in tool_calls:
-        # Pre-resolve any entry_ids referenced in args so the display
-        # one-liner can show filenames instead of raw uuids. One DB
-        # round trip per tool call (skipped when no entry_ids present).
+        # Pre-resolve every id referenced in args so the display
+        # one-liner can show names instead of raw uuids. One DB round
+        # trip per tool call, skipped when no ids of that kind appear.
         eids = tool_display.collect_entry_ids(tc.name, tc.arguments)
         tids = tool_display.collect_tag_ids(tc.name, tc.arguments)
+        fids = tool_display.collect_folder_ids(tc.name, tc.arguments)
+        cids = tool_display.collect_catalog_ids(tc.name, tc.arguments)
         name_by_id: dict[str, str] = {}
         tag_name_by_id: dict[str, str] = {}
-        if eids or tids:
+        folder_name_by_id: dict[str, str] = {}
+        catalog_name_by_id: dict[str, str] = {}
+        if eids or tids or fids or cids:
             try:
                 async with session_scope() as _db:
                     if eids:
@@ -743,13 +751,23 @@ async def _dispatch_tool_calls(
                         tag_name_by_id = await tags_repo.name_by_ids(
                             _db, list(set(tids))
                         )
+                    if fids:
+                        folder_name_by_id = await folders_repo.name_by_ids(
+                            _db, list(set(fids))
+                        )
+                    if cids:
+                        catalog_name_by_id = await catalogs_repo.name_by_ids(
+                            _db, list(set(cids))
+                        )
             except Exception:
-                log.exception("tool_call display: entry/tag lookup failed")
+                log.exception("tool_call display: name lookup failed")
 
         display = tool_display.format_tool_call(
             tc.name, tc.arguments,
             resolver=name_by_id.get,
             tag_resolver=tag_name_by_id.get,
+            folder_resolver=folder_name_by_id.get,
+            catalog_resolver=catalog_name_by_id.get,
         )
 
         yield AgentEvent(
@@ -760,6 +778,8 @@ async def _dispatch_tool_calls(
                 "display": display,
                 "entry_names": name_by_id,
                 "tag_names": tag_name_by_id,
+                "folder_names": folder_name_by_id,
+                "catalog_names": catalog_name_by_id,
             }, ensure_ascii=False),
         )
 
@@ -771,12 +791,13 @@ async def _dispatch_tool_calls(
 
         if guard.is_duplicate(key):
             prior = guard.seen[key]
+            prior_preview = guard.seen_previews.get(key) or "(see prior call)"
             guard.recent.append(key)  # record the attempt for doom-loop
             yield AgentEvent(
                 event_type="tool_result",
                 data=json.dumps({
                     "name": tc.name, "ok": True, "deduped": True,
-                    "preview": prior[:TOOL_RESULT_PREVIEW_LEN],
+                    "preview": prior_preview[:TOOL_RESULT_PREVIEW_LEN],
                 }, ensure_ascii=False),
             )
             result_blocks.append(ToolResultBlock(
@@ -852,9 +873,9 @@ async def _dispatch_tool_calls(
                     "payload": user_only,
                 }, ensure_ascii=False),
             )
-        preview = result_text[:TOOL_RESULT_PREVIEW_LEN]
-        if len(result_text) > TOOL_RESULT_PREVIEW_LEN:
-            preview += "..."
+        preview = tool_display.format_tool_result_preview(tc.name, result_for_model)
+        if len(preview) > TOOL_RESULT_PREVIEW_LEN:
+            preview = preview[:TOOL_RESULT_PREVIEW_LEN] + "..."
         yield AgentEvent(
             event_type="tool_result",
             data=json.dumps({
@@ -865,7 +886,7 @@ async def _dispatch_tool_calls(
             tool_call_id=tc.id,
             content=result_text,
         ))
-        guard.remember(key, result_text)
+        guard.remember(key, result_text, preview=preview)
 
     if nudge_pending and result_blocks:
         # Decorate the last real tool_result with the STOP nudge. We

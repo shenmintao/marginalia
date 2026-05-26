@@ -30,6 +30,7 @@ from marginalia.db.models.ai_structural import INBOX_CATALOG_ID
 _ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("conversations", "total_cache_read", "INTEGER NOT NULL DEFAULT 0"),
     ("sessions", "total_cache_read", "INTEGER NOT NULL DEFAULT 0"),
+    ("sessions", "deleted_at", "TIMESTAMP NULL"),
 )
 
 
@@ -126,6 +127,51 @@ def _repair_dangling_file_entries_fks(bind) -> None:
         bind.execute(sa.text("PRAGMA legacy_alter_table = OFF"))
 
 
+def _relax_sessions_end_reason_check(bind) -> None:
+    """Extend `sessions.end_reason` CHECK to include newer enum values.
+
+    SQLite has no `ALTER TABLE … DROP CONSTRAINT`, so when the live
+    table's CHECK is older than what's defined in `enums.py` (e.g.
+    missing `'deleted'`) we rebuild the table. No-op when the live
+    constraint already matches the model, or on Postgres (handled by
+    alembic if/when needed).
+    """
+    if bind.dialect.name != "sqlite":
+        return
+    inspector = sa.inspect(bind)
+    if "sessions" not in inspector.get_table_names():
+        return
+    row = bind.execute(sa.text(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'sessions'"
+    )).fetchone()
+    if row is None:
+        return
+    live_sql = row[0] or ""
+    # If every legal value already appears in the live CHECK text, nothing to do.
+    from marginalia.db.models.enums import SESSION_END_REASONS
+    missing = [v for v in SESSION_END_REASONS if f"'{v}'" not in live_sql]
+    if not missing:
+        return
+
+    bind.execute(sa.text("PRAGMA legacy_alter_table = ON"))
+    bind.execute(sa.text("PRAGMA foreign_keys = OFF"))
+    try:
+        cols = [c["name"] for c in inspector.get_columns("sessions")]
+        for idx in inspector.get_indexes("sessions"):
+            bind.execute(sa.text(f'DROP INDEX IF EXISTS "{idx["name"]}"'))
+        bind.execute(sa.text("ALTER TABLE sessions RENAME TO _sessions_old"))
+        Base.metadata.tables["sessions"].create(bind=bind)
+        col_list = ", ".join(f'"{c}"' for c in cols)
+        bind.execute(sa.text(
+            f'INSERT INTO sessions ({col_list}) '
+            f'SELECT {col_list} FROM _sessions_old'
+        ))
+        bind.execute(sa.text("DROP TABLE _sessions_old"))
+    finally:
+        bind.execute(sa.text("PRAGMA foreign_keys = ON"))
+        bind.execute(sa.text("PRAGMA legacy_alter_table = OFF"))
+
+
 def bootstrap_schema_sync(bind) -> None:
     """Synchronous variant — runs against a sync connection / engine.
 
@@ -136,6 +182,7 @@ def bootstrap_schema_sync(bind) -> None:
     _apply_additive_columns(bind)
     _relax_file_entries_folder_id_nullable(bind)
     _repair_dangling_file_entries_fks(bind)
+    _relax_sessions_end_reason_check(bind)
     now = datetime.now(timezone.utc).isoformat()
     bind.execute(
         sa.text(

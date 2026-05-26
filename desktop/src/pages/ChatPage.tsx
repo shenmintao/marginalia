@@ -35,12 +35,15 @@ export function ChatPage() {
   const [openErr, setOpenErr] = useState<string | null>(null);
   const [refreshSignal, setRefreshSignal] = useState(0);
 
-  const ensureSession = useCallback(async (): Promise<string> => {
-    if (sessionId) return sessionId;
-    const s = await sessions.open();
-    setSessionId(s.session_id);
-    return s.session_id;
-  }, [sessionId]);
+  const ensureSession = useCallback(
+    async (initiatingMessage?: string): Promise<string> => {
+      if (sessionId) return sessionId;
+      const s = await sessions.open(initiatingMessage);
+      setSessionId(s.session_id);
+      return s.session_id;
+    },
+    [sessionId],
+  );
 
   useEffect(() => {
     if (!scrollRef.current) return;
@@ -55,7 +58,7 @@ export function ChatPage() {
     let isFirstTurn = false;
     try {
       isFirstTurn = sessionId === null;
-      sid = await ensureSession();
+      sid = await ensureSession(q);
     } catch (e) {
       setOpenErr(e instanceof Error ? e.message : String(e));
       return;
@@ -120,15 +123,15 @@ export function ChatPage() {
   }, [streaming]);
 
   return (
-    <div className="flex h-full">
+    <div className="flex h-full overflow-hidden">
       <SessionList
         activeSessionId={sessionId}
         onSelect={loadSession}
         onNewChat={newChat}
         refreshSignal={refreshSignal}
       />
-      <div className="flex flex-1 flex-col">
-        <div ref={scrollRef} className="flex-1 overflow-y-auto px-6 py-6">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+        <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto px-6 py-6">
           <div className="mx-auto max-w-3xl">
             {openErr && (
               <div className="mb-4 rounded-md border border-danger/30 bg-danger/10 p-3 text-sm text-danger">
@@ -256,9 +259,14 @@ function replayedToTurn(rt: ReplayedTurn): Turn {
 
 function replayedToolCallStep(tc: ReplayedToolCall): Step {
   const name = tc.name || "tool";
+  // Replay payload now carries a server-resolved `display` string, just
+  // like the live SSE event does. Prefer that over the raw uuid args.
+  const label = tc.display
+    ? `calling ${tc.display}`
+    : `calling ${formatToolCall(name, tc.arguments)}`;
   return {
     kind: "tool_call",
-    label: `calling ${name}`,
+    label,
     toolName: name,
     args: tc.arguments,
     result: tc.ok ? "ok" : "failed",

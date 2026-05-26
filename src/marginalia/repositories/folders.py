@@ -127,3 +127,20 @@ async def list_live_entries_in(
             )
         ).scalars().all()
     )
+
+
+async def name_by_ids(
+    db: AsyncSession, ids: list[str],
+) -> dict[str, str]:
+    """Map `folder_id -> name` for the given ids. Used by the agent
+    runtime so tool_call display can render `list_folders Papers`
+    instead of `list_folders 019e6339-…`. Includes soft-deleted folders
+    so historical replay still resolves."""
+    if not ids:
+        return {}
+    rows = (
+        await db.execute(
+            select(Folder.id, Folder.name).where(Folder.id.in_(ids))
+        )
+    ).all()
+    return {fid: n for fid, n in rows}
