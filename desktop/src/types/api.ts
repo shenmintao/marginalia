@@ -16,6 +16,11 @@ export interface FolderDetail extends Folder {
   entries: FileEntrySummary[];
 }
 
+export interface FolderListing {
+  folders: Folder[];
+  entries: FileEntrySummary[];
+}
+
 export interface FileEntrySummary {
   id: string;
   folder_id: string | null;

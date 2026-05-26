@@ -58,9 +58,16 @@ async def list_folders(
 ) -> dict[str, Any]:
     if parent_id is None:
         rows = await folder_service.list_root_folders(session)
+        # Root-level files are legal (remote_path=/foo.pdf), and the
+        # GUI shows a single mixed tree, so include them here.
+        entries = await entries_repo.list_live_in_folder(session, None)
     else:
         rows = await folder_service.list_child_folders(session, parent_id)
-    return {"folders": [_serialize_folder(f) for f in rows]}
+        entries = []
+    return {
+        "folders": [_serialize_folder(f) for f in rows],
+        "entries": [_serialize_entry(e) for e in entries],
+    }
 
 
 @router.post("", status_code=201)

@@ -108,6 +108,18 @@ export function LibraryPage() {
               ? (selectedFolder?.id === id ? selectedFolder.name : "…")
               : headerTargetName,
           })}
+          onEntryDeleted={(id) => {
+            if (selectedEntry?.id === id) {
+              setSelectedEntry(null);
+              setMeta(null);
+            }
+          }}
+          onFolderDeleted={(id) => {
+            if (selectedFolder?.id === id) {
+              setSelectedFolder(null);
+            }
+            triggerRefresh();
+          }}
         />
       </div>
 

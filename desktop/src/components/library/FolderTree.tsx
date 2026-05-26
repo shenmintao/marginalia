@@ -11,10 +11,10 @@
 import { useEffect, useState, useCallback } from "react";
 import {
   ChevronDown, ChevronRight, Folder as FolderIcon, FolderOpen,
-  FileText, Loader2, Plus, Upload as UploadIcon, Download,
+  FileText, Loader2, Plus, Upload as UploadIcon, Download, RefreshCw, Trash2,
 } from "lucide-react";
 
-import { folders, fileEntries } from "@/api/client";
+import { folders, fileEntries, files, ApiError } from "@/api/client";
 import type { Folder, FileEntrySummary } from "@/types/api";
 import { cn } from "@/lib/utils";
 
@@ -38,15 +38,19 @@ interface Props {
   refreshKey: number;
   onUploadHere: (folderId: string | null) => void;
   onNewFolderHere: (parentId: string | null) => void;
+  onEntryDeleted: (entryId: string) => void;
+  onFolderDeleted: (folderId: string) => void;
 }
 
 export function FolderTree(props: Props) {
   const [roots, setRoots] = useState<Folder[] | null>(null);
+  const [rootEntries, setRootEntries] = useState<FileEntrySummary[]>([]);
   const [err, setErr] = useState<string | null>(null);
+  const [reprocessingAll, setReprocessingAll] = useState(false);
 
   const load = useCallback(() => {
     folders.list(null).then(
-      (r) => { setRoots(r.folders); setErr(null); },
+      (r) => { setRoots(r.folders); setRootEntries(r.entries ?? []); setErr(null); },
       (e) => setErr(e instanceof Error ? e.message : String(e)),
     );
   }, []);
@@ -54,12 +58,49 @@ export function FolderTree(props: Props) {
   useEffect(() => { load(); }, [load, props.refreshKey]);
 
   const headerTarget = props.selectedFolderName ?? "root";
+  const reprocessScope = props.selectedFolderId
+    ? { folder_id: props.selectedFolderId } as const
+    : { all: true } as const;
+  const reprocessLabel = props.selectedFolderId
+    ? `Re-run AI analysis on every file in "${props.selectedFolderName}" and its subfolders?`
+    : `Re-run AI analysis on EVERY file in the library?\n\nThis clears existing summaries and tags, then re-ingests with the current LLM. Could take a while.`;
+
+  const onReprocessScope = async () => {
+    if (reprocessingAll) return;
+    if (!confirm(reprocessLabel)) return;
+    setReprocessingAll(true);
+    try {
+      const r = await files.reprocessBulk(reprocessScope);
+      alert(
+        `Queued ${r.task_ids.length} files for reprocessing.` +
+          (r.reused_count ? ` ${r.reused_count} already in the queue.` : "") +
+          (r.skipped_count ? ` ${r.skipped_count} skipped (deleted).` : ""),
+      );
+    } catch (e) {
+      const msg = e instanceof ApiError ? e.message : String(e);
+      alert(`Bulk reprocess failed: ${msg}`);
+    } finally {
+      setReprocessingAll(false);
+    }
+  };
 
   return (
     <div className="flex h-full flex-col">
       <div className="flex shrink-0 items-center justify-between border-b border-border bg-bg-subtle px-3 py-2">
         <span className="text-xs font-medium text-fg-muted">Library</span>
         <div className="flex items-center gap-1">
+          <button
+            onClick={onReprocessScope}
+            disabled={reprocessingAll}
+            title={props.selectedFolderId
+              ? `Reprocess "${headerTarget}" subtree`
+              : "Reprocess entire library"}
+            className="rounded p-1 text-fg-muted hover:bg-bg-muted hover:text-fg-base disabled:opacity-50"
+          >
+            {reprocessingAll
+              ? <Loader2 size={13} className="animate-spin" />
+              : <RefreshCw size={13} />}
+          </button>
           <button
             onClick={() => props.onNewFolderHere(null)}
             title={`New folder in ${headerTarget}`}
@@ -81,8 +122,8 @@ export function FolderTree(props: Props) {
         {roots === null && !err && (
           <p className="px-2 text-xs text-fg-subtle">loading…</p>
         )}
-        {roots && roots.length === 0 && (
-          <p className="px-2 text-xs text-fg-subtle">No folders yet.</p>
+        {roots && roots.length === 0 && rootEntries.length === 0 && (
+          <p className="px-2 text-xs text-fg-subtle">Empty. Use the buttons above to create a folder or upload.</p>
         )}
         {roots && roots.map((f) => (
           <FolderRow
@@ -90,6 +131,17 @@ export function FolderTree(props: Props) {
             folder={f}
             depth={0}
             {...props}
+          />
+        ))}
+        {rootEntries.map((e) => (
+          <FileRow
+            key={e.id}
+            entry={e}
+            depth={0}
+            selected={props.selectedEntryId === e.id}
+            ingesting={props.ingestingFileIds.has(e.file_id)}
+            onClick={() => props.onSelectFile(e)}
+            onDeleted={(id) => { load(); props.onEntryDeleted(id); }}
           />
         ))}
       </div>
@@ -104,11 +156,13 @@ function FolderRow({
   ingestingFileIds,
   refreshKey,
   onUploadHere, onNewFolderHere,
+  onEntryDeleted, onFolderDeleted,
 }: { folder: Folder; depth: number } & Props) {
   const [open, setOpen] = useState(false);
   const [children, setChildren] = useState<Folder[] | null>(null);
   const [entries, setEntries] = useState<FileEntrySummary[] | null>(null);
   const [loading, setLoading] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   const loadDetail = useCallback(() => {
     setLoading(true);
@@ -124,6 +178,24 @@ function FolderRow({
 
   const isSelected = selectedFolderId === folder.id;
   const indent = { paddingLeft: 8 + depth * 12 };
+
+  const onDeleteFolder = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (deleting) return;
+    if (!confirm(
+      `Delete folder "${folder.name}" and everything inside it?\n\n` +
+      `Subfolders and files are moved to trash and purged after 7 days.`,
+    )) return;
+    setDeleting(true);
+    try {
+      await folders.delete(folder.id);
+      onFolderDeleted(folder.id);
+    } catch (err) {
+      const msg = err instanceof ApiError ? err.message : String(err);
+      alert(`Delete failed: ${msg}`);
+      setDeleting(false);
+    }
+  };
 
   return (
     <div>
@@ -164,6 +236,16 @@ function FolderRow({
           >
             <UploadIcon size={11} />
           </button>
+          <button
+            onClick={onDeleteFolder}
+            disabled={deleting}
+            title="Delete folder"
+            className="rounded p-0.5 text-fg-subtle hover:bg-bg-base hover:text-danger disabled:opacity-50"
+          >
+            {deleting
+              ? <Loader2 size={11} className="animate-spin" />
+              : <Trash2 size={11} />}
+          </button>
         </div>
       </div>
       {open && (
@@ -186,6 +268,8 @@ function FolderRow({
               refreshKey={refreshKey}
               onUploadHere={onUploadHere}
               onNewFolderHere={onNewFolderHere}
+              onEntryDeleted={onEntryDeleted}
+              onFolderDeleted={(id) => { loadDetail(); onFolderDeleted(id); }}
             />
           ))}
           {entries?.map((e) => (
@@ -196,6 +280,7 @@ function FolderRow({
               selected={selectedEntryId === e.id}
               ingesting={ingestingFileIds.has(e.file_id)}
               onClick={() => onSelectFile(e)}
+              onDeleted={(id) => { loadDetail(); onEntryDeleted(id); }}
             />
           ))}
         </div>
@@ -204,10 +289,45 @@ function FolderRow({
   );
 }
 
-function FileRow({ entry, depth, selected, ingesting, onClick }: {
+function FileRow({ entry, depth, selected, ingesting, onClick, onDeleted }: {
   entry: FileEntrySummary; depth: number; selected: boolean;
   ingesting: boolean; onClick: () => void;
+  onDeleted: (entryId: string) => void;
 }) {
+  const [reprocessing, setReprocessing] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const onReprocess = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (reprocessing || ingesting) return;
+    if (!confirm(`Re-run AI analysis on "${entry.display_name}"?\n\nThis clears the existing summary and tags, then re-ingests with the current LLM.`)) {
+      return;
+    }
+    setReprocessing(true);
+    try {
+      await files.reprocess(entry.file_id);
+    } catch (err) {
+      const msg = err instanceof ApiError ? err.message : String(err);
+      alert(`Reprocess failed: ${msg}`);
+    } finally {
+      setReprocessing(false);
+    }
+  };
+  const onDelete = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (deleting) return;
+    if (!confirm(`Delete "${entry.display_name}"?\n\nThe file is moved to trash and purged after 7 days.`)) {
+      return;
+    }
+    setDeleting(true);
+    try {
+      await fileEntries.delete(entry.id);
+      onDeleted(entry.id);
+    } catch (err) {
+      const msg = err instanceof ApiError ? err.message : String(err);
+      alert(`Delete failed: ${msg}`);
+      setDeleting(false);
+    }
+  };
   return (
     <div
       style={{ paddingLeft: 8 + depth * 12 + 14 }}
@@ -224,6 +344,16 @@ function FileRow({ entry, depth, selected, ingesting, onClick }: {
         <span className="flex-1 truncate">{entry.display_name}</span>
       </button>
       {ingesting && <Loader2 size={11} className="shrink-0 animate-spin text-fg-subtle" />}
+      <button
+        onClick={onReprocess}
+        disabled={reprocessing || ingesting}
+        title="Re-run AI analysis"
+        className="hidden shrink-0 rounded p-0.5 text-fg-subtle hover:bg-bg-base hover:text-fg-base group-hover:flex disabled:opacity-50"
+      >
+        {reprocessing
+          ? <Loader2 size={11} className="animate-spin" />
+          : <RefreshCw size={11} />}
+      </button>
       <a
         href={fileEntries.downloadUrl(entry.id)}
         download={entry.display_name}
@@ -233,6 +363,16 @@ function FileRow({ entry, depth, selected, ingesting, onClick }: {
       >
         <Download size={11} />
       </a>
+      <button
+        onClick={onDelete}
+        disabled={deleting}
+        title="Delete"
+        className="hidden shrink-0 rounded p-0.5 text-fg-subtle hover:bg-bg-base hover:text-danger group-hover:flex disabled:opacity-50"
+      >
+        {deleting
+          ? <Loader2 size={11} className="animate-spin" />
+          : <Trash2 size={11} />}
+      </button>
     </div>
   );
 }

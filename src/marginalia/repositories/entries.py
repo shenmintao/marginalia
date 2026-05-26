@@ -76,15 +76,16 @@ async def list_live_with_file_in_folder(
 
 
 async def list_live_in_folder(
-    db: AsyncSession, folder_id: str,
+    db: AsyncSession, folder_id: str | None,
 ) -> list[FileEntry]:
     """Live entries directly under one folder, ordered by display_name.
-    Used by routes_folders.get_folder for the children listing."""
+    Used by routes_folders.get_folder for the children listing.
+    folder_id=None returns entries at the root."""
     rows = (
         await db.execute(
             select(FileEntry)
             .where(
-                FileEntry.folder_id == folder_id,
+                _folder_clause(folder_id),
                 _live_entry(),
             )
             .order_by(FileEntry.display_name)

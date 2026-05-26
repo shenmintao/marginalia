@@ -13,6 +13,7 @@ import type {
   FileMetadata,
   Folder,
   FolderDetail,
+  FolderListing,
   LlmSettings,
   OnConflict,
   RunningCount,
@@ -83,7 +84,7 @@ async function _request<T>(
 
 export const folders = {
   list: (parentId?: string | null) =>
-    _request<{ folders: Folder[] }>(
+    _request<FolderListing>(
       `/v1/folders${parentId ? `?parent_id=${encodeURIComponent(parentId)}` : ""}`,
     ),
   get: (id: string) => _request<FolderDetail>(`/v1/folders/${encodeURIComponent(id)}`),
@@ -147,6 +148,41 @@ export const fileEntries = {
     `${_base}/v1/file-entries/${encodeURIComponent(id)}/content`,
   downloadUrl: (id: string) =>
     `${_base}/v1/file-entries/${encodeURIComponent(id)}/download`,
+};
+
+// ---- files (whole-file ops) -----------------------------------------------
+
+export interface ReprocessResult {
+  file_id: string;
+  task_id: string | null;
+  reused: boolean;
+}
+
+export type BulkReprocessFilter =
+  | { file_ids: string[] }
+  | { catalog_id: string }
+  | { folder_id: string }
+  | { tag_id: string }
+  | { all: true };
+
+export interface BulkReprocessResult {
+  file_count: number;
+  task_ids: string[];
+  reused_count: number;
+  skipped_count: number;
+}
+
+export const files = {
+  reprocess: (fileId: string) =>
+    _request<ReprocessResult>(
+      `/v1/files/${encodeURIComponent(fileId)}/reprocess`,
+      { method: "POST" },
+    ),
+  reprocessBulk: (filter: BulkReprocessFilter) =>
+    _request<BulkReprocessResult>(`/v1/files/reprocess`, {
+      method: "POST",
+      body: JSON.stringify(filter),
+    }),
 };
 
 // ---- upload ---------------------------------------------------------------
