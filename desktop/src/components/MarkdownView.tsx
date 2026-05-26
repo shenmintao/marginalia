@@ -40,6 +40,15 @@ interface Props {
   onEntryLink?: (entryId: string) => void;
   /** Tailwind class for the wrapping div. Defaults to `prose-marginalia`. */
   className?: string;
+  /** Override the `clobberPrefix` mdast-util-to-hast applies to footnote
+   *  ids (default `user-content-`). When several MarkdownView instances
+   *  render on the same page (the chat transcript stacks one per turn),
+   *  every turn would otherwise emit `user-content-fn-a`, `user-content-
+   *  fnref-a`, … and the browser scrolls to the first matching id —
+   *  which is in turn 1 regardless of which turn the user clicked.
+   *  Pass a per-turn prefix (e.g. `user-content-<conversationId>-`) so
+   *  each turn lives in its own id namespace. */
+  idPrefix?: string;
 }
 
 const REMARK_PLUGINS: Pluggable[] = [
@@ -50,7 +59,25 @@ const REMARK_PLUGINS: Pluggable[] = [
 ];
 const REHYPE_PLUGINS: Pluggable[] = [rehypeKatex];
 
-export function MarkdownView({ content, onEntryLink, className }: Props) {
+// react-markdown v9 strips href values whose scheme isn't in its safe-list
+// (http/https/mailto/tel/...). Without this hook, `entry:<uuid>` citation
+// links arrive at our `a` renderer with href="" — the browser then treats
+// an empty href as "reload the current page", which is the symptom the
+// user reported (clicking a citation just opens /chat again).
+function safeUrl(url: string): string {
+  if (url.startsWith("entry:")) return url;
+  // Defer everything else to react-markdown's default sanitisation by
+  // returning the url as-is for the schemes the library already accepts;
+  // other schemes get stripped. We re-implement the default safelist
+  // (http/https/mailto/tel/irc/ircs/xmpp + relative) inline because
+  // react-markdown doesn't export it.
+  if (/^(https?|mailto|tel|irc|ircs|xmpp):/i.test(url)) return url;
+  if (url.startsWith("/") || url.startsWith("#") || url.startsWith("?")) return url;
+  if (!/^[a-z][a-z0-9+.-]*:/i.test(url)) return url; // relative path
+  return "";
+}
+
+export function MarkdownView({ content, onEntryLink, className, idPrefix }: Props) {
   const renderLink = ({
     href, children, ...rest
   }: React.AnchorHTMLAttributes<HTMLAnchorElement> & {
@@ -69,6 +96,32 @@ export function MarkdownView({ content, onEntryLink, className }: Props) {
         </a>
       );
     }
+    // In-page anchors (GFM footnote jumps `[^a]` → `#user-content-fn-a`,
+    // and the matching back-arrow ↩ from the footnote def) must not get
+    // `target="_blank"` — that opens a fresh tab on /chat#... instead of
+    // scrolling within the current view. We also intercept the click and
+    // use `block: "nearest"` so the scroll container only moves the
+    // minimum amount needed to expose the target. `block: "center"`
+    // would pull the footnote to the middle of the pane — when the
+    // footnote already sits near the bottom of the answer, that pushes
+    // half a viewport of empty space underneath it.
+    if (href && href.startsWith("#")) {
+      return (
+        <a
+          href={href}
+          onClick={(e) => {
+            const id = decodeURIComponent(href.slice(1));
+            const el = document.getElementById(id);
+            if (!el) return;
+            e.preventDefault();
+            el.scrollIntoView({ behavior: "smooth", block: "nearest" });
+          }}
+          {...rest}
+        >
+          {children}
+        </a>
+      );
+    }
     return (
       <a href={href} target="_blank" rel="noreferrer" {...rest}>
         {children}
@@ -81,6 +134,8 @@ export function MarkdownView({ content, onEntryLink, className }: Props) {
       <ReactMarkdown
         remarkPlugins={REMARK_PLUGINS}
         rehypePlugins={REHYPE_PLUGINS}
+        remarkRehypeOptions={idPrefix ? { clobberPrefix: idPrefix } : undefined}
+        urlTransform={safeUrl}
         components={{
           a: renderLink,
           code: CodeRenderer,

@@ -22,10 +22,12 @@ import type {
 } from "@/types/api";
 import { TurnView, type Turn, type Step } from "@/components/TurnView";
 import { SessionList } from "@/components/SessionList";
+import { useChatSession } from "@/lib/chatSession";
 import { cn } from "@/lib/utils";
 
 export function ChatPage() {
-  const [sessionId, setSessionId] = useState<string | null>(null);
+  const sessionId = useChatSession((s) => s.sessionId);
+  const setSessionId = useChatSession((s) => s.setSessionId);
   const [turns, setTurns] = useState<Turn[]>([]);
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
@@ -49,6 +51,27 @@ export function ChatPage() {
     if (!scrollRef.current) return;
     scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
   }, [turns]);
+
+  // Restore the conversation when ChatPage remounts with a sessionId
+  // already pinned in the store (e.g. user clicked an `entry:` citation,
+  // landed on /library, then navigated back). turns aren't persisted —
+  // they're refetched from the server, which is the source of truth.
+  useEffect(() => {
+    if (!sessionId || turns.length > 0) return;
+    let cancelled = false;
+    setLoading(true);
+    sessions.messages(sessionId)
+      .then((t) => { if (!cancelled) setTurns(t.turns.map(replayedToTurn)); })
+      .catch((e) => {
+        if (cancelled) return;
+        setOpenErr(e instanceof Error ? e.message : String(e));
+      })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+    // sessionId is the trigger; turns.length is checked once on entry to
+    // avoid clobbering a freshly-streamed turn list.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId]);
 
   const send = useCallback(async () => {
     const q = input.trim();
@@ -272,6 +295,7 @@ function replayedToolCallStep(tc: ReplayedToolCall): Step {
     result: tc.ok ? "ok" : "failed",
     durationMs: tc.duration_ms ?? undefined,
     error: tc.error ?? undefined,
+    resultPreview: tc.preview ?? undefined,
   };
 }
 

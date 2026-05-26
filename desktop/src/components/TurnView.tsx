@@ -116,7 +116,13 @@ export function TurnView({ turn }: { turn: Turn }) {
 
       {turn.answer !== null && turn.answer.length > 0 && (
         <div className="ml-8 rounded-lg border border-border bg-bg-subtle p-4 text-sm">
-          <MarkdownView content={turn.answer} onEntryLink={onEntryLink} />
+          <MarkdownView
+            content={turn.answer}
+            onEntryLink={onEntryLink}
+            idPrefix={turn.conversationId
+              ? `user-content-${turn.conversationId}-`
+              : undefined}
+          />
           {turn.metrics && <MetricsLine m={turn.metrics} />}
         </div>
       )}

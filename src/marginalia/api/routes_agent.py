@@ -21,6 +21,7 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from marginalia.agent.runtime import _rewrite_footnotes_for_display
+from marginalia.agent.runtime import TOOL_RESULT_PREVIEW_LEN
 from marginalia.agent import tool_display
 from marginalia.db.models import Session as SessionRow
 from marginalia.db.session import get_session
@@ -237,6 +238,21 @@ async def session_messages(
                 folder_resolver=folder_names.get,
                 catalog_resolver=catalog_names.get,
             )
+            # Mirror the live SSE shape: a one-line preview of the tool's
+            # result (truncated to TOOL_RESULT_PREVIEW_LEN), so replayed
+            # transcripts show the same expandable result body the user
+            # saw during the original turn.
+            result = tc.get("result")
+            error = tc.get("error")
+            if error:
+                preview: str | None = f"ERROR: {error}"
+            elif result is not None:
+                p = tool_display.format_tool_result_preview(name, result)
+                if len(p) > TOOL_RESULT_PREVIEW_LEN:
+                    p = p[:TOOL_RESULT_PREVIEW_LEN] + "..."
+                preview = p
+            else:
+                preview = None
             tool_calls.append({
                 "name": name,
                 "arguments": args,
@@ -244,6 +260,7 @@ async def session_messages(
                 "ok": tc.get("error") is None,
                 "error": tc.get("error"),
                 "duration_ms": tc.get("duration_ms"),
+                "preview": preview,
             })
 
         turns.append({

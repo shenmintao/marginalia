@@ -126,6 +126,10 @@ export interface ReplayedToolCall {
   ok: boolean;
   error: string | null;
   duration_ms: number | null;
+  /** One-line summary of the tool result, mirrors what the live SSE
+   *  `tool_result` event carries in its `preview` field. Null when the
+   *  call ran but produced no result body (legacy rows). */
+  preview?: string | null;
 }
 
 export interface ReplayedTurn {
