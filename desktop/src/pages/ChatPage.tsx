@@ -132,7 +132,7 @@ export function ChatPage() {
       />
       <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
         <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto px-6 py-6">
-          <div className="mx-auto max-w-3xl">
+          <div className="mx-auto max-w-5xl">
             {openErr && (
               <div className="mb-4 rounded-md border border-danger/30 bg-danger/10 p-3 text-sm text-danger">
                 {openErr}
@@ -149,7 +149,7 @@ export function ChatPage() {
         </div>
 
         <div className="border-t border-border bg-bg-subtle px-6 py-3">
-          <div className="mx-auto flex max-w-3xl items-end gap-2">
+          <div className="mx-auto flex max-w-5xl items-end gap-2">
             <textarea
               value={input}
               onChange={(e) => setInput(e.target.value)}

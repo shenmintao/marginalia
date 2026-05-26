@@ -452,10 +452,14 @@ async def _run_plan_phase(
 #
 # UUID is matched strictly so the regex doesn't greedy-backtrack and eat
 # the trailing `, section_id=...` / parenthetical / em-dash + reason.
+# Models routinely wrap the uuid (and section_id value) in backticks
+# because they treat ids as inline code — `\`?` makes those backticks
+# optional so the rewrite still fires.
 _LIVE_FOOTNOTE_RE = re.compile(
-    r"^\[\^([^\]]+)\]:\s*entry_id\s*=\s*"
+    r"^\[\^([^\]]+)\]:\s*entry_id\s*=\s*`?"
     r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
-    r"(?:\s*,\s*section_id\s*=\s*(\S+?))?"
+    r"`?"
+    r"(?:\s*,\s*section_id\s*=\s*`?([^\s,`]+)`?)?"
     r"(?:\s+\([^)]*\))?"
     r"(?:\s*[-—–]\s*(.+?))?"
     r"\s*$",

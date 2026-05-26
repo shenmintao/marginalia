@@ -30,9 +30,9 @@ from marginalia.services.user_files import get_user_metadata
 
 
 _FOOTNOTE_RE = re.compile(
-    r"\[\^([^\]]+)\]:\s*entry_id\s*=\s*([0-9a-fA-F-]+)"
-    r"(?:\s*,\s*section_id\s*=\s*([^\s,\-]+))?"
-    r"(?:\s*-\s*(.+?))?"
+    r"\[\^([^\]]+)\]:\s*entry_id\s*=\s*`?([0-9a-fA-F-]+)`?"
+    r"(?:\s*,\s*section_id\s*=\s*`?([^\s,`\-]+)`?)?"
+    r"(?:\s*[-—–]\s*(.+?))?"
     r"\s*$",
     re.MULTILINE,
 )
