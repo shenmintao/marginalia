@@ -1,6 +1,6 @@
 /** Per-profile LLM editor.
  *
- *  Each row is one of chat/reflect/ingest/vision/audio. The form starts
+ *  Each row is one of chat/reflect/ingest/vision. The form starts
  *  prefilled with whatever is in the overlay (so unset fields stay
  *  blank — the placeholder shows the inherited default). Save sends a
  *  PATCH with only the changed fields; clearing a field to empty sends
@@ -18,7 +18,7 @@ import { settings as settingsApi } from "@/api/client";
 import { cn } from "@/lib/utils";
 import type { LlmProfileName, LlmSettings } from "@/types/api";
 
-const PROFILES: LlmProfileName[] = ["chat", "reflect", "ingest", "vision", "audio"];
+const PROFILES: LlmProfileName[] = ["chat", "reflect", "ingest", "vision"];
 
 type FormState = Partial<Record<string, string>>;
 
@@ -57,6 +57,7 @@ interface RowProps {
 function ProfileRow({ name, data, isOpen, onToggle, onChange }: RowProps) {
   const profile = data.profiles[name];
   const overlay = data.overlay;
+  const optional = name === "vision";
   const overlayKey = (suffix: string) => `llm_${name}_${suffix}`;
 
   const [form, setForm] = useState<FormState>({});
@@ -144,13 +145,17 @@ function ProfileRow({ name, data, isOpen, onToggle, onChange }: RowProps) {
         <div className="flex items-center gap-3">
           <span className="font-medium capitalize">{name}</span>
           <span className="font-mono text-xs text-fg-subtle">
-            {profile.provider}/{profile.model || "(unset)"}
+            {profile.provider || profile.model
+              ? `${profile.provider ?? "(unset)"}/${profile.model || "(unset)"}`
+              : "(unset)"}
           </span>
         </div>
         <span className="text-xs text-fg-subtle">
           {overrideCount > 0
             ? `${overrideCount} override${overrideCount > 1 ? "s" : ""}`
-            : "inherited"}
+            : optional
+              ? "not configured"
+              : "inherited"}
         </span>
       </button>
 
@@ -162,7 +167,9 @@ function ProfileRow({ name, data, isOpen, onToggle, onChange }: RowProps) {
               onChange={(e) => setForm({ ...form, provider: e.target.value })}
               className="w-full rounded border border-border bg-bg-base px-2 py-1 text-sm"
             >
-              <option value="">(inherit: {data.defaults.provider})</option>
+              <option value="">
+                {optional ? "(unset)" : `(inherit: ${data.defaults.provider})`}
+              </option>
               <option value="openai">openai</option>
               <option value="openai-compatible">openai-compatible</option>
               <option value="anthropic">anthropic</option>
@@ -172,7 +179,9 @@ function ProfileRow({ name, data, isOpen, onToggle, onChange }: RowProps) {
             <input
               value={form.model ?? ""}
               onChange={(e) => setForm({ ...form, model: e.target.value })}
-              placeholder={`(inherit: ${data.defaults.model})`}
+              placeholder={
+                optional ? "(unset)" : `(inherit: ${data.defaults.model})`
+              }
               className="w-full rounded border border-border bg-bg-base px-2 py-1 font-mono text-sm"
             />
           </Field>
@@ -180,7 +189,11 @@ function ProfileRow({ name, data, isOpen, onToggle, onChange }: RowProps) {
             <input
               value={form.base_url ?? ""}
               onChange={(e) => setForm({ ...form, base_url: e.target.value })}
-              placeholder={data.defaults.base_url || "(provider default)"}
+              placeholder={
+                optional
+                  ? "(unset)"
+                  : data.defaults.base_url || "(provider default)"
+              }
               className="w-full rounded border border-border bg-bg-base px-2 py-1 font-mono text-sm"
             />
           </Field>

@@ -139,6 +139,14 @@ LLM_PROFILES: tuple[str, ...] = ("chat", "reflect", "ingest", "vision", "audio")
 # opt-in: vision adds figure descriptions and OCR for scanned PDFs; audio
 # is only used by transcription pipelines. Pipelines that need them call
 # `has_vision_profile` / equivalent and degrade gracefully when absent.
+
+# Subset surfaced in the Settings GUI / `/v1/settings/llm` payload.
+# `audio` is intentionally hidden until a transcription pipeline actually
+# consumes it — exposing the form today would let users fill in keys that
+# nothing reads, then file bugs about "I configured it and nothing
+# happens". Keep the underlying Settings fields + `has_audio_profile`
+# helper so flipping audio back on is a one-line change here.
+LLM_PROFILES_VISIBLE: tuple[str, ...] = ("chat", "reflect", "ingest", "vision")
 _REQUIRED_PROFILES: tuple[str, ...] = ("chat", "reflect", "ingest")
 
 
@@ -176,9 +184,22 @@ def has_vision_profile(settings: Settings | None = None) -> bool:
     skip the VLM path entirely on installations that didn't configure
     one — instead of crashing or filling logs with provider errors.
     """
+    return _has_optional_profile(settings, "vision")
+
+
+def has_audio_profile(settings: Settings | None = None) -> bool:
+    """Symmetric to `has_vision_profile` for transcription.
+
+    The default profile is usually a chat model with no transcription
+    endpoint, so falling back silently produces 404s. Audio pipelines
+    check this and skip / surface a useful error when unset."""
+    return _has_optional_profile(settings, "audio")
+
+
+def _has_optional_profile(settings: Settings | None, profile: str) -> bool:
     s = settings if settings is not None else get_settings()
     return any(
-        getattr(s, f"llm_vision_{field}") not in (None, "")
+        getattr(s, f"llm_{profile}_{field}") not in (None, "")
         for field in ("api_key", "base_url", "model")
     )
 

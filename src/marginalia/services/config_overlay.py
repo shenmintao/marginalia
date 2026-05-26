@@ -43,7 +43,10 @@ _ALLOWED_FIELDS: frozenset[str] = frozenset({
     "llm_reflect_provider", "llm_reflect_api_key", "llm_reflect_base_url", "llm_reflect_model",
     "llm_ingest_provider", "llm_ingest_api_key", "llm_ingest_base_url", "llm_ingest_model",
     "llm_vision_provider", "llm_vision_api_key", "llm_vision_base_url", "llm_vision_model",
-    "llm_audio_provider", "llm_audio_api_key", "llm_audio_base_url", "llm_audio_model",
+    # llm_audio_* fields are intentionally NOT in the allowlist: no
+    # pipeline consumes the audio profile yet, so accepting writes
+    # would just persist dead config that misleads the user when
+    # nothing happens. Re-add when a transcription pipeline lands.
 })
 
 _VALID_PROVIDERS: frozenset[str] = frozenset({"openai", "openai-compatible", "anthropic"})

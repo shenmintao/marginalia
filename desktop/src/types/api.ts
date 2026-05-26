@@ -243,14 +243,14 @@ export interface ServerSettings {
 }
 
 export type LlmProfileName =
-  | "chat" | "reflect" | "ingest" | "vision" | "audio";
+  | "chat" | "reflect" | "ingest" | "vision";
 
 export interface LlmProfileResolved {
-  provider: string;
+  provider: string | null;
   api_key: string | null;
   api_key_set: boolean;
   base_url: string | null;
-  model: string;
+  model: string | null;
 }
 
 export interface LlmSettings {

@@ -26,7 +26,10 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from marginalia.config import (
-    LLM_PROFILES, get_settings, has_vision_profile, resolve_profile,
+    LLM_PROFILES_VISIBLE,
+    get_settings,
+    has_vision_profile,
+    resolve_profile,
 )
 from marginalia.llm.factory import reset_clients_cache
 from marginalia.services.config_overlay import (
@@ -75,7 +78,21 @@ def llm_settings() -> dict[str, Any]:
     explicitly-set fields rather than every inherited value."""
     s = get_settings()
     profiles: dict[str, dict[str, Any]] = {}
-    for p in LLM_PROFILES:
+    for p in LLM_PROFILES_VISIBLE:
+        if p == "vision":
+            # Opt-in profile: don't show the inherited default (the
+            # default model is usually text-only and can't actually
+            # serve vision). Reflect only what's explicitly set so an
+            # unconfigured profile reads as blank in the UI.
+            api_key = getattr(s, f"llm_{p}_api_key")
+            profiles[p] = {
+                "provider": getattr(s, f"llm_{p}_provider"),
+                "api_key": _mask(api_key),
+                "api_key_set": bool(api_key),
+                "base_url": getattr(s, f"llm_{p}_base_url"),
+                "model": getattr(s, f"llm_{p}_model"),
+            }
+            continue
         prof = resolve_profile(s, p)
         profiles[p] = {
             "provider": prof.provider,

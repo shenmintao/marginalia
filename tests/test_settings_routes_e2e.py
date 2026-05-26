@@ -104,9 +104,19 @@ async def test_llm_get_masks_keys() -> None:
             assert chat["api_key_set"] is True
             assert chat["api_key"] != "sk-default-key-XXXX"
             assert "***" in (chat["api_key"] or "")
-            # vision/audio inherit too but their keys must also be masked.
-            assert "***" in (body["profiles"]["vision"]["api_key"] or "")
-            print("[2] /v1/settings/llm: api_keys masked in GET")
+            # vision is opt-in: with no explicit override it should
+            # read as blank, NOT fall back to the default key. The
+            # Settings UI relies on this to show "(unset)" instead of
+            # pretending the user inherited a usable config.
+            vision = body["profiles"]["vision"]
+            assert vision["api_key_set"] is False
+            assert vision["api_key"] is None
+            assert vision["model"] is None
+            assert vision["provider"] is None
+            # audio is hidden from the GUI surface until a transcription
+            # pipeline lands — no `audio` key in the response.
+            assert "audio" not in body["profiles"]
+            print("[2] /v1/settings/llm: api_keys masked, vision blank, audio hidden")
 
 
 async def test_put_writes_overlay_and_invalidates_cache() -> None:
