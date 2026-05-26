@@ -45,6 +45,7 @@ from marginalia.llm import (
     TextBlock,
     get_chat_client,
 )
+from marginalia.llm.tagged_response import parse_kv, parse_tagged
 from marginalia.repositories import catalogs as catalogs_repo
 from marginalia.repositories import entries as entries_repo
 from marginalia.repositories import entry_relations as relations_repo
@@ -76,35 +77,23 @@ descriptions, or tags reveal a real semantic link (same project,
 contradicting findings, build on each other, expand on each other,
 etc.). When in doubt, reject.
 
-Output ONLY one JSON object matching the supplied schema. For each pair:
-  - decision: "accept" or "reject"
-  - reason: one short sentence explaining the decision; if accept, the
-    reason becomes the entry_relation.note for future readers.
+Output format — exactly one block, one line per pair:
 
-Do not invent additional pairs. Do not skip pairs — every input pair
-must appear in your output."""
+  <decisions>
+  <pair_id>: accept - one short reason
+  <pair_id>: reject - one short reason
+  </decisions>
+
+Use the pair_id values verbatim from the input. The decision MUST be
+either `accept` or `reject`. Separate decision and reason with ` - `
+(space, dash, space). Every input pair MUST appear in your output —
+do not invent additional pairs and do not skip any. Do NOT wrap in
+JSON or add ``` fences.
+"""
 
 
-CORPUS_MINE_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["decisions"],
-    "properties": {
-        "decisions": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["pair_id", "decision", "reason"],
-                "properties": {
-                    "pair_id": {"type": "string"},
-                    "decision": {"type": "string", "enum": ["accept", "reject"]},
-                    "reason": {"type": "string"},
-                },
-            },
-        },
-    },
-}
+# Schema kept for legacy callers but no longer fed to the LLM.
+CORPUS_MINE_SCHEMA: dict[str, Any] = {}
 
 
 def _utcnow() -> datetime:
@@ -363,10 +352,23 @@ async def _ask_llm_for_decisions(
         system=CORPUS_MINE_SYSTEM,
         messages=[ChatMessage(role="user", content=[TextBlock(text=user_text)])],
         max_tokens=4096,
-        json_schema=CORPUS_MINE_SCHEMA,
         temperature=0.1,
     ))
-    if resp.parsed_json is None:
-        log.warning("mine_corpus_evidence: LLM did not return parseable JSON")
+    tagged = parse_tagged(resp.text or "")
+    block = tagged.get("decisions", "")
+    if not block:
+        log.warning("mine_corpus_evidence: no <decisions> block in response")
         return []
-    return list(resp.parsed_json.get("decisions") or [])
+    kv = parse_kv(block)
+    out: list[dict[str, Any]] = []
+    for pair_id, value in kv.items():
+        decision, sep, reason = value.partition(" - ")
+        decision = decision.strip().lower()
+        if decision not in ("accept", "reject"):
+            continue
+        out.append({
+            "pair_id": pair_id,
+            "decision": decision,
+            "reason": reason.strip() if sep else "",
+        })
+    return out

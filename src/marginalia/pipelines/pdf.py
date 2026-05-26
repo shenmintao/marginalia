@@ -3,9 +3,9 @@
 Handles application/pdf and `.pdf`. Strategy: pypdf extracts the text
 layer page by page; significant images are concurrently described by
 the vision LLM and inlined as `[Figure N.M] ...` lines next to their
-pages; the assembled body then goes through the same JSON-schema
-indexing prompt as the text pipeline, but with a page-aware section
-schema.
+pages; the assembled body then goes through the same tagged-response
+indexing prompt as the text pipeline, but with page anchors in
+`<sections>`.
 
 PDFs without a text layer (scanned images) are flagged via a clean
 error in the pipeline output — the handler marks the file as needing
@@ -32,6 +32,14 @@ from marginalia.llm import (
     ImageBlock,
     TextBlock,
     get_chat_client,
+)
+from marginalia.llm.tagged_response import (
+    parse_path,
+    parse_sections,
+    parse_tagged,
+    parse_tags,
+    render_format_hint,
+    render_sections_hint,
 )
 from marginalia.pipelines.base import (
     Pipeline,
@@ -73,83 +81,24 @@ You receive the full text of a PDF, page-by-page. Produce a structured
 index that lets a downstream agent decide whether to retrieve the document
 and find the relevant page.
 
-Rules:
-- Output ONLY one JSON object matching the provided schema. No prose, no fences.
-- `summary`: 2-4 sentences in the document's own language, content-focused.
-- `description.sections`: every meaningful section/heading. For each:
-  a stable id (s1, s2, …), the heading title, an anchor with
-  `unit: "pages"` and `value: "<start>-<end>"` (1-indexed inclusive),
-  a 1-2 sentence summary, and 3-7 key terms.
-- `kind`: "text".
-- `extra`: at most 1 paragraph of cross-cutting insight; "" if nothing notable.
-- `entry_extra`: at most 1 paragraph of position-aware insight; "" if none.
-- `entry_catalog_path`: best-guess classification path as a list of names.
-- `entry_tags`: 3-10 tags. Each `{name, facet}`. Facets:
-  topic | form | time | source | language | extra.
-"""
+`summary` (2-4 sentences in the document's own language) is content-focused.
+`description` is a free-text walk-through of the document's structure and
+key points. `sections` lists every meaningful section/heading; each line
+takes the form `id | <pages X-Y> | title | one-or-two-sentence summary |
+term1, term2, term3`. Pages are 1-indexed and inclusive. `extra` carries
+cross-cutting machine-readable insights as `key: value` lines (one per
+line; leave the block empty if nothing notable). `entry_extra` is the
+same shape but for position-aware insights. `entry_catalog_path` is a
+best-guess classification path. `tags` are 3-10 facet:name pairs; valid
+facets are topic | form | time | source | language | extra.
+
+""" + render_format_hint() + "\n" + render_sections_hint(
+    anchor_unit="pages", anchor_example="pages 4-7",
+)
 
 
-PDF_PIPELINE_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": [
-        "summary", "description", "kind", "extra",
-        "entry_extra", "entry_catalog_path", "entry_tags",
-    ],
-    "properties": {
-        "summary": {"type": "string"},
-        "description": {
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["sections"],
-            "properties": {
-                "sections": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "additionalProperties": False,
-                        "required": ["id", "title", "anchor", "summary", "key_terms"],
-                        "properties": {
-                            "id": {"type": "string"},
-                            "title": {"type": "string"},
-                            "anchor": {
-                                "type": "object",
-                                "additionalProperties": False,
-                                "required": ["unit", "value"],
-                                "properties": {
-                                    "unit": {"type": "string", "enum": ["pages"]},
-                                    "value": {"type": "string"},
-                                },
-                            },
-                            "summary": {"type": "string"},
-                            "key_terms": {"type": "array", "items": {"type": "string"}},
-                        },
-                    },
-                },
-            },
-        },
-        "kind": {"type": "string", "enum": ["text"]},
-        "extra": {"type": "string"},
-        "entry_extra": {"type": "string"},
-        "entry_catalog_path": {"type": "array", "items": {"type": "string"}},
-        "entry_tags": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["name", "facet"],
-                "properties": {
-                    "name": {"type": "string"},
-                    "facet": {
-                        "type": "string",
-                        "enum": ["topic", "form", "time", "source",
-                                "language", "extra"],
-                    },
-                },
-            },
-        },
-    },
-}
+# Schema kept for legacy callers but no longer fed to the LLM.
+PDF_PIPELINE_SCHEMA: dict[str, Any] = {}
 
 
 class PdfNeedsOcrError(Exception):
@@ -246,24 +195,30 @@ class PdfPipeline(Pipeline):
         )
 
         client = get_chat_client("ingest")
-        max_out = min(4096, max(1024, len(body_text) // 12))
+        max_out = min(8192, max(2048, len(body_text) // 8))
         resp = await client.complete(ChatRequest(
             system=PDF_PIPELINE_SYSTEM,
             messages=[ChatMessage(role="user", content=[TextBlock(text=user_text)])],
             max_tokens=max_out,
-            json_schema=PDF_PIPELINE_SCHEMA,
             temperature=0.2,
         ))
 
-        if resp.parsed_json is None:
+        tagged = parse_tagged(resp.text or "")
+        summary = tagged.get("summary", "").strip()
+        if not summary:
             log.warning(
-                "pdf pipeline: model did not return parseable JSON. text=%r",
+                "pdf pipeline: no <summary> in response. text=%r",
                 (resp.text or "")[:300],
             )
-            raise ValueError("pdf pipeline produced non-JSON output")
+            raise ValueError("pdf pipeline produced empty summary")
 
-        data = resp.parsed_json
-        description = {"sections": data["description"]["sections"]}
+        sections = parse_sections(
+            tagged.get("sections", ""), anchor_unit="pages",
+        )
+        description: dict[str, Any] = {"sections": sections}
+        description_text = tagged.get("description", "").strip()
+        if description_text:
+            description["text"] = description_text
         if ocr_used:
             description["ocr"] = {
                 "engine": "vlm",
@@ -271,15 +226,15 @@ class PdfPipeline(Pipeline):
                 "pages_processed": ocr_pages_done,
             }
         return PipelineResult(
-            summary=str(data["summary"]),
+            summary=summary,
             description=description,
             kind="text",
-            extra=(data.get("extra") or "") or None,
-            entry_extra=(data.get("entry_extra") or "") or None,
-            entry_catalog_path=list(data.get("entry_catalog_path") or []) or None,
+            extra=tagged.get("extra", "").strip() or None,
+            entry_extra=tagged.get("entry_extra", "").strip() or None,
+            entry_catalog_path=parse_path(tagged.get("catalog_path", "")) or None,
             entry_tags=[
-                TagSuggestion(name=str(t["name"]), facet=str(t["facet"]))
-                for t in (data.get("entry_tags") or [])
+                TagSuggestion(name=t["name"], facet=t["facet"])
+                for t in parse_tags(tagged.get("tags", ""))
             ],
         )
 

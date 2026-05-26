@@ -32,6 +32,7 @@ from marginalia.db.models import Tag, TagAlias
 from marginalia.repositories import audit_events as audit_events_repo
 from marginalia.db.session import session_scope
 from marginalia.llm import ChatMessage, ChatRequest, TextBlock, get_chat_client
+from marginalia.llm.tagged_response import parse_kv, parse_tagged
 from marginalia.repositories import tags as tags_repo
 from marginalia.repositories.task_outcomes import (
     GLOBAL_OBJECT_ID,
@@ -52,9 +53,6 @@ Given a list of tags within ONE facet, identify groups of synonymous tags and
 choose a canonical member for each group. Be conservative — false merges are
 costly and irreversible from the user's view.
 
-Output a JSON object:
-  {"merges": [{"canonical_id": "...", "merge_in_ids": ["...", "..."]}]}
-
 Rules:
   - canonical_id MUST be one of the supplied tag ids
   - merge_in_ids MUST also all be supplied ids, NEVER include canonical_id
@@ -62,32 +60,22 @@ Rules:
   - merging across distinct concepts (e.g. "ML" and "AI" — overlapping but
     not identical) is FORBIDDEN; only merge true synonyms / spelling variants
     / case differences / ASCII↔Unicode differences
-  - if no clean merges exist, return {"merges": []}
+  - if no clean merges exist, output an empty <merges> block
+
+Output format — one `<merges>` block, one line per merge group:
+
+  <merges>
+  <canonical_id>: <merge_in_id1>, <merge_in_id2>
+  <canonical_id>: <merge_in_id3>
+  </merges>
+
+Use the tag id values verbatim from the input. Do NOT wrap in JSON or
+add ``` fences.
 """
 
-NORMALIZE_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["merges"],
-    "properties": {
-        "merges": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["canonical_id", "merge_in_ids"],
-                "properties": {
-                    "canonical_id": {"type": "string"},
-                    "merge_in_ids": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "minItems": 1,
-                    },
-                },
-            },
-        },
-    },
-}
+
+# Schema kept for legacy callers but no longer fed to the LLM.
+NORMALIZE_SCHEMA: dict[str, Any] = {}
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -148,21 +136,28 @@ async def _normalize_one_facet(facet: str) -> dict[str, int] | None:
     user_text = (
         f"Facet: {facet}\n\nTags ({len(payload_for_llm)} total):\n"
         f"{json.dumps(payload_for_llm, ensure_ascii=False)}\n\n"
-        "Identify synonym groups. Output JSON per the schema."
+        "Identify synonym groups and emit a <merges> block per the format hint."
     )
     client = get_chat_client("ingest")
     resp = await client.complete(ChatRequest(
         system=NORMALIZE_SYSTEM,
         messages=[ChatMessage(role="user", content=[TextBlock(text=user_text)])],
-        max_tokens=2048,
-        json_schema=NORMALIZE_SCHEMA,
+        max_tokens=4096,
         temperature=0.1,
     ))
-    if resp.parsed_json is None:
-        log.warning("normalize_tags(%s): non-JSON response, skipping facet", facet)
-        return None
-
-    merges = resp.parsed_json.get("merges") or []
+    tagged = parse_tagged(resp.text or "")
+    block = tagged.get("merges", "")
+    if not block:
+        # Empty merges block is a legitimate "nothing to do" result.
+        return {"merges_applied": 0, "tags_redirected": 0}
+    kv = parse_kv(block)
+    merges = [
+        {
+            "canonical_id": canonical_id,
+            "merge_in_ids": [m.strip() for m in csv.split(",") if m.strip()],
+        }
+        for canonical_id, csv in kv.items()
+    ]
     if not merges:
         return {"merges_applied": 0, "tags_redirected": 0}
 

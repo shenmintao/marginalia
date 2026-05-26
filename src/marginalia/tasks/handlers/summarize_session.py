@@ -51,6 +51,7 @@ from marginalia.llm import (
     TextBlock,
     get_chat_client,
 )
+from marginalia.llm.tagged_response import parse_tagged
 from marginalia.repositories import entries as entries_repo
 from marginalia.repositories import entry_tags as entry_tags_repo
 from marginalia.repositories import journal as journal_repo
@@ -83,49 +84,89 @@ Two kinds of insights are useful:
 
 Rules:
   - Be SELECTIVE. 0..MAX insights per session. If nothing is durable,
-    return [].
+    leave the <insights> block empty.
   - Each insight stands alone. Don't reference "this session" — write as
     if a future session is reading it cold.
   - Tag liberally so search_journal can find them later. Use entry_ids
     only for genuinely entry-specific insights.
   - If an OLDER insight (provided in <prior_insights>) is now obsolete
-    or refined, list its id in `superseded`; the framework will chain
+    or refined, list its id in <superseded>; the framework will chain
     them. Do NOT include the older insight's text — the new one stands
     alone.
 
-Output ONLY one JSON object matching the supplied schema. No prose, no
-fences.
+Output format — exactly two blocks:
+
+  <insights>
+  - note: free-form one or two sentences
+    entry_ids: id1, id2
+    tags: tag1, tag2
+  - note: another insight
+    entry_ids:
+    tags: tag3
+  </insights>
+
+  <superseded>
+  old_insight_id_1
+  old_insight_id_2
+  </superseded>
+
+Each insight starts with `- note:` on its own line, followed by the
+`entry_ids:` and `tags:` lines (comma-separated, may be empty). The
+<superseded> block lists one prior_insight id per line; leave empty
+if none. Do NOT wrap in JSON or add ``` fences.
 """
 
 
-SUMMARIZE_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["insights", "superseded"],
-    "properties": {
-        "insights": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["note", "entry_ids", "tags"],
-                "properties": {
-                    "note": {"type": "string"},
-                    "entry_ids": {"type": "array", "items": {"type": "string"}},
-                    "tags": {"type": "array", "items": {"type": "string"}},
-                },
-            },
-        },
-        "superseded": {
-            "type": "array",
-            "items": {"type": "string"},
-        },
-    },
-}
+# Schema kept for legacy callers but no longer fed to the LLM.
+SUMMARIZE_SCHEMA: dict[str, Any] = {}
 
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _parse_insights_block(block: str) -> list[dict[str, Any]]:
+    """Parse the <insights> block into a list of {note, entry_ids, tags}.
+
+    Format (one item per `- note:`):
+        - note: free-form text
+          entry_ids: id1, id2
+          tags: tag1, tag2
+    """
+    items: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+    for raw_line in block.splitlines():
+        line = raw_line.rstrip()
+        stripped = line.lstrip()
+        if not stripped:
+            continue
+        if stripped.startswith("- note:"):
+            if current is not None:
+                items.append(current)
+            current = {
+                "note": stripped[len("- note:"):].strip(),
+                "entry_ids": [],
+                "tags": [],
+            }
+            continue
+        if current is None:
+            continue
+        if stripped.startswith("entry_ids:"):
+            csv = stripped[len("entry_ids:"):].strip()
+            current["entry_ids"] = [
+                t.strip() for t in csv.split(",") if t.strip()
+            ]
+        elif stripped.startswith("tags:"):
+            csv = stripped[len("tags:"):].strip()
+            current["tags"] = [
+                t.strip() for t in csv.split(",") if t.strip()
+            ]
+        else:
+            # Continuation of the note line.
+            current["note"] = (current["note"] + " " + stripped).strip()
+    if current is not None:
+        items.append(current)
+    return items
 
 
 @task_handler(KIND_SUMMARIZE_SESSION)
@@ -205,19 +246,14 @@ async def handle_summarize_session(payload: Mapping[str, Any]) -> None:
         system=SUMMARIZE_SYSTEM,
         messages=[ChatMessage(role="user", content=[TextBlock(text=user_text)])],
         max_tokens=4096,
-        json_schema=SUMMARIZE_SCHEMA,
         temperature=0.3,
     ))
-    if resp.parsed_json is None:
-        raise ValueError(
-            "summarize_session: model did not return parseable JSON"
-        )
-
-    data = resp.parsed_json
-    raw_insights = list(data.get("insights") or [])[:MAX_INSIGHTS]
+    tagged = parse_tagged(resp.text or "")
+    raw_insights = _parse_insights_block(tagged.get("insights", ""))[:MAX_INSIGHTS]
     raw_superseded = [
-        s for s in (data.get("superseded") or [])
-        if isinstance(s, str)
+        line.strip()
+        for line in tagged.get("superseded", "").splitlines()
+        if line.strip()
     ]
 
     async with session_scope() as session:

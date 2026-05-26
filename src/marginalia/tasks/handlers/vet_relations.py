@@ -45,6 +45,7 @@ from marginalia.db.session import session_scope
 from marginalia.llm import (
     ChatMessage, ChatRequest, TextBlock, get_chat_client,
 )
+from marginalia.llm.tagged_response import parse_kv, parse_tagged
 from marginalia.repositories import entry_relations as relations_repo
 from marginalia.repositories.task_outcomes import (
     GLOBAL_OBJECT_ID,
@@ -81,33 +82,21 @@ Accept:
   - Pairs whose summaries describe the same subject, the same domain,
     or one substantively builds on the other.
 
-Output ONLY a JSON object matching the supplied schema. For each
-candidate:
-  - pair_id: the id you were given
-  - verdict: "yes" or "no"
-  - reason: one short sentence explaining the verdict; will be stored
-    as audit context for future maintainers."""
+Output format — exactly one `<verdicts>` block, one line per candidate:
 
-VET_RELATIONS_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["verdicts"],
-    "properties": {
-        "verdicts": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["pair_id", "verdict", "reason"],
-                "properties": {
-                    "pair_id": {"type": "string"},
-                    "verdict": {"type": "string", "enum": ["yes", "no"]},
-                    "reason": {"type": "string"},
-                },
-            },
-        },
-    },
-}
+  <verdicts>
+  <pair_id>: yes - one short sentence why
+  <pair_id>: no - one short sentence why
+  </verdicts>
+
+Use the pair_id values verbatim from the input. The verdict MUST be
+either `yes` or `no`. Separate verdict and reason with ` - ` (space,
+dash, space). Do NOT wrap in JSON or add ``` fences.
+"""
+
+
+# Schema kept for legacy callers but no longer fed to the LLM.
+VET_RELATIONS_SCHEMA: dict[str, Any] = {}
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -344,14 +333,27 @@ async def _ask_llm(
         resp = await client.complete(ChatRequest(
             system=VET_RELATIONS_SYSTEM,
             messages=[ChatMessage(role="user", content=[TextBlock(text=user_text)])],
-            max_tokens=2048,
-            json_schema=VET_RELATIONS_SCHEMA,
+            max_tokens=4096,
             temperature=0.1,
         ))
     except Exception as exc:  # noqa: BLE001
         log.warning("vet_relations: LLM call failed: %s", exc)
         return [], f"{type(exc).__name__}: {exc}"
-    if resp.parsed_json is None:
-        log.warning("vet_relations: LLM returned non-JSON output")
-        return [], "LLM returned non-JSON output"
-    return list(resp.parsed_json.get("verdicts") or []), None
+    tagged = parse_tagged(resp.text or "")
+    block = tagged.get("verdicts", "")
+    if not block:
+        log.warning("vet_relations: no <verdicts> block in response")
+        return [], "no <verdicts> block in response"
+    kv = parse_kv(block)
+    out: list[dict[str, Any]] = []
+    for pair_id, value in kv.items():
+        verdict, sep, reason = value.partition(" - ")
+        verdict = verdict.strip().lower()
+        if verdict not in ("yes", "no"):
+            continue
+        out.append({
+            "pair_id": pair_id,
+            "verdict": verdict,
+            "reason": reason.strip() if sep else "",
+        })
+    return out, None

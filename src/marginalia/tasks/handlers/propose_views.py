@@ -43,6 +43,7 @@ from marginalia.db.session import session_scope
 from marginalia.llm import (
     ChatMessage, ChatRequest, TextBlock, get_chat_client,
 )
+from marginalia.llm.tagged_response import parse_tagged
 from marginalia.repositories import entry_relations as relations_repo
 from marginalia.repositories import entry_tags as entry_tags_repo
 from marginalia.repositories import tags as tags_repo
@@ -78,44 +79,24 @@ identifies a useful topic. Reject clusters that are too generic (e.g.
 "text + english + 2024" is a non-topic), too narrow, or already
 covered by other views you can see.
 
-Output ONLY one JSON object matching the supplied schema. For each
-cluster:
-  - decision: "accept" or "reject"
-  - reason: one sentence explanation
-  - If accept, also provide:
-    - name: short view name (≤ 40 chars), human-readable
-    - summary: one sentence describing what the view collects
-    - filter_tag_ids: subset of cluster's tag ids to use in
-      filter_spec.tags_all (typically all of them, but you may drop
-      noisy ones)"""
+Output format — exactly one block, one compact JSON object per line,
+one line per cluster:
+
+  <decisions>
+  {"cluster_id":"...", "decision":"accept", "reason":"...", "name":"...", "summary":"...", "filter_tag_ids":["..."]}
+  {"cluster_id":"...", "decision":"reject", "reason":"..."}
+  </decisions>
+
+For accepted clusters include `name` (≤ 40 chars), `summary` (one
+sentence), and `filter_tag_ids` (subset of the cluster's tag ids; you
+may drop noisy ones, typically include all). Use the cluster_id values
+verbatim from the input. Do NOT wrap the whole output in an outer JSON
+object and do NOT add ``` fences.
+"""
 
 
-PROPOSE_VIEWS_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["decisions"],
-    "properties": {
-        "decisions": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["cluster_id", "decision", "reason"],
-                "properties": {
-                    "cluster_id": {"type": "string"},
-                    "decision": {"type": "string", "enum": ["accept", "reject"]},
-                    "reason": {"type": "string"},
-                    "name": {"type": "string"},
-                    "summary": {"type": "string"},
-                    "filter_tag_ids": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                    },
-                },
-            },
-        },
-    },
-}
+# Schema kept for legacy callers but no longer fed to the LLM.
+PROPOSE_VIEWS_SCHEMA: dict[str, Any] = {}
 
 
 def _utcnow() -> datetime:
@@ -527,10 +508,21 @@ async def _ask_llm_for_decisions(
         system=PROPOSE_VIEWS_SYSTEM,
         messages=[ChatMessage(role="user", content=[TextBlock(text=user_text)])],
         max_tokens=4096,
-        json_schema=PROPOSE_VIEWS_SCHEMA,
         temperature=0.2,
     ))
-    if resp.parsed_json is None:
-        log.warning("propose_views: LLM did not return parseable JSON")
-        return []
-    return list(resp.parsed_json.get("decisions") or [])
+    tagged = parse_tagged(resp.text or "")
+    block = tagged.get("decisions", "")
+    out: list[dict[str, Any]] = []
+    for raw_line in block.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError as exc:
+            log.warning("propose_views: skip malformed decision line %r: %s",
+                        line[:120], exc)
+            continue
+        if isinstance(obj, dict) and obj.get("cluster_id"):
+            out.append(obj)
+    return out

@@ -5,9 +5,9 @@ follow the same pattern: extract plain text, then ask the LLM to
 produce the same structured index. This module pulls out the LLM call
 so each parser only has to handle its own extraction.
 
-The schema is identical to `text.py`'s but with the `kind` enum widened
-to include the caller's kind. Anchors stay heading-or-lines; sheet- and
-slide-aware variants can introduce custom anchor units later if needed.
+Output uses the tagged-response format (see marginalia.llm.tagged_response).
+Anchors stay heading-or-lines; sheet- and slide-aware variants can
+introduce custom anchor units later if needed.
 """
 from __future__ import annotations
 
@@ -16,6 +16,14 @@ import logging
 from typing import Any
 
 from marginalia.llm import ChatMessage, ChatRequest, TextBlock, get_chat_client
+from marginalia.llm.tagged_response import (
+    parse_path,
+    parse_sections,
+    parse_tagged,
+    parse_tags,
+    render_format_hint,
+    render_sections_hint,
+)
 from marginalia.pipelines.base import PipelineContext, PipelineResult, TagSuggestion
 
 log = logging.getLogger(__name__)
@@ -26,95 +34,25 @@ Your job: read a single document and produce a structured index that
 lets a downstream agent decide whether to retrieve it, and once
 retrieved, jump to the relevant section by anchor.
 
-Rules:
-- Output ONLY one JSON object matching the provided schema. No prose,
-  no fences.
-- `summary`: 2-4 sentences in the document's own language,
-  content-focused.
-- `description.sections`: array of every meaningful heading or logical
-  chunk. For each section: a stable id (s1, s2, …), the heading title,
-  an anchor (`unit`: "heading" with `path` like "1.2.3", or "lines"
-  with [start,end]), a 1-2 sentence summary, and 3-7 key terms.
-- `kind`: matches the document type the user uploaded.
-- `extra`: at most 1 paragraph of cross-cutting content insight.
-- `entry_extra`: at most 1 paragraph of position-aware insight.
-- `entry_catalog_path`: best-guess classification path as a list.
-- `entry_tags`: 3-10 tags. Each `{name, facet}`. Facets are exactly:
-  topic | form | time | source | language | extra. Reuse names from
-  the current vocabulary when they fit.
-"""
+`summary` (2-4 sentences in the document's own language) is content-focused.
+`description` is a free-text walk-through of the document's organisation —
+multi-paragraph if useful. `sections` lists every meaningful heading or
+logical chunk; each line: `id | <heading-path or lines X-Y> | title |
+one-or-two-sentence summary | term1, term2`. `extra` carries cross-cutting
+machine-readable insights as `key: value` lines; leave empty if nothing
+notable. `entry_extra` is the same shape but for position-aware insights.
+`entry_catalog_path` is a best-guess classification path. `tags` are 3-10
+facet:name pairs; valid facets are topic | form | time | source | language
+| extra. Reuse names from the current vocabulary when they fit.
+
+""" + render_format_hint() + "\n" + render_sections_hint(
+    anchor_unit="heading or lines", anchor_example="1.2.3 or lines 100-160",
+)
 
 
+# Schema kept for legacy callers but no longer fed to the LLM.
 def make_schema(kind: str) -> dict[str, Any]:
-    """Build the indexer schema with `kind` constrained to one value."""
-    return {
-        "type": "object",
-        "additionalProperties": False,
-        "required": [
-            "summary", "description", "kind", "extra",
-            "entry_extra", "entry_catalog_path", "entry_tags",
-        ],
-        "properties": {
-            "summary": {"type": "string"},
-            "description": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["sections"],
-                "properties": {
-                    "sections": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "additionalProperties": False,
-                            "required": ["id", "title", "anchor", "summary",
-                                         "key_terms"],
-                            "properties": {
-                                "id": {"type": "string"},
-                                "title": {"type": "string"},
-                                "anchor": {
-                                    "type": "object",
-                                    "additionalProperties": False,
-                                    "required": ["unit", "value"],
-                                    "properties": {
-                                        "unit": {
-                                            "type": "string",
-                                            "enum": ["heading", "lines"],
-                                        },
-                                        "value": {"type": "string"},
-                                    },
-                                },
-                                "summary": {"type": "string"},
-                                "key_terms": {
-                                    "type": "array",
-                                    "items": {"type": "string"},
-                                },
-                            },
-                        },
-                    },
-                },
-            },
-            "kind": {"type": "string", "enum": [kind]},
-            "extra": {"type": "string"},
-            "entry_extra": {"type": "string"},
-            "entry_catalog_path": {"type": "array", "items": {"type": "string"}},
-            "entry_tags": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "required": ["name", "facet"],
-                    "properties": {
-                        "name": {"type": "string"},
-                        "facet": {
-                            "type": "string",
-                            "enum": ["topic", "form", "time", "source",
-                                     "language", "extra"],
-                        },
-                    },
-                },
-            },
-        },
-    }
+    return {}
 
 
 async def index_extracted_text(
@@ -136,7 +74,7 @@ async def index_extracted_text(
     )
 
     client = get_chat_client("ingest")
-    max_out = min(4096, max(1024, len(body) // 10))
+    max_out = min(8192, max(2048, len(body) // 8))
 
     resp = await client.complete(ChatRequest(
         system=INDEXER_SYSTEM,
@@ -144,27 +82,35 @@ async def index_extracted_text(
             role="user", content=[TextBlock(text=user_text)],
         )],
         max_tokens=max_out,
-        json_schema=make_schema(kind),
         temperature=0.2,
     ))
 
-    if resp.parsed_json is None:
+    tagged = parse_tagged(resp.text or "")
+    summary = tagged.get("summary", "").strip()
+    if not summary:
         log.warning(
-            "%s pipeline: model did not return parseable JSON. text=%r",
+            "%s pipeline: no <summary> in response. text=%r",
             kind, (resp.text or "")[:300],
         )
-        raise ValueError(f"{kind} pipeline produced non-JSON output")
+        raise ValueError(f"{kind} pipeline produced empty summary")
 
-    data = resp.parsed_json
+    sections = parse_sections(
+        tagged.get("sections", ""), anchor_unit="heading",
+    )
+    description: dict[str, Any] = {"sections": sections}
+    description_text = tagged.get("description", "").strip()
+    if description_text:
+        description["text"] = description_text
+
     return PipelineResult(
-        summary=str(data["summary"]),
-        description={"sections": data["description"]["sections"]},
+        summary=summary,
+        description=description,
         kind=kind,
-        extra=(data.get("extra") or "") or None,
-        entry_extra=(data.get("entry_extra") or "") or None,
-        entry_catalog_path=list(data.get("entry_catalog_path") or []) or None,
+        extra=tagged.get("extra", "").strip() or None,
+        entry_extra=tagged.get("entry_extra", "").strip() or None,
+        entry_catalog_path=parse_path(tagged.get("catalog_path", "")) or None,
         entry_tags=[
-            TagSuggestion(name=str(t["name"]), facet=str(t["facet"]))
-            for t in (data.get("entry_tags") or [])
+            TagSuggestion(name=t["name"], facet=t["facet"])
+            for t in parse_tags(tagged.get("tags", ""))
         ],
     )

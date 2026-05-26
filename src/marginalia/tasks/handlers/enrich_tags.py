@@ -43,6 +43,7 @@ from typing import Any, Mapping
 from marginalia.db.models import EntryTag
 from marginalia.db.session import session_scope
 from marginalia.llm import ChatMessage, ChatRequest, TextBlock, get_chat_client
+from marginalia.llm.tagged_response import parse_kv, parse_tagged
 from marginalia.repositories import entries as entries_repo
 from marginalia.repositories import entry_tags as entry_tags_repo
 from marginalia.repositories import tags as tags_repo
@@ -76,29 +77,20 @@ Rules:
   - Aim for 0–4 new tags per entry; never more than 6.
   - Do not duplicate the entry's existing tags.
 
-Output ONE JSON object matching the supplied schema. No prose, no fences.
+Output format — one `<assignments>` block, one line per entry:
+
+  <assignments>
+  <entry_id>: tag_id1, tag_id2, tag_id3
+  <entry_id>: (empty if no tags to add)
+  </assignments>
+
+Use the entry_id values verbatim from the input. Do NOT wrap in JSON or
+add ``` fences.
 """
 
 
-ENRICH_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["assignments"],
-    "properties": {
-        "assignments": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["entry_id", "tag_ids"],
-                "properties": {
-                    "entry_id": {"type": "string"},
-                    "tag_ids": {"type": "array", "items": {"type": "string"}},
-                },
-            },
-        },
-    },
-}
+# Schema kept for legacy callers but no longer fed to the LLM.
+ENRICH_SCHEMA: dict[str, Any] = {}
 
 
 def _utcnow() -> datetime:
@@ -256,20 +248,19 @@ async def _ask_llm_for_batch(
     resp = await client.complete(ChatRequest(
         system=ENRICH_SYSTEM,
         messages=[ChatMessage(role="user", content=[TextBlock(text=user_text)])],
-        max_tokens=2048,
-        json_schema=ENRICH_SCHEMA,
+        max_tokens=4096,
         temperature=0.1,
     ))
     out: dict[str, list[str]] = {}
-    if resp.parsed_json is None:
-        log.warning("enrich_tags: LLM did not return parseable JSON")
+    tagged = parse_tagged(resp.text or "")
+    block = tagged.get("assignments", "")
+    if not block:
+        log.warning("enrich_tags: no <assignments> block in response")
         return out
-    for a in resp.parsed_json.get("assignments") or []:
-        eid = a.get("entry_id")
-        tag_ids = a.get("tag_ids") or []
-        if eid is None:
-            continue
-        out[eid] = list(tag_ids)
+    kv = parse_kv(block)
+    for entry_id, tag_csv in kv.items():
+        tag_ids = [t.strip() for t in tag_csv.split(",") if t.strip()]
+        out[entry_id] = tag_ids
     return out
 
 

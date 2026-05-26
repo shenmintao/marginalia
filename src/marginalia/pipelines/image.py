@@ -31,6 +31,12 @@ from marginalia.llm import (
     TextBlock,
     get_chat_client,
 )
+from marginalia.llm.tagged_response import (
+    parse_path,
+    parse_tagged,
+    parse_tags,
+    render_format_hint,
+)
 from marginalia.pipelines.base import (
     Pipeline,
     PipelineContext,
@@ -94,82 +100,24 @@ def downscale_for_vlm(
 IMAGE_PIPELINE_SYSTEM = """You are Marginalia's image indexer.
 
 Your job: look at one image and produce a structured index that lets a
-downstream agent decide whether to retrieve it, and once retrieved, find
-the relevant region.
+downstream agent decide whether to retrieve it.
 
-Rules:
-- Output ONLY one JSON object matching the provided schema. No prose, no fences.
-- `summary`: 2-4 sentences in the user's likely language describing what
-  the image shows.
-- `description.regions`: an array of meaningful regions / objects / panels.
-  Each region: a stable id (r1, r2, …), a short label (the visible text or
-  inferred caption), a brief summary, and 3-7 key terms.
-- `kind`: "image".
-- `extra`: at most 1 paragraph of cross-cutting content insight (themes,
-  notable patterns). Empty string if nothing notable.
-- `entry_extra`: at most 1 paragraph of position-aware insight. Empty
-  string if the position carries no extra signal.
-- `entry_catalog_path`: best-guess classification path as a list of names.
-  Use the catalog sketch as a hint, not a constraint.
-- `entry_tags`: 3-10 tags. Facets are exactly:
-  topic | form | time | source | language | extra.
-"""
+`summary` (2-4 sentences in the user's likely language) describes the
+image content. `description` is a free-text walk-through of what the
+image shows — visible text, key objects, layout — multi-paragraph if
+useful. `extra` carries machine-friendly insights as `key: value` lines
+(one per line; keys like `primary_color`, `detected_text_lang`,
+`dominant_subject`, `quality`, `notable`); leave the block empty if
+there is nothing notable. `entry_extra` is the same shape but for
+position-aware insights. `entry_catalog_path` is a best-guess
+classification path. `tags` are 3-10 facet:name pairs; valid facets are
+topic | form | time | source | language | extra.
+
+""" + render_format_hint(kinds=("image",))
 
 
-IMAGE_PIPELINE_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": [
-        "summary", "description", "kind", "extra",
-        "entry_extra", "entry_catalog_path", "entry_tags",
-    ],
-    "properties": {
-        "summary": {"type": "string"},
-        "description": {
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["regions"],
-            "properties": {
-                "regions": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "additionalProperties": False,
-                        "required": ["id", "label", "summary", "key_terms"],
-                        "properties": {
-                            "id": {"type": "string"},
-                            "label": {"type": "string"},
-                            "summary": {"type": "string"},
-                            "key_terms": {
-                                "type": "array", "items": {"type": "string"},
-                            },
-                        },
-                    },
-                },
-            },
-        },
-        "kind": {"type": "string", "enum": ["image"]},
-        "extra": {"type": "string"},
-        "entry_extra": {"type": "string"},
-        "entry_catalog_path": {"type": "array", "items": {"type": "string"}},
-        "entry_tags": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["name", "facet"],
-                "properties": {
-                    "name": {"type": "string"},
-                    "facet": {
-                        "type": "string",
-                        "enum": ["topic", "form", "time", "source",
-                                "language", "extra"],
-                    },
-                },
-            },
-        },
-    },
-}
+# Schema dict kept for legacy callers but no longer fed to the LLM.
+IMAGE_PIPELINE_SCHEMA: dict[str, Any] = {}
 
 
 @register_pipeline(
@@ -212,29 +160,30 @@ class ImagePipeline(Pipeline):
                 TextBlock(text=user_text),
                 ImageBlock(media_type=media_type, data_b64=b64),
             ])],
-            max_tokens=2048,
-            json_schema=IMAGE_PIPELINE_SCHEMA,
+            max_tokens=4096,
             temperature=0.2,
         ))
 
-        if resp.parsed_json is None:
+        tagged = parse_tagged(resp.text or "")
+        summary = tagged.get("summary", "").strip()
+        if not summary:
             log.warning(
-                "image pipeline: model did not return parseable JSON. text=%r",
+                "image pipeline: no <summary> in response. text=%r",
                 (resp.text or "")[:300],
             )
-            raise ValueError("image pipeline produced non-JSON output")
+            raise ValueError("image pipeline produced empty summary")
 
-        data = resp.parsed_json
+        description_text = tagged.get("description", "").strip()
         return PipelineResult(
-            summary=str(data["summary"]),
-            description={"regions": data["description"]["regions"]},
+            summary=summary,
+            description={"text": description_text} if description_text else {},
             kind="image",
-            extra=(data.get("extra") or "") or None,
-            entry_extra=(data.get("entry_extra") or "") or None,
-            entry_catalog_path=list(data.get("entry_catalog_path") or []) or None,
+            extra=tagged.get("extra", "").strip() or None,
+            entry_extra=tagged.get("entry_extra", "").strip() or None,
+            entry_catalog_path=parse_path(tagged.get("catalog_path", "")) or None,
             entry_tags=[
-                TagSuggestion(name=str(t["name"]), facet=str(t["facet"]))
-                for t in (data.get("entry_tags") or [])
+                TagSuggestion(name=t["name"], facet=t["facet"])
+                for t in parse_tags(tagged.get("tags", ""))
             ],
         )
 

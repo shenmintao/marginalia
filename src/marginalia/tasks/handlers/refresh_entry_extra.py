@@ -33,6 +33,7 @@ from marginalia.llm import (
     TextBlock,
     get_chat_client,
 )
+from marginalia.llm.tagged_response import parse_tagged
 from marginalia.repositories import entries as entries_repo
 from marginalia.repositories import entry_tags as entry_tags_repo
 from marginalia.repositories import journal as journal_repo
@@ -64,17 +65,19 @@ Rules:
 - Do NOT speculate beyond what's in the journals + entry metadata.
 - If the journals don't add up to anything meaningful, return the
   `current_extra` unchanged (signaling no refresh needed).
-- Output ONE JSON object with field `extra` (string) only.
+
+Output format — exactly one block:
+
+  <extra>
+  free-form prose, 2-5 sentences
+  </extra>
+
+Do NOT wrap in JSON, do NOT add ``` fences.
 """
 
-REFRESH_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["extra"],
-    "properties": {
-        "extra": {"type": "string"},
-    },
-}
+
+# Schema kept for legacy callers but no longer fed to the LLM.
+REFRESH_SCHEMA: dict[str, Any] = {}
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -319,12 +322,13 @@ async def _ask_llm(cand: dict[str, Any]) -> str | None:
     resp = await client.complete(ChatRequest(
         system=REFRESH_SYSTEM,
         messages=[ChatMessage(role="user", content=[TextBlock(text=user_text)])],
-        max_tokens=1024,
-        json_schema=REFRESH_SCHEMA,
+        max_tokens=2048,
         temperature=0.2,
     ))
-    if resp.parsed_json is None:
-        log.warning("refresh_entry_extra: LLM returned non-JSON for entry %s",
+    tagged = parse_tagged(resp.text or "")
+    extra = tagged.get("extra", "").strip()
+    if not extra:
+        log.warning("refresh_entry_extra: no <extra> in response for entry %s",
                     cand["entry_id"])
         return None
-    return str(resp.parsed_json.get("extra") or "")
+    return extra

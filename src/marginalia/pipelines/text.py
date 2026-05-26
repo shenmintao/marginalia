@@ -6,7 +6,7 @@ Produces `description.sections` with heading-path / line-range anchors.
 Single LLM call:
   inputs : full text (truncated if huge), folder path, sibling names, catalog
            sketch, current tag vocabulary
-  outputs: structured JSON matching TEXT_PIPELINE_SCHEMA
+  outputs: tagged text response (see marginalia.llm.tagged_response).
 
 The system prompt is large (>1024 chars) on purpose — Anthropic adapter will
 auto-place a `cache_control` marker, OpenAI will auto-cache. Subsequent text
@@ -25,6 +25,14 @@ from marginalia.llm import (
     ChatRequest,
     TextBlock,
     get_chat_client,
+)
+from marginalia.llm.tagged_response import (
+    parse_path,
+    parse_sections,
+    parse_tagged,
+    parse_tags,
+    render_format_hint,
+    render_sections_hint,
 )
 from marginalia.pipelines.base import (
     Pipeline,
@@ -53,88 +61,27 @@ Your job: read a single text document and produce a structured index that lets
 a downstream agent decide whether to retrieve it, and once retrieved, jump to
 the relevant section by anchor.
 
-Rules:
-- Output ONLY one JSON object matching the provided schema. No prose, no fences.
-- `summary`: 2-4 sentences in the document's own language, content-focused.
-- `description.sections`: array of every meaningful heading or logical chunk.
-  For each section: a stable id (s1, s2, …), the heading title, an anchor
-  (`unit`: "heading" with `path` like "1.2.3", or "lines" with [start,end]),
-  a 1-2 sentence summary, and 3-7 key terms.
-- `kind`: "text".
-- `extra`: at most 1 paragraph of cross-cutting content insight (themes,
-  notable patterns). Empty string if nothing notable.
-- `entry_extra`: at most 1 paragraph of position-aware insight, e.g. how this
-  document relates to its sibling files in the same folder. Empty string if
-  the position carries no extra signal.
-- `entry_catalog_path`: best-guess classification path as a list of names,
-  rooted at a top-level catalog (e.g. ["Research","LLM","Reasoning"]). The
-  current catalog sketch is a hint, not a constraint — propose a new path if
-  needed.
-- `entry_tags`: 3-10 tags. Each `{name, facet}`. Facets are exactly:
-  topic | form | time | source | language | extra. Reuse names from the
-  current vocabulary when they fit; coin new ones only when nothing fits.
-"""
+`summary` (2-4 sentences in the document's own language) is content-focused.
+`description` is a free-text walk-through of what the document covers and how
+it is organised — multi-paragraph if useful. `sections` lists every meaningful
+heading or logical chunk; each line takes the form
+`id | <heading-path or lines X-Y> | title | one-or-two-sentence summary |
+term1, term2, term3`. The anchor is either a heading path like `1.2.3` or a
+line range like `lines 100-160`. `extra` carries cross-cutting machine-readable
+insights as `key: value` lines (one per line; leave the block empty if nothing
+notable). `entry_extra` is the same shape but for position-aware insights.
+`entry_catalog_path` is a best-guess classification path. Reuse names from the
+current vocabulary when they fit; coin new ones only when nothing fits. `tags`
+are 3-10 facet:name pairs; valid facets are topic | form | time | source |
+language | extra.
 
-TEXT_PIPELINE_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": [
-        "summary", "description", "kind", "extra",
-        "entry_extra", "entry_catalog_path", "entry_tags",
-    ],
-    "properties": {
-        "summary": {"type": "string"},
-        "description": {
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["sections"],
-            "properties": {
-                "sections": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "additionalProperties": False,
-                        "required": ["id", "title", "anchor", "summary", "key_terms"],
-                        "properties": {
-                            "id": {"type": "string"},
-                            "title": {"type": "string"},
-                            "anchor": {
-                                "type": "object",
-                                "additionalProperties": False,
-                                "required": ["unit", "value"],
-                                "properties": {
-                                    "unit": {"type": "string", "enum": ["heading", "lines"]},
-                                    "value": {"type": "string"},
-                                },
-                            },
-                            "summary": {"type": "string"},
-                            "key_terms": {"type": "array", "items": {"type": "string"}},
-                        },
-                    },
-                },
-            },
-        },
-        "kind": {"type": "string", "enum": ["text"]},
-        "extra": {"type": "string"},
-        "entry_extra": {"type": "string"},
-        "entry_catalog_path": {"type": "array", "items": {"type": "string"}},
-        "entry_tags": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["name", "facet"],
-                "properties": {
-                    "name": {"type": "string"},
-                    "facet": {
-                        "type": "string",
-                        "enum": ["topic", "form", "time", "source", "language", "extra"],
-                    },
-                },
-            },
-        },
-    },
-}
+""" + render_format_hint() + "\n" + render_sections_hint(
+    anchor_unit="heading or lines", anchor_example="1.2.3 or lines 100-160",
+)
+
+
+# Schema kept for legacy callers but no longer fed to the LLM.
+TEXT_PIPELINE_SCHEMA: dict[str, Any] = {}
 
 
 @register_pipeline(
@@ -170,34 +117,42 @@ class TextPipeline(Pipeline):
         client = get_chat_client("ingest")
         # Determine an output token ceiling based on document size — small
         # docs need a small ceiling, larger docs proportionally more.
-        max_out = min(4096, max(1024, len(body) // 10))
+        max_out = min(8192, max(2048, len(body) // 8))
 
         resp = await client.complete(ChatRequest(
             system=TEXT_PIPELINE_SYSTEM,
             messages=[ChatMessage(role="user", content=[TextBlock(text=user_text)])],
             max_tokens=max_out,
-            json_schema=TEXT_PIPELINE_SCHEMA,
             temperature=0.2,
         ))
 
-        if resp.parsed_json is None:
+        tagged = parse_tagged(resp.text or "")
+        summary = tagged.get("summary", "").strip()
+        if not summary:
             log.warning(
-                "text pipeline: model did not return parseable JSON. text=%r",
+                "text pipeline: no <summary> in response. text=%r",
                 (resp.text or "")[:300],
             )
-            raise ValueError("text pipeline produced non-JSON output")
+            raise ValueError("text pipeline produced empty summary")
 
-        data = resp.parsed_json
+        sections = parse_sections(
+            tagged.get("sections", ""), anchor_unit="heading",
+        )
+        description: dict[str, Any] = {"sections": sections}
+        description_text = tagged.get("description", "").strip()
+        if description_text:
+            description["text"] = description_text
+
         return PipelineResult(
-            summary=str(data["summary"]),
-            description={"sections": data["description"]["sections"]},
+            summary=summary,
+            description=description,
             kind="text",
-            extra=(data.get("extra") or "") or None,
-            entry_extra=(data.get("entry_extra") or "") or None,
-            entry_catalog_path=list(data.get("entry_catalog_path") or []) or None,
+            extra=tagged.get("extra", "").strip() or None,
+            entry_extra=tagged.get("entry_extra", "").strip() or None,
+            entry_catalog_path=parse_path(tagged.get("catalog_path", "")) or None,
             entry_tags=[
-                TagSuggestion(name=str(t["name"]), facet=str(t["facet"]))
-                for t in (data.get("entry_tags") or [])
+                TagSuggestion(name=t["name"], facet=t["facet"])
+                for t in parse_tags(tagged.get("tags", ""))
             ],
         )
 

@@ -49,6 +49,7 @@ from typing import Any, Mapping
 
 from marginalia.db.session import session_scope
 from marginalia.llm import ChatMessage, ChatRequest, TextBlock, get_chat_client
+from marginalia.llm.tagged_response import parse_tagged
 from marginalia.repositories import catalogs as catalogs_repo
 from marginalia.repositories import entries as entries_repo
 from marginalia.repositories import entry_tags as entry_tags_repo
@@ -76,51 +77,42 @@ You are given:
   - a sample of currently-active entries with their tags + summary + extra
 
 Decide a SMALL set of operations to improve the tree. Be conservative:
-  - Most runs should change nothing (return {"operations": []}).
+  - Most runs should change nothing (return an empty <operations> block).
   - Prefer renames over splits; prefer splits over deletes; prefer moves
     over rewrites.
   - Aim for at most 5 operations per run.
   - When creating a new catalog, you may reference it in subsequent
     operations via the temp_id you assign (e.g. "tmp_AI").
 
-Operation types and their fields (output ONLY one JSON object per the schema):
-  rename:        {op:"rename", catalog_id, new_name}
-  move:          {op:"move", catalog_id, new_parent_id} -- new_parent_id may be null (root) or a temp_id
-  update_extra:  {op:"update_extra", catalog_id, extra}
-  create:        {op:"create", temp_id, name, parent_id?, summary?, description?, tags?}
-  soft_delete:   {op:"soft_delete", catalog_id, merge_into?}
+Operation types and their fields — emit ONE compact JSON object per line:
+  rename:        {"op":"rename", "catalog_id":"...", "new_name":"..."}
+  move:          {"op":"move", "catalog_id":"...", "new_parent_id":null}
+  update_extra:  {"op":"update_extra", "catalog_id":"...", "extra":"..."}
+  create:        {"op":"create", "temp_id":"...", "name":"...", "parent_id":null, "summary":"...", "description":"...", "tags":[]}
+  soft_delete:   {"op":"soft_delete", "catalog_id":"...", "merge_into":null}
                  -- if merge_into is null, the deleted catalog's children
                     promote to root and its entries become uncategorised.
-  move_entries:  {op:"move_entries", entry_ids:[...], target_catalog_id}
+  move_entries:  {"op":"move_entries", "entry_ids":["..."], "target_catalog_id":"..."}
                  -- target may be a temp_id from an earlier create
 
 NEVER hard-delete a catalog. NEVER create a parent cycle. NEVER touch any
 entry lifecycle, files content, or tags table.
 
-Output ONLY one JSON object matching the supplied schema. No prose, no
-fences.
+Output format — exactly one block, one operation per line:
+
+  <operations>
+  {"op":"rename", "catalog_id":"cat_123", "new_name":"Machine Learning"}
+  {"op":"move", "catalog_id":"cat_456", "new_parent_id":"cat_123"}
+  </operations>
+
+Leave the block EMPTY if no changes are warranted. Do NOT wrap the whole
+output in an outer JSON object and do NOT add ``` fences. Each line must
+be a self-contained JSON object.
 """
 
 
-RESTRUCTURE_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["operations"],
-    "properties": {
-        "operations": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                # Operations have a discriminator field "op" but JSON Schema
-                # union-with-discriminator handling varies by provider; we
-                # use a relaxed schema and validate strictly in code.
-                "additionalProperties": True,
-                "required": ["op"],
-                "properties": {"op": {"type": "string"}},
-            },
-        },
-    },
-}
+# Schema kept for legacy callers but no longer fed to the LLM.
+RESTRUCTURE_SCHEMA: dict[str, Any] = {}
 
 
 def _utcnow() -> datetime:
@@ -225,19 +217,29 @@ async def _take_snapshot(*, now: datetime) -> dict[str, Any]:
 async def _ask_llm_for_operations(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
     user_text = (
         "Decide what to change. Be conservative — most runs should output "
-        "an empty operations list.\n\n"
+        "an empty operations block.\n\n"
         f"<snapshot>\n{json.dumps(snapshot, ensure_ascii=False)}\n</snapshot>"
     )
     client = get_chat_client("ingest")
     resp = await client.complete(ChatRequest(
         system=RESTRUCTURE_SYSTEM,
         messages=[ChatMessage(role="user", content=[TextBlock(text=user_text)])],
-        max_tokens=2048,
-        json_schema=RESTRUCTURE_SCHEMA,
+        max_tokens=4096,
         temperature=0.2,
     ))
-    if resp.parsed_json is None:
-        log.warning("restructure_catalogs: non-JSON response, aborting")
-        return []
-    ops = resp.parsed_json.get("operations") or []
-    return list(ops)
+    tagged = parse_tagged(resp.text or "")
+    block = tagged.get("operations", "")
+    ops: list[dict[str, Any]] = []
+    for raw_line in block.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError as exc:
+            log.warning("restructure_catalogs: skip malformed op line %r: %s",
+                        line[:120], exc)
+            continue
+        if isinstance(obj, dict) and obj.get("op"):
+            ops.append(obj)
+    return ops

@@ -45,6 +45,7 @@ from marginalia.llm import (
     TextBlock,
     get_chat_client,
 )
+from marginalia.llm.tagged_response import parse_tagged
 from marginalia.repositories import entries as entries_repo
 from marginalia.repositories import entry_tags as entry_tags_repo
 from marginalia.repositories.task_outcomes import has_outcome, record_outcome
@@ -69,10 +70,10 @@ future planner can recall when a similar question comes back.
 For each turn, decide:
 
 1. If the turn has NOTHING to do with the corpus — pure small talk,
-   weather, "what can you do", system meta — return an empty
-   journal_entries list. The framework will skip the write.
+   weather, "what can you do", system meta — leave the <entry> block
+   empty. The framework will skip the write.
 
-2. Otherwise, produce EXACTLY ONE entry with these fields:
+2. Otherwise, fill the <entry> block with these fields:
 
    - question: the user's question in their own framing, as concise as
      possible while still being a real question (not a topic label).
@@ -93,34 +94,26 @@ For each turn, decide:
 
 A turn touching the corpus ALWAYS produces one entry, even if the
 answer was "nothing found" — that null result is itself worth recalling.
-Only return [] for turns that never engaged the corpus at all.
+Only leave the block empty for turns that never engaged the corpus.
 
-Output ONLY one JSON object matching the supplied schema. No prose, no
-fences.
+Output format — exactly one block:
+
+  <entry>
+  question: one-line question
+  answer: free-form text; may span multiple lines
+  entry_ids: id1, id2
+  tags: tag1, tag2
+  </entry>
+
+Each field starts with its label on its own line. The `answer:` field
+may run across multiple lines; the next labeled field (`entry_ids:`,
+`tags:`) ends it. Leave the entire block EMPTY (or omit field values)
+to skip the write. Do NOT wrap in JSON or add ``` fences.
 """
 
 
-REFLECT_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["journal_entries"],
-    "properties": {
-        "journal_entries": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["question", "answer", "entry_ids", "tags"],
-                "properties": {
-                    "question": {"type": "string"},
-                    "answer": {"type": "string"},
-                    "entry_ids": {"type": "array", "items": {"type": "string"}},
-                    "tags": {"type": "array", "items": {"type": "string"}},
-                },
-            },
-        },
-    },
-}
+# Schema kept for legacy callers but no longer fed to the LLM.
+REFLECT_SCHEMA: dict[str, Any] = {}
 
 
 def _utcnow() -> datetime:
@@ -181,20 +174,68 @@ async def handle_reflect_turn(payload: Mapping[str, Any]) -> None:
     resp = await client.complete(ChatRequest(
         system=REFLECT_SYSTEM,
         messages=[ChatMessage(role="user", content=[TextBlock(text=user_text)])],
-        max_tokens=1024,
-        json_schema=REFLECT_SCHEMA,
+        max_tokens=2048,
         temperature=0.3,
     ))
-    if resp.parsed_json is None:
-        raise ValueError("reflect_turn: model did not return parseable JSON")
-
-    data = resp.parsed_json
+    tagged = parse_tagged(resp.text or "")
+    entry = _parse_entry_block(tagged.get("entry", ""))
+    data: dict[str, Any] = {
+        "journal_entries": [entry] if entry is not None else [],
+    }
 
     async with session_scope() as session:
         await _persist_reflection(
             session, conversation_id=conversation_id, data=data,
         )
         await session.commit()
+
+
+def _parse_entry_block(block: str) -> dict[str, Any] | None:
+    """Parse the <entry> block into one journal-entry dict, or None if empty.
+
+    The `answer:` field may span multiple lines; it ends when the next
+    labeled field (`entry_ids:` or `tags:`) starts.
+    """
+    fields: dict[str, str] = {"question": "", "answer": "", "entry_ids": "", "tags": ""}
+    current_key: str | None = None
+    for raw_line in block.splitlines():
+        line = raw_line.rstrip()
+        stripped = line.lstrip()
+        # Detect a field-label line.
+        matched_key: str | None = None
+        for key in ("question:", "answer:", "entry_ids:", "tags:"):
+            if stripped.startswith(key):
+                matched_key = key.rstrip(":")
+                value = stripped[len(key):].strip()
+                fields[matched_key] = value
+                current_key = matched_key
+                break
+        if matched_key is not None:
+            continue
+        # Continuation: append to the current field (only really useful for
+        # `answer`, but harmless elsewhere).
+        if current_key and stripped:
+            sep = "\n" if current_key == "answer" else " "
+            fields[current_key] = (
+                fields[current_key] + sep + stripped
+                if fields[current_key]
+                else stripped
+            )
+
+    question = fields["question"].strip()
+    answer = fields["answer"].strip()
+    if not question and not answer:
+        return None
+    entry_ids = [
+        t.strip() for t in fields["entry_ids"].split(",") if t.strip()
+    ]
+    tags = [t.strip() for t in fields["tags"].split(",") if t.strip()]
+    return {
+        "question": question,
+        "answer": answer,
+        "entry_ids": entry_ids,
+        "tags": tags,
+    }
 
 
 def _collect_involved_entry_ids(conv: Conversation) -> list[str]:

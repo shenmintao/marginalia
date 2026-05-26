@@ -29,6 +29,13 @@ from typing import Any
 from marginalia.llm import (
     ChatMessage, ChatRequest, TextBlock, get_chat_client,
 )
+from marginalia.llm.tagged_response import (
+    parse_kv,
+    parse_path,
+    parse_tagged,
+    parse_tags,
+    render_format_hint,
+)
 from marginalia.pipelines.base import (
     Pipeline, PipelineContext, PipelineResult, SegmentResult, TagSuggestion,
 )
@@ -93,67 +100,32 @@ files inside an archive (zip / tar / 7z / rar / .gz / etc.). Produce a
 structured index that lets a downstream agent decide whether to retrieve
 the archive and find the relevant inner file.
 
-Rules:
-- Output ONLY one JSON object matching the provided schema.
-- `summary`: 2-4 sentences in the dominant language describing what the
-  archive contains and what kind of artefact it looks like.
-- `description.archive_kind`: a short lowercase tag for the format
-  ("zip", "tar.gz", "7z", "gz", etc.). Use the file_extension hint.
-- `description.primary_language`: only when the archive looks like a
-  code repo or source bundle; null otherwise.
-- `description.frameworks_detected`: short list, evidence-based; [].
-- `kind`: "container".
-- `extra`: at most 1 paragraph of cross-cutting insight; "" if nothing.
-- `entry_extra`: at most 1 paragraph of position-aware insight; "" if none.
-- `entry_catalog_path`: best-guess classification path as a list of names.
-- `entry_tags`: 3-10 tags. Each `{name, facet}` with facets:
-  topic | form | time | source | language | extra.
+`summary` (2-4 sentences in the dominant language) describes what the
+archive contains and what kind of artefact it looks like. `description`
+is a free-text walk-through of the archive's organisation — directory
+layout, notable subprojects, anything that helps the agent navigate.
+
+`extra` carries archive-specific machine-readable insights as `key:
+value` lines (one per line). Use these keys when applicable:
+  archive_kind: zip | tar.gz | 7z | gz | ... (use the file_extension hint)
+  primary_language: python | javascript | go | ... (only if it looks
+    like a code repo / source bundle; omit otherwise)
+  frameworks_detected: comma-separated list, evidence-based
+Add other keys you find useful. Leave the block empty if there is
+nothing notable.
+
+`entry_extra` is the same shape but for position-aware insights.
+`entry_catalog_path` is a best-guess classification path. `tags` are
+3-10 facet:name pairs; valid facets are topic | form | time | source |
+language | extra.
 
 Do NOT speculate beyond what the tree and peeks show.
-"""
+
+""" + render_format_hint(kinds=("container",))
 
 
-ARCHIVE_PIPELINE_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["summary", "description", "kind", "extra",
-                 "entry_extra", "entry_catalog_path", "entry_tags"],
-    "properties": {
-        "summary": {"type": "string"},
-        "description": {
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["archive_kind", "primary_language",
-                         "frameworks_detected"],
-            "properties": {
-                "archive_kind": {"type": "string"},
-                "primary_language": {"type": ["string", "null"]},
-                "frameworks_detected": {
-                    "type": "array", "items": {"type": "string"},
-                },
-            },
-        },
-        "kind": {"type": "string", "enum": ["container"]},
-        "extra": {"type": "string"},
-        "entry_extra": {"type": "string"},
-        "entry_catalog_path": {"type": "array", "items": {"type": "string"}},
-        "entry_tags": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["name", "facet"],
-                "properties": {
-                    "name": {"type": "string"},
-                    "facet": {"type": "string", "enum": [
-                        "topic", "form", "time", "source",
-                        "language", "extra",
-                    ]},
-                },
-            },
-        },
-    },
-}
+# Schema kept for legacy callers but no longer fed to the LLM.
+ARCHIVE_PIPELINE_SCHEMA: dict[str, Any] = {}
 
 
 @register_pipeline(
@@ -235,24 +207,35 @@ class ArchivePipeline(Pipeline):
                 "ground truth for member content.\n\n"
                 f"<context>\n{json.dumps(payload, ensure_ascii=False)}\n</context>"
             ))])],
-            max_tokens=2048,
-            json_schema=ARCHIVE_PIPELINE_SCHEMA,
+            max_tokens=4096,
             temperature=0.2,
         ))
-        if resp.parsed_json is None:
-            raise ValueError("archive pipeline produced non-JSON output")
-        data = resp.parsed_json
+
+        tagged = parse_tagged(resp.text or "")
+        summary = tagged.get("summary", "").strip()
+        if not summary:
+            log.warning(
+                "archive pipeline: no <summary> in response. text=%r",
+                (resp.text or "")[:300],
+            )
+            raise ValueError("archive pipeline produced empty summary")
+
+        extra_kv = parse_kv(tagged.get("extra", ""))
+        primary_language = extra_kv.pop("primary_language", "") or None
+        frameworks_raw = extra_kv.pop("frameworks_detected", "")
+        frameworks_detected = [
+            f.strip() for f in frameworks_raw.split(",") if f.strip()
+        ] if frameworks_raw else []
+        # archive_kind from LLM extra is advisory; keep our local guess as fallback.
+        llm_archive_kind = extra_kv.pop("archive_kind", "") or archive_kind
 
         description = {
-            "archive_kind": str(
-                data["description"].get("archive_kind") or archive_kind
-            ),
+            "archive_kind": llm_archive_kind,
             "container_kind": container_kind,
             "file_count": payload["file_count"],
             "total_uncompressed_bytes": payload["total_uncompressed_bytes"],
-            "primary_language": data["description"].get("primary_language"),
-            "frameworks_detected":
-                list(data["description"].get("frameworks_detected") or []),
+            "primary_language": primary_language,
+            "frameworks_detected": frameworks_detected,
             "tree": tree,
             "indexed_files": indexed_files,
             "key_files": key_files,
@@ -262,18 +245,27 @@ class ArchivePipeline(Pipeline):
                 for p in peeks
             ],
         }
+        description_text = tagged.get("description", "").strip()
+        if description_text:
+            description["text"] = description_text
+
+        # Surviving extra keys + the original prose body (if any) become the
+        # entry's `extra`. Re-render kv as one-per-line so storage reads back the
+        # same shape.
+        remaining_extra = "\n".join(
+            f"{k}: {v}" for k, v in extra_kv.items()
+        ) or None
 
         return PipelineResult(
-            summary=str(data["summary"]),
+            summary=summary,
             description=description,
             kind="container",
-            extra=(data.get("extra") or "") or None,
-            entry_extra=(data.get("entry_extra") or "") or None,
-            entry_catalog_path=
-                list(data.get("entry_catalog_path") or []) or None,
+            extra=remaining_extra,
+            entry_extra=tagged.get("entry_extra", "").strip() or None,
+            entry_catalog_path=parse_path(tagged.get("catalog_path", "")) or None,
             entry_tags=[
-                TagSuggestion(name=str(t["name"]), facet=str(t["facet"]))
-                for t in (data.get("entry_tags") or [])
+                TagSuggestion(name=t["name"], facet=t["facet"])
+                for t in parse_tags(tagged.get("tags", ""))
             ],
         )
 
