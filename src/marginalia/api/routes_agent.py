@@ -20,6 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from marginalia.agent.runtime import _rewrite_footnotes_for_display
 from marginalia.db.models import Session as SessionRow
 from marginalia.db.session import get_session
 from marginalia.repositories import sessions as session_service
@@ -158,7 +159,10 @@ async def session_messages(
             "started_at": c.started_at.isoformat() if c.started_at else None,
             "ended_at": c.ended_at.isoformat() if c.ended_at else None,
             "user_message": c.user_message,
-            "agent_response": c.agent_response,
+            "agent_response": (
+                await _rewrite_footnotes_for_display(c.agent_response)
+                if c.agent_response else c.agent_response
+            ),
             "plan_text": plan_text,
             "tool_calls": tool_calls,
             "metrics": {
