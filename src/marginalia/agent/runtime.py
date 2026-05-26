@@ -504,7 +504,10 @@ async def _rewrite_footnotes_for_display(answer: str) -> str:
         if name is None:
             head = f"(entry {short} unavailable)"
         else:
-            head = f"[{name}](entry:{short})"
+            # Full uuid in the link so the GUI can resolve back to a
+            # specific FileEntry without ambiguity. The visible label
+            # stays the display_name.
+            head = f"[{name}](entry:{eid})"
         if reason:
             return f"[^{marker}]: {head} — {reason}"
         return f"[^{marker}]: {head}"

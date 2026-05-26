@@ -10,6 +10,7 @@
 import type {
   ActiveTasks,
   ApiErrorBody,
+  EntryPath,
   FileMetadata,
   Folder,
   FolderDetail,
@@ -120,6 +121,8 @@ export const folders = {
 export const fileEntries = {
   metadata: (id: string) =>
     _request<FileMetadata>(`/v1/file-entries/${encodeURIComponent(id)}/metadata`),
+  path: (id: string) =>
+    _request<EntryPath>(`/v1/file-entries/${encodeURIComponent(id)}/path`),
   rename: (id: string, displayName: string, onConflict: OnConflict = "rename") =>
     _request(`/v1/file-entries/${encodeURIComponent(id)}/name`, {
       method: "PATCH",

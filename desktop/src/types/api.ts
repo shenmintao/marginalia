@@ -81,6 +81,16 @@ export interface FileMetadata {
   [key: string]: unknown;
 }
 
+/** Folder ancestor chain (root → leaf) for an entry, returned by
+ *  GET /v1/file-entries/{id}/path. The Library tree consumes this
+ *  to expand each ancestor in turn before selecting the file. */
+export interface EntryPath {
+  entry_id: string;
+  display_name: string;
+  folder_id: string | null;
+  ancestors: { id: string; name: string }[];
+}
+
 export interface SessionInfo {
   session_id: string;
   started_at: string | null;

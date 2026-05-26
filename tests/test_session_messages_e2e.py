@@ -2,7 +2,7 @@
 
 The persisted `agent_response` keeps the raw form on purpose (exports
 parse it). For the chat sidebar reload, GET /v1/sessions/{id}/messages
-should return the human-readable form: `[name](entry:short)`.
+should return the human-readable form: `[name](entry:<uuid>)`.
 
 Run:
     .venv/Scripts/python -m pytest tests/test_session_messages_e2e.py -x -q
@@ -104,10 +104,9 @@ async def test_transcript_rewrites_entry_id() -> None:
             body = r.json()
             assert len(body["turns"]) == 1
             ar = body["turns"][0]["agent_response"]
-            short = seeded["eid"][:8]
-            assert f"[raft.md](entry:{short})" in ar, ar
+            assert f"[raft.md](entry:{seeded['eid']})" in ar, ar
             assert "entry_id=" not in ar, ar
-            print("[1] transcript rewrites raw entry_id to [name](entry:short)")
+            print("[1] transcript rewrites raw entry_id to [name](entry:<uuid>)")
 
 
 async def main() -> None:

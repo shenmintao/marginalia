@@ -17,6 +17,7 @@ from marginalia.services.user_files import (
     EntryNotFoundError,
     FolderNotFoundError,
     collect_folder_entries,
+    get_entry_path,
     get_user_metadata,
     open_for_download,
     search_entries,
@@ -74,6 +75,24 @@ async def file_entry_metadata(
 ) -> dict[str, Any]:
     try:
         return await get_user_metadata(session, entry_id=entry_id)
+    except EntryNotFoundError:
+        raise HTTPException(status_code=404, detail="entry not found")
+
+
+@router.get("/file-entries/{entry_id}/path")
+async def file_entry_path(
+    entry_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """Folder ancestor chain (root → leaf) for an entry.
+
+    The desktop GUI calls this when the user clicks a search hit or a
+    chat citation, so the Library tree can expand each ancestor in
+    order before selecting the file. Returns 404 if the entry is
+    soft-deleted or unknown.
+    """
+    try:
+        return await get_entry_path(session, entry_id=entry_id)
     except EntryNotFoundError:
         raise HTTPException(status_code=404, detail="entry not found")
 

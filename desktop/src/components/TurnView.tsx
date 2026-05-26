@@ -13,6 +13,7 @@ import {
   AlertCircle, Loader2, User as UserIcon,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
+import { useNavigate } from "react-router-dom";
 import remarkGfm from "remark-gfm";
 
 import { cn } from "@/lib/utils";
@@ -55,9 +56,39 @@ export interface Turn {
 
 export function TurnView({ turn }: { turn: Turn }) {
   const [open, setOpen] = useState(false);
+  const navigate = useNavigate();
 
   const inFlight = !turn.done && !turn.error;
   const showSteps = turn.steps.length > 0;
+
+  // `entry:<uuid>` links in citation footnotes resolve to a Library
+  // deep-link. Hand them to react-router so the tree expands to that
+  // file in-app instead of the browser trying to open a custom-scheme
+  // URL.
+  const renderEntryLink = ({
+    href, children, ...rest
+  }: {
+    href?: string;
+    children?: React.ReactNode;
+  } & React.AnchorHTMLAttributes<HTMLAnchorElement>) => {
+    if (href && href.startsWith("entry:")) {
+      const id = href.slice("entry:".length);
+      return (
+        <a
+          href="#"
+          onClick={(e) => {
+            e.preventDefault();
+            navigate(`/library?entry=${encodeURIComponent(id)}`);
+          }}
+          className="text-accent hover:underline"
+          {...rest}
+        >
+          {children}
+        </a>
+      );
+    }
+    return <a href={href} {...rest}>{children}</a>;
+  };
 
   return (
     <div className="mb-6 animate-fade-in">
@@ -97,7 +128,10 @@ export function TurnView({ turn }: { turn: Turn }) {
       {turn.answer !== null && turn.answer.length > 0 && (
         <div className="ml-8 rounded-lg border border-border bg-bg-subtle p-4 text-sm">
           <div className="prose-marginalia">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>
+            <ReactMarkdown
+              remarkPlugins={[remarkGfm]}
+              components={{ a: renderEntryLink }}
+            >
               {turn.answer}
             </ReactMarkdown>
           </div>

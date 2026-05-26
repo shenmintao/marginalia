@@ -37,6 +37,16 @@ interface Props {
   onSelectFolder: (folder: Folder | null) => void;
   ingestingFileIds: Set<string>;
   refreshKey: number;
+  /** Force-expand this folder ancestor chain (root → leaf). Each row
+   *  whose id appears here opens itself and forwards the *remainder*
+   *  of the chain to its children — so a click on a search hit walks
+   *  the tree open one level at a time. */
+  expandPath?: string[];
+  /** When set, the leaf folder selects this file once its contents
+   *  load. Cleared via `onPendingEntryResolved` so the same path
+   *  doesn't keep re-selecting on subsequent re-renders. */
+  pendingEntryId?: string | null;
+  onPendingEntryResolved?: () => void;
   onUploadHere: (folderId: string | null) => void;
   onNewFolderHere: (parentId: string | null) => void;
   onEntryDeleted: (entryId: string) => void;
@@ -58,6 +68,20 @@ export function FolderTree(props: Props) {
   }, []);
 
   useEffect(() => { load(); }, [load, props.refreshKey]);
+
+  // Root-level entries: if we're navigating to an entry that lives in
+  // the root (empty ancestor chain), the leaf is here, not in any
+  // FolderRow — match against the root entries we already have.
+  useEffect(() => {
+    if (!props.pendingEntryId) return;
+    const expanding = props.expandPath && props.expandPath.length > 0;
+    if (expanding) return;
+    const hit = rootEntries.find((e) => e.id === props.pendingEntryId);
+    if (hit) {
+      props.onSelectFile(hit);
+      props.onPendingEntryResolved?.();
+    }
+  }, [rootEntries, props.pendingEntryId, props.expandPath, props.onSelectFile, props]);
 
   const headerTarget = props.selectedFolderName ?? "root";
   const reprocessScope = props.selectedFolderId
@@ -163,6 +187,7 @@ function FolderRow({
   onSelectFile, onSelectFolder,
   ingestingFileIds,
   refreshKey,
+  expandPath, pendingEntryId, onPendingEntryResolved,
   onUploadHere, onNewFolderHere,
   onEntryDeleted, onFolderDeleted,
   onClearSelection,
@@ -181,9 +206,33 @@ function FolderRow({
     );
   }, [folder.id]);
 
+  // If this folder sits on the active expandPath, force it open and
+  // forward the remainder of the chain to descendants. The first id
+  // in the chain is the next ancestor to expand, so a match means
+  // "we are that ancestor."
+  const onPath = (expandPath?.[0] === folder.id);
+  useEffect(() => {
+    if (onPath && !open) setOpen(true);
+  }, [onPath, open]);
+
   useEffect(() => {
     if (open) loadDetail();
   }, [open, loadDetail, refreshKey]);
+
+  // Once this folder is the leaf of the expandPath (i.e. expandPath
+  // ends here) and its contents have loaded, finalize the deep-link
+  // by selecting the pending entry.
+  const isLeaf = onPath && (expandPath?.length === 1);
+  useEffect(() => {
+    if (!isLeaf || !pendingEntryId || entries === null) return;
+    const hit = entries.find((e) => e.id === pendingEntryId);
+    if (hit) {
+      onSelectFile(hit);
+      onPendingEntryResolved?.();
+    }
+  }, [isLeaf, pendingEntryId, entries, onSelectFile, onPendingEntryResolved]);
+
+  const childExpandPath = onPath ? expandPath!.slice(1) : expandPath;
 
   const isSelected = selectedFolderId === folder.id;
   const indent = { paddingLeft: 8 + depth * 12 };
@@ -275,6 +324,9 @@ function FolderRow({
               onSelectFolder={onSelectFolder}
               ingestingFileIds={ingestingFileIds}
               refreshKey={refreshKey}
+              expandPath={childExpandPath}
+              pendingEntryId={pendingEntryId}
+              onPendingEntryResolved={onPendingEntryResolved}
               onUploadHere={onUploadHere}
               onNewFolderHere={onNewFolderHere}
               onEntryDeleted={onEntryDeleted}

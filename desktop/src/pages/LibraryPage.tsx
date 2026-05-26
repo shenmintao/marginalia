@@ -10,6 +10,7 @@
  *    via a single 4 s poll of /v1/tasks/active
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { Inbox } from "lucide-react";
 
 import { fileEntries, tasks } from "@/api/client";
@@ -20,12 +21,21 @@ import { MetaPanel } from "@/components/library/MetaPanel";
 import { NewFolderDialog, UploadDialog } from "@/components/library/Dialogs";
 
 export function LibraryPage() {
+  const [searchParams, setSearchParams] = useSearchParams();
   const [selectedEntry, setSelectedEntry] = useState<FileEntrySummary | null>(null);
   const [selectedFolder, setSelectedFolder] = useState<Folder | null>(null);
   const [meta, setMeta] = useState<FileMetadata | null>(null);
   const [metaLoading, setMetaLoading] = useState(false);
   const [metaOpen, setMetaOpen] = useState(true);
   const [refreshKey, setRefreshKey] = useState(0);
+  // Folder ids that should be force-expanded on the next render — set
+  // when arriving from search/chat with `?entry=<id>` so each ancestor
+  // opens in turn. Cleared once consumed.
+  const [expandPath, setExpandPath] = useState<string[]>([]);
+  // Pending entry id we've been told to land on but haven't yet
+  // resolved into a FileEntrySummary (the tree fills that in once it
+  // loads the leaf folder's contents).
+  const [pendingEntryId, setPendingEntryId] = useState<string | null>(null);
 
   const [newFolderUnder, setNewFolderUnder] = useState<{ id: string | null; name: string } | null>(null);
   const [uploadInto, setUploadInto] = useState<{ id: string | null; name: string } | null>(null);
@@ -49,6 +59,36 @@ export function LibraryPage() {
     const handle = window.setInterval(tick, 4000);
     return () => { cancelled = true; window.clearInterval(handle); };
   }, []);
+
+  // ?entry=<id> deep-link: ask the backend for the folder ancestor
+  // chain, hand the ids to FolderTree as expandPath so each parent
+  // opens, and remember the entry id so the tree can complete the
+  // selection once the leaf folder's contents come back.
+  useEffect(() => {
+    const entryId = searchParams.get("entry");
+    if (!entryId) return;
+    let cancelled = false;
+    fileEntries.path(entryId).then(
+      (p) => {
+        if (cancelled) return;
+        setExpandPath(p.ancestors.map((a) => a.id));
+        setPendingEntryId(p.entry_id);
+        // Drop the query param so a later navigation back to /library
+        // (without ?entry=) doesn't keep retriggering the expansion.
+        const next = new URLSearchParams(searchParams);
+        next.delete("entry");
+        setSearchParams(next, { replace: true });
+      },
+      () => {
+        if (!cancelled) {
+          const next = new URLSearchParams(searchParams);
+          next.delete("entry");
+          setSearchParams(next, { replace: true });
+        }
+      },
+    );
+    return () => { cancelled = true; };
+  }, [searchParams, setSearchParams]);
 
   useEffect(() => {
     if (!selectedEntry) { setMeta(null); return; }
@@ -96,6 +136,9 @@ export function LibraryPage() {
           onSelectFolder={onSelectFolder}
           ingestingFileIds={ingestingFileIds}
           refreshKey={refreshKey}
+          expandPath={expandPath}
+          pendingEntryId={pendingEntryId}
+          onPendingEntryResolved={() => setPendingEntryId(null)}
           onUploadHere={(id) => setUploadInto({
             id: id ?? headerTargetFolderId,
             name: id

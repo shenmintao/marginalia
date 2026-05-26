@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { Link } from "react-router-dom";
 import { Search as SearchIcon, FileText, Loader2 } from "lucide-react";
 
 import { search } from "@/api/client";
@@ -61,8 +62,11 @@ export function SearchPage() {
             <p className="text-sm text-fg-subtle">No matches.</p>
           )}
           {results && results.map((e) => (
-            <article key={e.entry_id}
-                     className="mb-2 rounded-md border border-border bg-bg-subtle p-3 hover:bg-bg-muted">
+            <Link
+              to={`/library?entry=${encodeURIComponent(e.entry_id)}`}
+              key={e.entry_id}
+              className="mb-2 block rounded-md border border-border bg-bg-subtle p-3 hover:bg-bg-muted"
+            >
               <header className="flex items-center gap-2 text-sm">
                 <FileText size={14} className="text-fg-muted" />
                 <span className="font-medium">{e.display_name}</span>
@@ -73,7 +77,7 @@ export function SearchPage() {
               {e.summary && (
                 <p className="mt-1 line-clamp-2 text-xs text-fg-muted">{e.summary}</p>
               )}
-            </article>
+            </Link>
           ))}
         </div>
       </div>

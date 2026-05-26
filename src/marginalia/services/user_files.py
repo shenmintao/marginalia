@@ -284,3 +284,35 @@ async def _build_folder_path(
         parts.append(f.name)
         cur = f.parent_id
     return "/" + "/".join(reversed(parts))
+
+
+async def get_entry_path(
+    session: AsyncSession, *, entry_id: str,
+) -> dict[str, Any]:
+    """Resolve `entry_id` to its folder ancestor chain (root → leaf).
+
+    Drives the GUI's "click a search hit → expand the Library tree to
+    that file" navigation: the desktop side feeds the chain to the
+    FolderTree as a controlled-expansion path so each ancestor opens
+    in order. Root-folder entries return an empty chain.
+    """
+    pair = await entries_repo.get_live_with_file(session, entry_id)
+    if pair is None:
+        raise EntryNotFoundError(entry_id)
+    entry, _ = pair
+
+    chain: list[dict[str, str]] = []
+    cur: str | None = entry.folder_id
+    while cur is not None:
+        f = await session.get(Folder, cur)
+        if f is None or f.deleted_at is not None:
+            break
+        chain.append({"id": f.id, "name": f.name})
+        cur = f.parent_id
+    chain.reverse()
+    return {
+        "entry_id": entry.id,
+        "display_name": entry.display_name,
+        "folder_id": entry.folder_id,
+        "ancestors": chain,
+    }
