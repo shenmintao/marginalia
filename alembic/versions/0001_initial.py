@@ -5,14 +5,18 @@ Revises:
 Create Date: 2026-05-23
 
 The actual table-creation + inbox-seed logic lives in
-`marginalia.db.bootstrap.bootstrap_schema_sync` so the application startup
-path and the migration path use exactly the same code.
+`marginalia.db.bootstrap.bootstrap_baseline_sync` so the application
+startup path and the migration path use exactly the same code.
+
+This revision intentionally does NOT include any of the post-baseline
+shims (`_apply_additive_columns`, `_relax_*`, …) — each of those landed
+later and gets its own revision (0002+).
 """
 from __future__ import annotations
 
 from alembic import op
 
-from marginalia.db.bootstrap import bootstrap_schema_sync
+from marginalia.db.bootstrap import bootstrap_baseline_sync
 from marginalia.db.models import Base  # noqa: F401
 
 
@@ -23,7 +27,7 @@ depends_on = None
 
 
 def upgrade() -> None:
-    bootstrap_schema_sync(op.get_bind())
+    bootstrap_baseline_sync(op.get_bind())
 
 
 def downgrade() -> None:

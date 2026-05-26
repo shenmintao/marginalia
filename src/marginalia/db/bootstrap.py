@@ -1,21 +1,33 @@
-"""Idempotent schema bootstrap — used by app startup and by 0001_initial.
+"""Idempotent schema bootstrap — used by app startup and by alembic.
 
-`bootstrap_schema(bind)` creates every table defined on `Base.metadata` and
-seeds the `_inbox` system catalog if absent. Called from:
+Two entry points:
 
-  - `marginalia.main.lifespan` (FastAPI startup)
-  - `marginalia.worker._arun` (worker daemon startup)
-  - `alembic/versions/0001_initial.py` (when migrating from empty schema)
+* `bootstrap_schema()` — async, called from FastAPI / worker startup. Runs
+  the baseline (`create_all` + inbox seed), every cumulative shim, then
+  stamps `alembic_version` to head so `alembic upgrade head` becomes a
+  no-op against this DB.
 
-Re-runnable: `create_all` is a no-op when tables already exist; the inbox
-seed uses `INSERT ... WHERE NOT EXISTS`. Column additions on existing
-tables are handled by `_apply_additive_columns()` — we keep a small
-hand-written list there because `create_all` only creates whole tables,
-never adds missing columns to existing ones.
+* `bootstrap_baseline_sync(bind)` — synchronous, called from
+  `alembic/versions/0001_initial.py`. Just `create_all` + inbox seed,
+  without any of the post-v1 shims (those each get their own revision so
+  production deploys can apply them surgically and the alembic history is
+  honest about when each invariant landed).
+
+The individual shim functions (`_apply_additive_columns`,
+`_relax_file_entries_folder_id_nullable`, …) are imported by their
+matching `0002..N` alembic revisions. They stay here rather than getting
+inlined into the revision files because they double as "make this DB
+match the current model on first boot" for fresh dev installs that have
+never seen alembic.
+
+Re-runnable: every helper checks its precondition before mutating, so
+running the whole pipeline twice is safe — that's what makes the dev
+loop survive without per-step migrations.
 """
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Any, Callable
 
 import sqlalchemy as sa
 
@@ -172,17 +184,76 @@ def _relax_sessions_end_reason_check(bind) -> None:
         bind.execute(sa.text("PRAGMA legacy_alter_table = OFF"))
 
 
-def bootstrap_schema_sync(bind) -> None:
-    """Synchronous variant — runs against a sync connection / engine.
+def _ensure_conversations_session_turn_unique(bind) -> None:
+    """Replace the legacy non-unique `ix_conversations_session_turn` index
+    with a unique constraint on (session_id, turn_index).
 
-    Used by Alembic migrations (which receive a sync bind from
-    `op.get_bind()`) and by `bootstrap_schema()` below via `run_sync`.
+    Why: `run_turn` computes the next turn via
+    `latest_turn_index(session) + 1` then INSERTs. Two concurrent requests
+    for the same session race on the read-modify-write and write two rows
+    with identical (session_id, turn_index). The route layer now also
+    serialises with a per-session asyncio.Lock, but that only covers
+    one Python process — this constraint is the cross-process backstop.
+
+    Idempotent:
+      - if the unique constraint/index already exists → no-op.
+      - if the legacy non-unique index is present → drop it, then create
+        the unique one.
+      - if existing rows already violate the invariant → raise. We do NOT
+        silently merge / renumber: that would falsify history. Operator
+        decides what to do (almost certainly: delete one of the dupes).
+    """
+    inspector = sa.inspect(bind)
+    if "conversations" not in inspector.get_table_names():
+        return
+
+    indexes = inspector.get_indexes("conversations")
+    has_unique = any(
+        idx["name"] == "uq_conversations_session_turn"
+        and idx.get("unique", False)
+        for idx in indexes
+    )
+    if has_unique:
+        return
+
+    dup_rows = bind.execute(sa.text(
+        "SELECT session_id, turn_index, COUNT(*) AS n "
+        "FROM conversations "
+        "GROUP BY session_id, turn_index "
+        "HAVING COUNT(*) > 1 "
+        "LIMIT 5"
+    )).fetchall()
+    if dup_rows:
+        sample = ", ".join(
+            f"(session={r[0]!r}, turn={r[1]}, count={r[2]})" for r in dup_rows
+        )
+        raise RuntimeError(
+            "Cannot enforce UNIQUE(session_id, turn_index) on conversations: "
+            f"existing duplicates found — {sample}. Resolve manually "
+            "(usually: DELETE FROM conversations WHERE id = '<id-of-dup>') "
+            "and restart."
+        )
+
+    # Drop the legacy non-unique covering index if present; the unique
+    # constraint we add below covers the same query plan plus the
+    # invariant. Both SQLite and Postgres accept IF EXISTS.
+    bind.execute(sa.text("DROP INDEX IF EXISTS ix_conversations_session_turn"))
+    bind.execute(sa.text(
+        "CREATE UNIQUE INDEX uq_conversations_session_turn "
+        "ON conversations (session_id, turn_index)"
+    ))
+
+
+def bootstrap_baseline_sync(bind) -> None:
+    """v1 baseline — `Base.metadata.create_all` plus the `_inbox` seed.
+
+    Mirrors what alembic 0001_initial owns: a fresh database after this
+    runs is structurally identical to one created by `alembic upgrade
+    0001_initial` against an empty schema. None of the post-v1 shims
+    (`_apply_additive_columns`, `_relax_*`, …) run here — those are
+    revisions 0002+.
     """
     Base.metadata.create_all(bind=bind)
-    _apply_additive_columns(bind)
-    _relax_file_entries_folder_id_nullable(bind)
-    _repair_dangling_file_entries_fks(bind)
-    _relax_sessions_end_reason_check(bind)
     now = datetime.now(timezone.utc).isoformat()
     bind.execute(
         sa.text(
@@ -199,6 +270,54 @@ def bootstrap_schema_sync(bind) -> None:
             "now": now,
         },
     )
+
+
+# Ordered list of post-baseline shims. Each entry: (alembic-revision-id,
+# helper). Adding a new shim means: append to this list, drop a
+# corresponding `000X_*.py` revision in alembic/versions/ that calls the
+# same helper. App-startup bootstrap runs all of them; alembic runs them
+# one at a time as separate revisions.
+POST_BASELINE_SHIMS: tuple[tuple[str, Callable[[Any], None]], ...] = (
+    ("0002_additive_columns", _apply_additive_columns),
+    ("0003_file_entries_folder_id_nullable", _relax_file_entries_folder_id_nullable),
+    ("0004_repair_dangling_file_entries_fks", _repair_dangling_file_entries_fks),
+    ("0005_sessions_end_reason_check", _relax_sessions_end_reason_check),
+    ("0006_conversations_session_turn_unique", _ensure_conversations_session_turn_unique),
+)
+
+ALEMBIC_HEAD_REVISION = POST_BASELINE_SHIMS[-1][0]
+
+
+def _stamp_alembic_version(bind, revision: str) -> None:
+    """Make `alembic_version` reflect that `revision` is applied.
+
+    Bootstraps a fresh DB to head (no migration ran, but the schema is
+    equivalent), or upgrades the stamp on an existing DB once
+    bootstrap-time shims have caught it up. Idempotent.
+    """
+    bind.execute(sa.text(
+        "CREATE TABLE IF NOT EXISTS alembic_version ("
+        "version_num VARCHAR(32) NOT NULL PRIMARY KEY)"
+    ))
+    bind.execute(sa.text("DELETE FROM alembic_version"))
+    bind.execute(
+        sa.text("INSERT INTO alembic_version (version_num) VALUES (:r)"),
+        {"r": revision},
+    )
+
+
+def bootstrap_schema_sync(bind) -> None:
+    """Synchronous full bootstrap — baseline + every post-v1 shim + stamp.
+
+    Used by `bootstrap_schema()` below via `run_sync`. After this, the
+    DB matches the current model and `alembic_version` says HEAD, so an
+    operator running `alembic upgrade head` against the same DB sees a
+    no-op.
+    """
+    bootstrap_baseline_sync(bind)
+    for _rev, helper in POST_BASELINE_SHIMS:
+        helper(bind)
+    _stamp_alembic_version(bind, ALEMBIC_HEAD_REVISION)
 
 
 async def bootstrap_schema() -> None:
