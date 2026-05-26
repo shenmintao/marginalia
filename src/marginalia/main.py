@@ -11,6 +11,7 @@ from marginalia.api.routes_agent import router as sessions_router
 from marginalia.api.routes_chat import router as chat_router
 from marginalia.api.routes_exports import router as exports_router
 from marginalia.api.routes_file_entries import router as file_entries_router
+from marginalia.api.routes_files import router as files_router
 from marginalia.api.routes_folders import router as folders_router
 from marginalia.api.routes_settings import router as settings_router
 from marginalia.api.routes_tasks import router as tasks_router
@@ -128,6 +129,7 @@ app.add_middleware(
 V1_PREFIX = "/v1"
 app.include_router(folders_router, prefix=V1_PREFIX)
 app.include_router(file_entries_router, prefix=V1_PREFIX)
+app.include_router(files_router, prefix=V1_PREFIX)
 app.include_router(upload_router, prefix=V1_PREFIX)
 app.include_router(user_files_router, prefix=V1_PREFIX)
 app.include_router(sessions_router, prefix=V1_PREFIX)

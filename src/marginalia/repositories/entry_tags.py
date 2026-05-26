@@ -4,7 +4,7 @@ Caller owns the transaction.
 """
 from __future__ import annotations
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from marginalia.db.models import EntryTag, Tag
@@ -159,4 +159,17 @@ async def list_tag_ids_for_entries(
         )
     ).all()
     return [(e, t) for e, t in rows]
+
+
+async def delete_all_for_entry(
+    db: AsyncSession, entry_id: str,
+) -> int:
+    """Delete every entry_tags row for the entry. Used by reprocess to
+    clear AI-filled tags before re-running ingest. Returns row count.
+    Note: does NOT decrement Tag.doc_count — that drift is reconciled
+    by tag_quality on its next pass."""
+    result = await db.execute(
+        delete(EntryTag).where(EntryTag.entry_id == entry_id)
+    )
+    return int(result.rowcount or 0)
 
