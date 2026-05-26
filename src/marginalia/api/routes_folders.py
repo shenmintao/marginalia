@@ -40,13 +40,14 @@ def _serialize_folder(folder: Any) -> dict[str, Any]:
     }
 
 
-def _serialize_entry(e: FileEntry) -> dict[str, Any]:
+def _serialize_entry(e: FileEntry, ingest_status: str | None = None) -> dict[str, Any]:
     return {
         "id": e.id,
         "folder_id": e.folder_id,
         "file_id": e.file_id,
         "display_name": e.display_name,
         "lifecycle": e.lifecycle,
+        "ingest_status": ingest_status,
         "created_at": e.created_at.isoformat() if e.created_at else None,
     }
 
@@ -66,7 +67,7 @@ async def list_folders(
         entries = []
     return {
         "folders": [_serialize_folder(f) for f in rows],
-        "entries": [_serialize_entry(e) for e in entries],
+        "entries": [_serialize_entry(e, st) for e, st in entries],
     }
 
 
@@ -113,7 +114,7 @@ async def get_folder(
     return {
         **_serialize_folder(folder),
         "children": [_serialize_folder(c) for c in children],
-        "entries": [_serialize_entry(e) for e in entries],
+        "entries": [_serialize_entry(e, st) for e, st in entries],
     }
 
 

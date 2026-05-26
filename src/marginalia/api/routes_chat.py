@@ -41,7 +41,7 @@ async def post_chat(
     db: AsyncSession = Depends(get_session),
 ) -> Any:
     s = await db.get(SessionRow, session_id)
-    if s is None:
+    if s is None or s.deleted_at is not None:
         raise HTTPException(status_code=404, detail="session not found")
     if s.ended_at is not None:
         raise HTTPException(status_code=409, detail="session already ended")

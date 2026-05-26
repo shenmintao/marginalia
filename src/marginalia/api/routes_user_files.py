@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from marginalia.api.http_headers import content_disposition
 from marginalia.db.models import Folder
 from marginalia.db.session import get_session
 from marginalia.services.recommend import find_related
@@ -92,7 +93,7 @@ async def file_entry_content(
         raise HTTPException(status_code=404, detail="entry not found")
 
     headers = {
-        "Content-Disposition": f'inline; filename="{handle.display_name}"',
+        "Content-Disposition": content_disposition("inline", handle.display_name),
         "X-File-Id": handle.file_id,
         "X-Size-Bytes": str(handle.size_bytes),
     }
@@ -114,7 +115,7 @@ async def file_entry_download(
         raise HTTPException(status_code=404, detail="entry not found")
 
     headers = {
-        "Content-Disposition": f'attachment; filename="{handle.display_name}"',
+        "Content-Disposition": content_disposition("attachment", handle.display_name),
         "X-File-Id": handle.file_id,
         "X-Size-Bytes": str(handle.size_bytes),
     }
@@ -166,7 +167,7 @@ async def folder_download(
             yield chunk
 
     headers = {
-        "Content-Disposition": f'attachment; filename="{archive_name}"',
+        "Content-Disposition": content_disposition("attachment", archive_name),
         "X-Folder-Id": folder_id,
         "X-Member-Count": str(len(plan)),
     }

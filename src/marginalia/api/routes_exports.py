@@ -25,6 +25,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from marginalia.api.http_headers import content_disposition
 from marginalia.db.session import get_session
 from marginalia.repositories import conversations as conversations_repo
 from marginalia.services.exports import (
@@ -121,7 +122,7 @@ async def export_conversation(
             yield chunk
 
     headers = {
-        "Content-Disposition": f'attachment; filename="{archive_name}"',
+        "Content-Disposition": content_disposition("attachment", archive_name),
         "X-Conversation-Id": conversation_id,
         "X-Citation-Count": str(len(plan.citations)),
         "X-Missing-Count": str(sum(1 for c in plan.citations if c.missing)),
@@ -154,7 +155,7 @@ async def export_conversation_markdown(
     body = render_inline_markdown(plan)
     filename = f"conversation-{conversation_id[:8]}.md"
     headers = {
-        "Content-Disposition": f'attachment; filename="{filename}"',
+        "Content-Disposition": content_disposition("attachment", filename),
         "X-Conversation-Id": conversation_id,
         "X-Citation-Count": str(len(plan.citations)),
         "X-Missing-Count": str(sum(1 for c in plan.citations if c.missing)),

@@ -77,21 +77,23 @@ async def list_live_with_file_in_folder(
 
 async def list_live_in_folder(
     db: AsyncSession, folder_id: str | None,
-) -> list[FileEntry]:
-    """Live entries directly under one folder, ordered by display_name.
-    Used by routes_folders.get_folder for the children listing.
-    folder_id=None returns entries at the root."""
+) -> list[tuple[FileEntry, str | None]]:
+    """Live entries directly under one folder + their `File.ingest_status`,
+    ordered by display_name. Used by routes_folders for the GUI's folder
+    listing — surfacing ingest_status lets the row paint a "failed" badge
+    without a second round-trip. folder_id=None returns root entries."""
     rows = (
         await db.execute(
-            select(FileEntry)
+            select(FileEntry, File.ingest_status)
+            .join(File, File.id == FileEntry.file_id)
             .where(
                 _folder_clause(folder_id),
                 _live_entry(),
             )
             .order_by(FileEntry.display_name)
         )
-    ).scalars().all()
-    return list(rows)
+    ).all()
+    return [(e, status) for e, status in rows]
 
 
 async def find_live_by_folder_and_name(
