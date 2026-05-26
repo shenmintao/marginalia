@@ -77,6 +77,59 @@ export interface SessionInfo {
   started_at: string | null;
 }
 
+export interface SessionListEntry {
+  session_id: string;
+  started_at: string | null;
+  ended_at: string | null;
+  end_reason: string | null;
+  preview: string;
+  turn_count: number;
+  total_input_tokens: number;
+  total_output_tokens: number;
+  total_tool_calls: number;
+}
+
+export interface SessionList {
+  sessions: SessionListEntry[];
+  limit: number;
+  offset: number;
+}
+
+export interface ReplayedToolCall {
+  name: string | null;
+  arguments: Record<string, unknown>;
+  ok: boolean;
+  error: string | null;
+  duration_ms: number | null;
+}
+
+export interface ReplayedTurn {
+  conversation_id: string;
+  turn_index: number;
+  started_at: string | null;
+  ended_at: string | null;
+  user_message: string;
+  agent_response: string | null;
+  plan_text: string | null;
+  tool_calls: ReplayedToolCall[];
+  metrics: {
+    tokens_in: number;
+    tokens_out: number;
+    cache_read: number;
+    tool_calls: number;
+    llm_calls: number;
+    duration_ms: number;
+  };
+}
+
+export interface SessionTranscript {
+  session_id: string;
+  started_at: string | null;
+  ended_at: string | null;
+  end_reason: string | null;
+  turns: ReplayedTurn[];
+}
+
 export interface SessionTotals {
   session_id: string;
   ended_at: string | null;

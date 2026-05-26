@@ -17,7 +17,9 @@ import type {
   RunningCount,
   SearchResult,
   SessionInfo,
+  SessionList,
   SessionTotals,
+  SessionTranscript,
   UploadResult,
 } from "@/types/api";
 
@@ -232,6 +234,14 @@ export const sessions = {
     _request<SessionTotals>(`/v1/sessions/${encodeURIComponent(id)}/close`, {
       method: "POST",
     }),
+  list: (limit = 50, offset = 0) =>
+    _request<SessionList>(
+      `/v1/sessions?limit=${limit}&offset=${offset}`,
+    ),
+  messages: (id: string) =>
+    _request<SessionTranscript>(
+      `/v1/sessions/${encodeURIComponent(id)}/messages`,
+    ),
 };
 
 // ---- tasks ----------------------------------------------------------------

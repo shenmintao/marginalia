@@ -120,6 +120,35 @@ async def list_for_session(
     return list(rows)
 
 
+async def list_sessions(
+    db: AsyncSession, *, limit: int = 50, offset: int = 0,
+) -> list[Session]:
+    """Sessions ordered most-recent-first, for the chat sidebar."""
+    rows = (
+        await db.execute(
+            select(Session)
+            .order_by(Session.started_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+    ).scalars().all()
+    return list(rows)
+
+
+async def list_for_session_ordered(
+    db: AsyncSession, session_id: str,
+) -> list[Conversation]:
+    """Conversations in turn_index order — for transcript replay."""
+    rows = (
+        await db.execute(
+            select(Conversation)
+            .where(Conversation.session_id == session_id)
+            .order_by(Conversation.turn_index.asc())
+        )
+    ).scalars().all()
+    return list(rows)
+
+
 async def start_conversation(
     db: AsyncSession,
     *,
