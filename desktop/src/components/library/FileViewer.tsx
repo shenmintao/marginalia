@@ -13,12 +13,11 @@
  */
 import { useEffect, useMemo, useState } from "react";
 import { FileText, Download, AlertCircle, Loader2 } from "lucide-react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { vscDarkPlus, prism } from "react-syntax-highlighter/dist/esm/styles/prism";
 
 import { fileEntries } from "@/api/client";
+import { MarkdownView } from "@/components/MarkdownView";
 import type { FileMetadata } from "@/types/api";
 import { useTheme } from "@/lib/theme";
 
@@ -126,8 +125,8 @@ function MdView({ url }: { url: string }) {
   if (text === null) return <ViewerLoading />;
   return (
     <div className="h-full overflow-auto px-6 py-4">
-      <div className="prose-marginalia mx-auto max-w-3xl">
-        <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
+      <div className="mx-auto max-w-3xl">
+        <MarkdownView content={text} />
       </div>
     </div>
   );

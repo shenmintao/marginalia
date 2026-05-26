@@ -187,3 +187,79 @@ body {
 .prose-marginalia a[data-footnote-backref]:hover {
   color: rgb(var(--accent));
 }
+
+/* Tables — GFM gives us bare <table>; cherry-studio wraps theirs in a
+ * styled box. We mimic that quietly: thin borders, zebra rows, mono
+ * font for headers. */
+.prose-marginalia table {
+  border-collapse: collapse;
+  margin: 0.8em 0;
+  font-size: 0.92em;
+  width: auto;
+  max-width: 100%;
+}
+.prose-marginalia th,
+.prose-marginalia td {
+  border: 1px solid rgb(var(--border-default));
+  padding: 0.4em 0.7em;
+  text-align: left;
+}
+.prose-marginalia thead th {
+  background: rgb(var(--bg-muted));
+  font-weight: 600;
+}
+.prose-marginalia tbody tr:nth-child(even) {
+  background: rgb(var(--bg-subtle));
+}
+
+/* GitHub-style blockquote alerts emitted by remark-github-blockquote-alert.
+ * Output shape: <div class="markdown-alert markdown-alert-note">…</div>
+ * We give each variant a left border + tinted background. */
+.prose-marginalia .markdown-alert {
+  border-left: 3px solid rgb(var(--accent));
+  background: rgb(var(--accent-subtle));
+  padding: 0.6em 1em;
+  margin: 0.8em 0;
+  border-radius: 4px;
+}
+.prose-marginalia .markdown-alert-title {
+  display: flex;
+  align-items: center;
+  gap: 0.4em;
+  font-weight: 600;
+  margin-bottom: 0.2em;
+  font-size: 0.9em;
+  text-transform: capitalize;
+}
+.prose-marginalia .markdown-alert-warning {
+  border-color: #d97706;
+  background: rgb(245 158 11 / 0.12);
+}
+.prose-marginalia .markdown-alert-warning .markdown-alert-title { color: #d97706; }
+.prose-marginalia .markdown-alert-caution,
+.prose-marginalia .markdown-alert-important {
+  border-color: rgb(var(--danger));
+  background: rgb(var(--danger) / 0.1);
+}
+.prose-marginalia .markdown-alert-caution .markdown-alert-title,
+.prose-marginalia .markdown-alert-important .markdown-alert-title {
+  color: rgb(var(--danger));
+}
+.prose-marginalia .markdown-alert-tip {
+  border-color: #16a34a;
+  background: rgb(34 197 94 / 0.10);
+}
+.prose-marginalia .markdown-alert-tip .markdown-alert-title { color: #16a34a; }
+
+/* KaTeX — when display math overflows the column, scroll horizontally
+ * inside the equation rather than blowing out the layout. */
+.prose-marginalia .katex-display {
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0.2em 0;
+}
+
+/* Task lists from remark-gfm — strip the default disc bullet for items
+ * that contain a checkbox so the row reads as a checkbox + text. */
+.prose-marginalia li:has(> input[type="checkbox"]) { list-style: none; margin-left: -1.2em; }
+.prose-marginalia li > input[type="checkbox"] { margin-right: 0.5em; }

@@ -7,15 +7,14 @@
  *  remark-gfm v4 turns into a proper footnote section, and the trailer
  *  shows `(1m 54s · ↑ 2.9k / ↓ 2.9k tokens · 87% cache · 2 tools)`.
  */
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Brain, ChevronDown, ListChecks, Wrench, CheckCircle2, XCircle,
   AlertCircle, Loader2, User as UserIcon,
 } from "lucide-react";
-import ReactMarkdown from "react-markdown";
 import { useNavigate } from "react-router-dom";
-import remarkGfm from "remark-gfm";
 
+import { MarkdownView } from "@/components/MarkdownView";
 import { cn } from "@/lib/utils";
 
 export type StepKind = "planning" | "plan" | "thinking" | "tool_call";
@@ -60,35 +59,25 @@ export function TurnView({ turn }: { turn: Turn }) {
 
   const inFlight = !turn.done && !turn.error;
   const showSteps = turn.steps.length > 0;
+  const hasPlan = turn.steps.some((s) => s.kind === "plan");
+
+  // Auto-open the steps drawer the first time a plan step lands —
+  // surfacing the plan is the whole point of expanding it. Don't keep
+  // re-opening it after the user closes it manually.
+  const autoOpenedRef = useRef(false);
+  useEffect(() => {
+    if (hasPlan && !autoOpenedRef.current) {
+      autoOpenedRef.current = true;
+      setOpen(true);
+    }
+  }, [hasPlan]);
 
   // `entry:<uuid>` links in citation footnotes resolve to a Library
   // deep-link. Hand them to react-router so the tree expands to that
   // file in-app instead of the browser trying to open a custom-scheme
   // URL.
-  const renderEntryLink = ({
-    href, children, ...rest
-  }: {
-    href?: string;
-    children?: React.ReactNode;
-  } & React.AnchorHTMLAttributes<HTMLAnchorElement>) => {
-    if (href && href.startsWith("entry:")) {
-      const id = href.slice("entry:".length);
-      return (
-        <a
-          href="#"
-          onClick={(e) => {
-            e.preventDefault();
-            navigate(`/library?entry=${encodeURIComponent(id)}`);
-          }}
-          className="text-accent hover:underline"
-          {...rest}
-        >
-          {children}
-        </a>
-      );
-    }
-    return <a href={href} {...rest}>{children}</a>;
-  };
+  const onEntryLink = (id: string) =>
+    navigate(`/library?entry=${encodeURIComponent(id)}`);
 
   return (
     <div className="mb-6 animate-fade-in">
@@ -127,14 +116,7 @@ export function TurnView({ turn }: { turn: Turn }) {
 
       {turn.answer !== null && turn.answer.length > 0 && (
         <div className="ml-8 rounded-lg border border-border bg-bg-subtle p-4 text-sm">
-          <div className="prose-marginalia">
-            <ReactMarkdown
-              remarkPlugins={[remarkGfm]}
-              components={{ a: renderEntryLink }}
-            >
-              {turn.answer}
-            </ReactMarkdown>
-          </div>
+          <MarkdownView content={turn.answer} onEntryLink={onEntryLink} />
           {turn.metrics && <MetricsLine m={turn.metrics} />}
         </div>
       )}
@@ -167,9 +149,13 @@ function StepRow({ step }: { step: Step }) {
   const expandTitle = previewAvailable
     ? "click to expand result"
     : "click to expand arguments";
+  const isPlan = step.kind === "plan" && step.plan && step.plan.length > 0;
   return (
     <li className="flex items-start gap-2 text-fg-muted">
-      <Icon size={12} className="mt-0.5 shrink-0 text-fg-subtle" />
+      <Icon size={12} className={cn(
+        "mt-0.5 shrink-0",
+        isPlan ? "text-accent" : "text-fg-subtle",
+      )} />
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
           {expandable ? (
@@ -184,7 +170,11 @@ function StepRow({ step }: { step: Step }) {
               {step.label}
             </button>
           ) : (
-            <span className={cn("truncate", step.result === "failed" && "text-danger")}>
+            <span className={cn(
+              "truncate",
+              step.result === "failed" && "text-danger",
+              isPlan && "font-medium text-fg-base",
+            )}>
               {step.label}
             </span>
           )}
@@ -194,9 +184,18 @@ function StepRow({ step }: { step: Step }) {
             <span className="text-fg-subtle">{shortDuration(step.durationMs / 1000)}</span>
           )}
         </div>
-        {step.plan && step.plan.length > 0 && (
-          <ol className="ml-3 mt-1 list-decimal space-y-0.5 text-fg-subtle">
-            {step.plan.map((p, i) => <li key={i}>{p}</li>)}
+        {isPlan && (
+          <ol className="mt-1.5 space-y-1 rounded-md border border-border bg-bg-base/60 p-2 text-[12px] text-fg-base">
+            {step.plan!.map((p, i) => (
+              <li key={i} className="flex gap-2">
+                <span className="mt-0.5 inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-accent-subtle text-[10px] font-semibold leading-none text-accent">
+                  {i + 1}
+                </span>
+                <div className="min-w-0 flex-1 [&_p]:my-0 [&_p]:leading-snug">
+                  <MarkdownView content={p} />
+                </div>
+              </li>
+            ))}
           </ol>
         )}
         {open && previewAvailable && (
