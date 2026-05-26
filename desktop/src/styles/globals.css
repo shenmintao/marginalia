@@ -52,6 +52,7 @@
 }
 
 html, body, #root { height: 100%; }
+html, body { overflow: hidden; }
 body {
   background: rgb(var(--bg-base));
   color: rgb(var(--fg-base));
@@ -74,6 +75,11 @@ body {
 /* React-markdown defaults are too tight for chat messages. */
 .prose-marginalia {
   line-height: 1.65;
+  /* Long unbroken tokens (URLs, raw uuids, code) shouldn't push the
+     parent column wider than its flex track — without this the chat
+     composer's Send button gets pushed off-screen on narrow windows. */
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 .prose-marginalia h1,
 .prose-marginalia h2,

@@ -24,6 +24,7 @@ from typing import Any, Mapping
 
 from marginalia.repositories import audit_events as audit_events_repo
 from marginalia.db.session import session_scope
+from marginalia.repositories import files as files_repo
 from marginalia.repositories import journal as journal_repo
 from marginalia.repositories import task_outcomes as task_outcomes_repo
 from marginalia.repositories import tasks as tasks_repo
@@ -32,6 +33,7 @@ from marginalia.repositories.task_outcomes import (
     GLOBAL_OBJECT_KIND,
     record_outcome,
 )
+from marginalia.services.reprocess import reprocess_file
 from marginalia.tasks.enqueue import enqueue
 from marginalia.tasks.kinds import (
     KIND_PERIODIC_TICK,
@@ -46,6 +48,15 @@ TICK_INTERVAL_SECONDS = 600  # 10 minutes
 SUMMARIZE_MIN_TURNS = 3
 SUMMARIZE_MIN_AGE = timedelta(hours=24)
 SUMMARIZE_MAX_DISPATCH_PER_TICK = 10
+
+# Self-heal: files whose ingest finished but produced a useless summary.
+# Trim threshold matches kb-lite's 50-char rule of thumb — anything
+# shorter is essentially "we tried, the LLM gave up". Cooldown matches
+# the summarize cadence so a stuck file doesn't churn every tick.
+LOW_QUALITY_MIN_SUMMARY_CHARS = 50
+LOW_QUALITY_COOLDOWN = timedelta(hours=24)
+LOW_QUALITY_MAX_DISPATCH_PER_TICK = 5
+LOW_QUALITY_OUTCOME_KIND = "reprocess_low_quality"
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -101,6 +112,15 @@ async def handle_periodic_tick(payload: Mapping[str, Any]) -> None:
         if summarize_dispatched:
             dispatched.append(
                 f"{KIND_SUMMARIZE_SESSION}({len(summarize_dispatched)})"
+            )
+
+        # Self-heal: re-ingest files whose summary came out empty/short.
+        # Same shape as summarize dispatch — per-file fanout with
+        # task_outcomes cooldown so a stubbornly bad file doesn't churn.
+        low_q_dispatched = await _dispatch_reprocess_low_quality(session, now)
+        if low_q_dispatched:
+            dispatched.append(
+                f"{LOW_QUALITY_OUTCOME_KIND}({len(low_q_dispatched)})"
             )
 
         next_run = now + timedelta(seconds=TICK_INTERVAL_SECONDS)
@@ -184,6 +204,69 @@ async def _dispatch_summarize_sessions(session, now: datetime) -> list[str]:
                 },
             )
     return enqueued
+
+async def _dispatch_reprocess_low_quality(session, now: datetime) -> list[str]:
+    """Find ingested files with empty or short summaries and re-enqueue
+    ingest_file for each, capped at LOW_QUALITY_MAX_DISPATCH_PER_TICK.
+
+    Eligibility:
+      - File is live and already ingested (`ingested_at IS NOT NULL`).
+      - Summary is NULL or trims to fewer than LOW_QUALITY_MIN_SUMMARY_CHARS.
+      - No prior `reprocess_low_quality` outcome for this file within
+        LOW_QUALITY_COOLDOWN (otherwise we'd churn the same broken file
+        every 10 minutes — the LLM hasn't gotten smarter in 600s).
+
+    Cooldown is recorded as a `task_outcomes` row keyed on
+    (LOW_QUALITY_OUTCOME_KIND, "file", file_id). We record `applied`
+    when we actually enqueue and `noop` when dedup short-circuits — both
+    count as "we tried", so the cooldown applies either way.
+    """
+    candidates = await files_repo.find_low_quality(
+        session,
+        min_summary_chars=LOW_QUALITY_MIN_SUMMARY_CHARS,
+        limit=LOW_QUALITY_MAX_DISPATCH_PER_TICK * 4,
+    )
+
+    enqueued: list[str] = []
+    for fid in candidates:
+        if len(enqueued) >= LOW_QUALITY_MAX_DISPATCH_PER_TICK:
+            break
+
+        last_outcome = _aware(
+            await task_outcomes_repo.latest_completed_at_for(
+                session,
+                task_kind=LOW_QUALITY_OUTCOME_KIND,
+                object_kind="file",
+                object_id=fid,
+            )
+        )
+        if last_outcome is not None and (now - last_outcome) < LOW_QUALITY_COOLDOWN:
+            continue
+
+        from marginalia.db.models import File  # local — avoid widening top imports
+        file_row = await session.get(File, fid)
+        if file_row is None or file_row.deleted_at is not None:
+            continue
+
+        task_id = await reprocess_file(
+            session, file_row, scheduled_by="periodic_tick:low_quality",
+        )
+        await record_outcome(
+            session,
+            task_kind=LOW_QUALITY_OUTCOME_KIND,
+            object_kind="file",
+            object_id=fid,
+            outcome="applied" if task_id else "noop",
+            detail={
+                "file_id": fid,
+                "task_id": task_id,
+                "summary_len": len((file_row.summary or "").strip()),
+            },
+        )
+        if task_id is not None:
+            enqueued.append(fid)
+    return enqueued
+
 
 async def bootstrap_periodic_tick() -> None:
     """Ensure exactly one periodic_tick row exists at runner startup.

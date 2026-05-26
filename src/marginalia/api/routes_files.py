@@ -8,16 +8,15 @@ clears `entry_tags` for all of them and re-runs the ingest pipeline once.
 The mental model: "user upgraded their LLM, redo the analysis." See
 [[feedback-reprocess-scope]] and [[feedback-llm-first-class]].
 
-Implementation: reset state in-line, enqueue KIND_INGEST_FILE with the
-same dedup_key as upload.py:318. The existing ingest_file handler does
-all the work — we don't introduce a "reprocess" concept, just unblock
-its write-once gate by clearing `ingested_at`.
+Implementation: the per-file primitive lives in services.reprocess and
+is shared with periodic_tick's self-heal dispatch for low-quality
+summaries. Routes here only resolve the bulk filter into a list of
+file_ids and chunk the commits.
 """
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
-from typing import Any, Literal
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, model_validator
@@ -25,13 +24,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from marginalia.db.models import File
 from marginalia.db.session import get_session
-from marginalia.repositories import audit_events as audit_events_repo
 from marginalia.repositories import catalogs as catalogs_repo
-from marginalia.repositories import entry_tags as entry_tags_repo
 from marginalia.repositories import files as files_repo
 from marginalia.repositories import folders as folders_repo
-from marginalia.tasks.enqueue import enqueue
-from marginalia.tasks.kinds import KIND_INGEST_FILE
+from marginalia.services.reprocess import reprocess_file
 
 log = logging.getLogger(__name__)
 
@@ -50,54 +46,6 @@ _BULK_CHUNK = 50
 _BULK_MAX = 5000
 
 
-def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-async def _reset_one(session: AsyncSession, file_row: File) -> str | None:
-    """Clear ingest state for one file and enqueue ingest_file.
-    Returns task_id or None if dedup short-circuited.
-
-    Caller owns the transaction (no commit here) so bulk paths can
-    chunk multiple files into a single commit.
-    """
-    now = _utcnow()
-    entry_ids = await files_repo.list_live_entry_ids_for_file(session, file_row.id)
-    for eid in entry_ids:
-        await entry_tags_repo.delete_all_for_entry(session, eid)
-
-    file_row.ingested_at = None
-    file_row.ingest_status = "pending"
-    file_row.updated_at = now
-
-    await audit_events_repo.append(
-        session,
-        kind="reprocess_requested",
-        payload={"file_id": file_row.id, "entry_count": len(entry_ids)},
-    )
-
-    task = await enqueue(
-        session,
-        kind=KIND_INGEST_FILE,
-        payload={"file_id": file_row.id},
-        dedup_key=f"ingest_file:{file_row.id}",
-    )
-    if task is None:
-        return None
-    await audit_events_repo.append(
-        session,
-        kind="task_enqueued",
-        task_id=task.id,
-        payload={
-            "task_id": task.id,
-            "kind": KIND_INGEST_FILE,
-            "file_id": file_row.id,
-            "scheduled_by": "reprocess",
-        },
-    )
-    return task.id
-
-
 @router.post("/{file_id}/reprocess", status_code=200)
 async def reprocess_one(
     file_id: str,
@@ -106,7 +54,7 @@ async def reprocess_one(
     file_row = await session.get(File, file_id)
     if file_row is None or file_row.deleted_at is not None:
         raise HTTPException(status_code=404, detail="file not found")
-    task_id = await _reset_one(session, file_row)
+    task_id = await reprocess_file(session, file_row)
     await session.commit()
     return {
         "file_id": file_id,
@@ -192,7 +140,7 @@ async def reprocess_bulk(
             if file_row is None or file_row.deleted_at is not None:
                 skipped_count += 1
                 continue
-            tid = await _reset_one(session, file_row)
+            tid = await reprocess_file(session, file_row)
             if tid is None:
                 reused_count += 1
             else:

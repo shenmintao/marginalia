@@ -56,7 +56,7 @@ class DocxPipeline(Pipeline):
         body = "\n".join(paragraphs)
         if len(body) > MAX_OUTPUT_CHARS:
             body = body[:MAX_OUTPUT_CHARS] + "\n[…document truncated for indexing…]"
-        return await index_extracted_text(body, ctx, kind="docx")
+        return await index_extracted_text(body, ctx, kind="text")
 
     async def read_segment(
         self,

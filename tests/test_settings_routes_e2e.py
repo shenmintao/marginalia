@@ -36,6 +36,19 @@ os.environ["LLM_DEFAULT_PROVIDER"] = "openai"
 os.environ.pop("LLM_DEFAULT_BASE_URL", None)
 
 
+def _scrub_optional_profiles(s) -> None:
+    """Wipe vision/audio fields a developer's local .env may have set.
+
+    Pydantic-settings reads `.env` during `Settings()` construction; env
+    var pops alone can't defeat it. The "vision is opt-in / blank when
+    unconfigured" contract this module locks in only holds if those
+    fields are unset, so we null them on the cached instance after
+    `get_settings()` returns."""
+    for opt in ("vision", "audio"):
+        for field in ("provider", "api_key", "base_url", "model"):
+            object.__setattr__(s, f"llm_{opt}_{field}", None)
+
+
 def _ensure_test_env() -> None:
     """Re-assert env at the start of each test. Other test files set
     `LLM_DEFAULT_MODEL=fake-model` at import time; in a multi-file run
@@ -48,6 +61,7 @@ def _ensure_test_env() -> None:
     os.environ["LLM_DEFAULT_PROVIDER"] = "openai"
     os.environ.pop("LLM_DEFAULT_BASE_URL", None)
     get_settings.cache_clear()  # type: ignore[attr-defined]
+    _scrub_optional_profiles(get_settings())
     # Drop the GUI-write overlay too so prior tests in the same module
     # don't leak overrides into "fresh" snapshot tests.
     overlay = _TEST_ROOT / "config_overlay.json"

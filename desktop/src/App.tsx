@@ -19,11 +19,11 @@ export default function App() {
 
   return (
     <div className="flex h-full w-full flex-col bg-bg-base text-fg-base">
-      <div className="flex flex-1 overflow-hidden">
+      <div className="flex min-h-0 flex-1 overflow-hidden">
         <Sidebar />
-        <div className="flex flex-1 flex-col overflow-hidden">
+        <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
           <TopBar />
-          <main className="flex-1 overflow-hidden">
+          <main className="min-h-0 flex-1 overflow-hidden">
             <Routes>
               <Route path="/" element={<Navigate to="/chat" replace />} />
               <Route path="/library/*" element={<LibraryPage />} />

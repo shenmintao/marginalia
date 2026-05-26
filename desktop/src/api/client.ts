@@ -280,6 +280,10 @@ export const sessions = {
     _request<SessionTranscript>(
       `/v1/sessions/${encodeURIComponent(id)}/messages`,
     ),
+  delete: (id: string) =>
+    _request<void>(`/v1/sessions/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    }),
 };
 
 // ---- tasks ----------------------------------------------------------------

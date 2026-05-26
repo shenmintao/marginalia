@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import asyncio
 import io
-import json
 import os
 import shutil
 import sys
@@ -56,65 +55,61 @@ from marginalia.tasks.runner import TaskRunner
 
 
 # Two canned LLM payloads — first vs. reprocessed. Different summary
-# text, different tag set, so we can prove "AI overwrote".
-def _payload(summary: str, tag_name: str) -> dict:
-    return {
-        "summary": summary,
-        "description": {
-            "sections": [{
-                "id": "s1", "title": "Overview",
-                "anchor": {"unit": "heading", "path": "1"},
-                "summary": "intro", "key_terms": ["x"],
-            }],
-        },
-        "kind": "text",
-        "extra": "themes",
-        "entry_extra": "context",
-        "entry_catalog_path": ["Notes"],
-        "entry_tags": [
-            {"name": tag_name, "facet": "topic"},
-            {"name": "english", "facet": "language"},
-        ],
-    }
+# text, different tag set, so we can prove "AI overwrote". The pipeline
+# now consumes the tagged-response format (see llm/tagged_response.py),
+# not JSON.
+def _payload(summary: str, tag_name: str) -> str:
+    return (
+        f"<summary>{summary}</summary>\n"
+        "<description>Walk-through of the document.</description>\n"
+        "<sections>\n"
+        "s1 | 1 | Overview | intro | x\n"
+        "</sections>\n"
+        "<extra>theme: themes</extra>\n"
+        "<entry_extra>context: ctx</entry_extra>\n"
+        "<catalog_path>Notes</catalog_path>\n"
+        "<tags>\n"
+        f"topic: {tag_name}\n"
+        "language: english\n"
+        "</tags>\n"
+    )
 
 
 CALL_LOG: list[ChatRequest] = []
 
 
 class _FakeChatClient:
-    """Returns canned ingest payloads from a FIFO queue. If the queue is
-    empty (e.g., a periodic handler grabs the client), returns a benign
-    no-op payload so the test doesn't depend on which handler runs."""
+    """Returns canned tagged-response payloads from a FIFO queue. If the
+    queue is empty (e.g., a periodic handler grabs the client), returns
+    a benign no-op payload so the test doesn't depend on which handler
+    runs."""
     profile_name = "ingest"
     model = "fake-model"
 
     def __init__(self) -> None:
-        self.responses: list[dict] = []
+        self.responses: list[str] = []
 
     async def complete(self, request: ChatRequest) -> ChatResponse:
         CALL_LOG.append(request)
-        if self.responses:
-            payload = self.responses.pop(0)
+        # Only the ingest pipeline should consume canned responses;
+        # periodic handlers (tag_quality, propose_views, ...) get a
+        # benign no-op so they don't drain the queue.
+        is_ingest = "document indexer" in (request.system or "")
+        if is_ingest and self.responses:
+            text = self.responses.pop(0)
         else:
-            # Inert payload — won't disturb periodic handlers; matches
-            # the ingest schema loosely. If a real ingest call hits this,
-            # the assertion on summary text will catch the mistake.
-            payload = {
-                "summary": "(noop)",
-                "description": {"sections": []},
-                "kind": "text",
-                "extra": "",
-                "entry_extra": "",
-                "entry_catalog_path": [],
-                "entry_tags": [],
-                "operations": [],
-            }
+            text = (
+                "<summary>(noop)</summary>\n"
+                "<description></description>\n"
+                "<sections></sections>\n"
+                "<tags></tags>\n"
+            )
         return ChatResponse(
-            text=json.dumps(payload),
+            text=text,
             tool_calls=[],
             stop_reason="end_turn",
             usage=TokenUsage(input_tokens=100, output_tokens=50, cache_read_tokens=0),
-            parsed_json=payload,
+            parsed_json=None,
         )
 
 
@@ -289,17 +284,21 @@ async def main() -> None:
                 )
                 assert r.status_code == 200, r.text
                 rb = r.json()
-                assert rb["file_count"] == 2
-                assert len(rb["task_ids"]) == 2
-                assert rb["skipped_count"] == 0
+                assert rb["file_count"] == 2, f"file_count: {rb}"
+                assert len(rb["task_ids"]) == 2, f"task_ids: {rb}"
+                assert rb["skipped_count"] == 0, f"skipped_count: {rb}"
                 for tid in rb["task_ids"]:
                     assert await _wait_for_task_done(tid) == "done"
 
                 async with factory() as s:
                     s1 = (await s.get(File, file_id)).summary
                     s2 = (await s.get(File, file_id2)).summary
-                    assert s1 == "REDONE 1"
-                    assert s2 == "REDONE 2"
+                    # The two ingest tasks may run in either order, so
+                    # accept either summary on either file as long as
+                    # both REDONE values landed somewhere.
+                    got = {s1, s2}
+                    assert got == {"REDONE 1", "REDONE 2"}, \
+                        f"unexpected summaries: file_id={s1!r}, file_id2={s2!r}"
                 print("[5] bulk file_ids: both files re-ingested with fresh content")
 
                 # ---- bulk all=true skips deleted files ----

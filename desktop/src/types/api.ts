@@ -27,6 +27,10 @@ export interface FileEntrySummary {
   file_id: string;
   display_name: string;
   lifecycle: string;
+  /** File-side ingest state — pending | processing | done | failed.
+   *  Sourced from the joined `files.ingest_status` so the row can
+   *  paint a "failed" badge without a second round-trip. */
+  ingest_status?: string | null;
   created_at?: string | null;
 }
 
@@ -103,6 +107,12 @@ export interface SessionList {
 export interface ReplayedToolCall {
   name: string | null;
   arguments: Record<string, unknown>;
+  /** Server-resolved one-line summary, mirrors the live SSE
+   *  tool_call event. Names referenced as ids (entry/tag/folder/
+   *  catalog) come back resolved so the GUI prints a readable label
+   *  instead of a uuid. Optional for forward-compatibility with
+   *  older transcripts. */
+  display?: string | null;
   ok: boolean;
   error: string | null;
   duration_ms: number | null;
