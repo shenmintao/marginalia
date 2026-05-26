@@ -234,4 +234,11 @@ def _resolve_paths(settings: "Settings") -> None:
 def get_settings() -> Settings:
     s = Settings()
     _resolve_paths(s)
+    # Merge the GUI-writable overlay (config_overlay.json under
+    # MARGINALIA_HOME) so its values take precedence over .env. Imported
+    # lazily to avoid an import cycle (services -> config -> services).
+    from marginalia.services.config_overlay import (
+        merge_overlay_into_settings, read_overlay,
+    )
+    merge_overlay_into_settings(s, read_overlay(s.marginalia_home))
     return s

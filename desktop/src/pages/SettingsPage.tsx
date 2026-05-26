@@ -1,12 +1,40 @@
-import { useState } from "react";
-import { Save } from "lucide-react";
+/** Settings page — three sections.
+ *
+ *  1. Connection: API base URL (client-side, persisted to localStorage)
+ *  2. Preferences: theme, default conflict policy, status-bar polling
+ *  3. Server status (read-only) + LLM profile editor (writable overlay)
+ *
+ *  Sections 1-2 work without a backend. Section 3 calls /v1/settings/*
+ *  and shows a friendly empty state if the server is offline. */
+import { useEffect, useState } from "react";
+import { Save, Sun, Moon, Monitor } from "lucide-react";
 
-import { setBaseUrl, getBaseUrl } from "@/api/client";
+import { setBaseUrl, getBaseUrl, settings as settingsApi } from "@/api/client";
+import { LlmProfileEditor } from "@/components/LlmProfileEditor";
+import { usePrefs } from "@/lib/prefs";
+import { useTheme } from "@/lib/theme";
 import { cn } from "@/lib/utils";
+import type { LlmSettings, OnConflict, ServerSettings } from "@/types/api";
 
 const STORAGE_KEY = "marginalia.api_base";
 
 export function SettingsPage() {
+  return (
+    <div className="h-full overflow-y-auto px-8 py-8">
+      <div className="mx-auto max-w-2xl space-y-6">
+        <h1 className="text-xl font-semibold">Settings</h1>
+
+        <ConnectionSection />
+        <PreferencesSection />
+        <ServerSection />
+      </div>
+    </div>
+  );
+}
+
+// ---- Connection ------------------------------------------------------------
+
+function ConnectionSection() {
   const [base, setBase] = useState(
     () => localStorage.getItem(STORAGE_KEY) || getBaseUrl(),
   );
@@ -21,53 +49,237 @@ export function SettingsPage() {
   };
 
   return (
-    <div className="h-full overflow-y-auto px-8 py-8">
-      <div className="mx-auto max-w-2xl">
-        <h1 className="text-xl font-semibold">Settings</h1>
-        <p className="mt-1 text-sm text-fg-muted">
-          Connection to the Marginalia backend.
-        </p>
-
-        <section className="mt-6 rounded-md border border-border bg-bg-subtle p-4">
-          <label className="block text-sm font-medium">API base URL</label>
-          <p className="mt-1 text-xs text-fg-subtle">
-            Leave empty to use the dev proxy (recommended in browser).
-            Set to <span className="font-mono">http://host:8000</span> when
-            connecting to a remote server.
-          </p>
-          <div className="mt-3 flex gap-2">
-            <input
-              value={base}
-              onChange={(e) => setBase(e.target.value)}
-              placeholder="(empty = same-origin / proxy)"
-              className="flex-1 rounded-md border border-border bg-bg-base px-3 py-1.5 text-sm font-mono outline-none focus:border-accent"
-            />
-            <button
-              onClick={save}
-              className={cn(
-                "flex items-center gap-1.5 rounded-md bg-accent px-3 text-sm font-medium text-accent-fg hover:opacity-90",
-              )}
-            >
-              <Save size={13} /> Save
-            </button>
-          </div>
-          {savedAt && (
-            <p className="mt-2 text-xs text-fg-subtle">
-              Saved · {new Date(savedAt).toLocaleTimeString()}
-            </p>
+    <Section title="Connection" subtitle="How the GUI reaches the Marginalia backend.">
+      <label className="block text-sm font-medium">API base URL</label>
+      <p className="mt-1 text-xs text-fg-subtle">
+        Leave empty to use the dev proxy (recommended in browser). Set to
+        <span className="mx-1 font-mono">http://host:8000</span>
+        when connecting to a remote server.
+      </p>
+      <div className="mt-3 flex gap-2">
+        <input
+          value={base}
+          onChange={(e) => setBase(e.target.value)}
+          placeholder="(empty = same-origin / proxy)"
+          className="flex-1 rounded-md border border-border bg-bg-base px-3 py-1.5 font-mono text-sm outline-none focus:border-accent"
+        />
+        <button
+          onClick={save}
+          className={cn(
+            "flex items-center gap-1.5 rounded-md bg-accent px-3 text-sm font-medium text-accent-fg hover:opacity-90",
           )}
-        </section>
-
-        <section className="mt-6 rounded-md border border-border bg-bg-subtle p-4 text-sm text-fg-muted">
-          <h2 className="mb-2 text-sm font-medium text-fg-base">More settings — coming soon</h2>
-          <ul className="space-y-1 text-xs">
-            <li>· LLM provider / model selection</li>
-            <li>· Storage backend (mirror / local / s3)</li>
-            <li>· Conflict policy (rename / error / skip)</li>
-            <li>· Tend / dispatcher controls</li>
-          </ul>
-        </section>
+        >
+          <Save size={13} /> Save
+        </button>
       </div>
+      {savedAt && (
+        <p className="mt-2 text-xs text-fg-subtle">
+          Saved · {new Date(savedAt).toLocaleTimeString()}
+        </p>
+      )}
+    </Section>
+  );
+}
+
+// ---- Preferences -----------------------------------------------------------
+
+function PreferencesSection() {
+  const { mode, setMode } = useTheme();
+  const prefs = usePrefs();
+
+  return (
+    <Section title="Preferences" subtitle="Local appearance and defaults.">
+      <div className="space-y-5">
+        <Row label="Theme">
+          <div className="flex gap-1">
+            {(["light", "dark", "system"] as const).map((m) => (
+              <button
+                key={m}
+                onClick={() => setMode(m)}
+                className={cn(
+                  "flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs",
+                  mode === m
+                    ? "border-accent bg-accent/10 text-accent"
+                    : "border-border bg-bg-base hover:bg-bg-subtle",
+                )}
+              >
+                {m === "light" && <Sun size={11} />}
+                {m === "dark" && <Moon size={11} />}
+                {m === "system" && <Monitor size={11} />}
+                {m}
+              </button>
+            ))}
+          </div>
+        </Row>
+
+        <Row
+          label="Default conflict policy"
+          hint="Used when uploading a file whose name already exists in the target folder."
+        >
+          <select
+            value={prefs.defaultOnConflict}
+            onChange={(e) =>
+              prefs.setDefaultOnConflict(e.target.value as OnConflict)
+            }
+            className="rounded border border-border bg-bg-base px-2 py-1 text-sm"
+          >
+            <option value="rename">rename (append a suffix)</option>
+            <option value="error">error (reject the upload)</option>
+            <option value="skip">skip (keep existing)</option>
+          </select>
+        </Row>
+
+        <Row
+          label="Status bar refresh"
+          hint="How often the bottom bar polls /health and the running task count."
+        >
+          <select
+            value={prefs.statusPollMs}
+            onChange={(e) => prefs.setStatusPollMs(parseInt(e.target.value, 10))}
+            className="rounded border border-border bg-bg-base px-2 py-1 text-sm"
+          >
+            <option value={2000}>2 s</option>
+            <option value={4000}>4 s (default)</option>
+            <option value={10000}>10 s</option>
+            <option value={30000}>30 s</option>
+            <option value={60000}>60 s</option>
+          </select>
+        </Row>
+
+        <Row label="Compact sidebar" hint="Show icon-only navigation on the left.">
+          <input
+            type="checkbox"
+            checked={prefs.compactSidebar}
+            onChange={(e) => prefs.setCompactSidebar(e.target.checked)}
+            className="h-4 w-4 accent-accent"
+          />
+        </Row>
+      </div>
+    </Section>
+  );
+}
+
+// ---- Server status + LLM editor --------------------------------------------
+
+function ServerSection() {
+  const [server, setServer] = useState<ServerSettings | null>(null);
+  const [llm, setLlm] = useState<LlmSettings | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const [s, l] = await Promise.all([
+          settingsApi.server(),
+          settingsApi.llm(),
+        ]);
+        if (cancelled) return;
+        setServer(s);
+        setLlm(l);
+        setErr(null);
+      } catch (e: unknown) {
+        if (cancelled) return;
+        setErr(e instanceof Error ? e.message : String(e));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  if (err) {
+    return (
+      <Section title="Server" subtitle="Live state of the running backend.">
+        <p className="text-sm text-danger">Backend unreachable — {err}</p>
+      </Section>
+    );
+  }
+
+  if (!server || !llm) {
+    return (
+      <Section title="Server" subtitle="Live state of the running backend.">
+        <p className="text-sm text-fg-subtle">Loading…</p>
+      </Section>
+    );
+  }
+
+  return (
+    <>
+      <Section title="Server status" subtitle="Read-only — set via .env or container env at startup.">
+        <dl className="grid grid-cols-[1fr_2fr] gap-x-4 gap-y-2 text-sm">
+          <Kv k="App env" v={server.app_env} />
+          <Kv k="Marginalia home" v={server.marginalia_home} mono />
+          <Kv k="Database backend" v={server.db_backend} />
+          <Kv k="Storage backend" v={server.storage_backend} />
+          <Kv k="Worker enabled" v={server.worker_enabled ? "yes" : "no"} />
+          <Kv k="Default conflict policy" v={server.default_on_conflict} />
+          <Kv
+            k="Agent token budget (plan/exec)"
+            v={`${server.agent_plan_max_tokens.toLocaleString()} / ${server.agent_execute_max_tokens.toLocaleString()}`}
+          />
+          <Kv
+            k="Vision profile"
+            v={server.vision_profile_configured ? "configured" : "not set (image OCR skipped)"}
+          />
+        </dl>
+      </Section>
+
+      <Section
+        title="LLM profiles"
+        subtitle="Per-task model overrides. Empty fields inherit the default profile."
+      >
+        <LlmProfileEditor data={llm} onChange={setLlm} />
+      </Section>
+    </>
+  );
+}
+
+// ---- shared bits -----------------------------------------------------------
+
+function Section({
+  title,
+  subtitle,
+  children,
+}: {
+  title: string;
+  subtitle?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <section className="rounded-md border border-border bg-bg-subtle p-4">
+      <h2 className="text-sm font-semibold">{title}</h2>
+      {subtitle && <p className="mt-0.5 text-xs text-fg-subtle">{subtitle}</p>}
+      <div className="mt-4">{children}</div>
+    </section>
+  );
+}
+
+function Row({
+  label,
+  hint,
+  children,
+}: {
+  label: string;
+  hint?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-4">
+      <div className="min-w-0 flex-1">
+        <div className="text-sm font-medium">{label}</div>
+        {hint && <div className="mt-0.5 text-xs text-fg-subtle">{hint}</div>}
+      </div>
+      <div className="shrink-0">{children}</div>
     </div>
+  );
+}
+
+function Kv({ k, v, mono }: { k: string; v: string; mono?: boolean }) {
+  return (
+    <>
+      <dt className="text-fg-muted">{k}</dt>
+      <dd className={cn("truncate", mono && "font-mono text-xs")}>{v}</dd>
+    </>
   );
 }

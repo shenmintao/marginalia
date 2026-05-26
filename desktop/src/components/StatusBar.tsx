@@ -2,12 +2,14 @@ import { useEffect, useState } from "react";
 import { Activity, Wifi, WifiOff } from "lucide-react";
 
 import { health, tasks } from "@/api/client";
+import { usePrefs } from "@/lib/prefs";
 import { cn } from "@/lib/utils";
 
 export function StatusBar() {
   const [online, setOnline] = useState<boolean | null>(null);
   const [storage, setStorage] = useState<string>("");
   const [busy, setBusy] = useState({ running: 0, pending: 0 });
+  const pollMs = usePrefs((s) => s.statusPollMs);
 
   useEffect(() => {
     let cancelled = false;
@@ -30,12 +32,12 @@ export function StatusBar() {
     }
 
     tick();
-    const id = window.setInterval(tick, 4000);
+    const id = window.setInterval(tick, pollMs);
     return () => {
       cancelled = true;
       window.clearInterval(id);
     };
-  }, []);
+  }, [pollMs]);
 
   const totalBusy = busy.running + busy.pending;
 

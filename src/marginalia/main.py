@@ -12,6 +12,7 @@ from marginalia.api.routes_chat import router as chat_router
 from marginalia.api.routes_exports import router as exports_router
 from marginalia.api.routes_file_entries import router as file_entries_router
 from marginalia.api.routes_folders import router as folders_router
+from marginalia.api.routes_settings import router as settings_router
 from marginalia.api.routes_tasks import router as tasks_router
 from marginalia.api.routes_tend import router as tend_router
 from marginalia.api.routes_upload import router as upload_router
@@ -134,6 +135,7 @@ app.include_router(chat_router, prefix=V1_PREFIX)
 app.include_router(exports_router, prefix=V1_PREFIX)
 app.include_router(tasks_router, prefix=V1_PREFIX)
 app.include_router(tend_router, prefix=V1_PREFIX)
+app.include_router(settings_router, prefix=V1_PREFIX)
 
 
 @app.get("/health", tags=["meta"])

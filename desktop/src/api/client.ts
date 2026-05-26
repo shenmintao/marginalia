@@ -13,9 +13,11 @@ import type {
   FileMetadata,
   Folder,
   FolderDetail,
+  LlmSettings,
   OnConflict,
   RunningCount,
   SearchResult,
+  ServerSettings,
   SessionInfo,
   SessionList,
   SessionTotals,
@@ -272,3 +274,17 @@ export const exports_ = {
 
 export const health = () =>
   _request<{ status: string; storage_backend: string }>(`/health`);
+
+// ---- settings -------------------------------------------------------------
+
+export const settings = {
+  server: () => _request<ServerSettings>(`/v1/settings/server`),
+  llm: () => _request<LlmSettings>(`/v1/settings/llm`),
+  /** Patch the LLM overlay. Pass `null` for a field to clear that
+   *  override and fall back to the .env / default. */
+  updateLlm: (patch: Record<string, string | number | null>) =>
+    _request<LlmSettings>(`/v1/settings/llm`, {
+      method: "PUT",
+      body: JSON.stringify({ patch, replace: false }),
+    }),
+};

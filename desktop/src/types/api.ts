@@ -227,3 +227,40 @@ export interface AnswerEventData {
 export interface ApiErrorBody {
   detail?: string | Record<string, unknown>;
 }
+
+// ---- settings -------------------------------------------------------------
+
+export interface ServerSettings {
+  app_env: string;
+  marginalia_home: string;
+  db_backend: string;
+  storage_backend: string;
+  worker_enabled: boolean;
+  default_on_conflict: string;
+  agent_plan_max_tokens: number;
+  agent_execute_max_tokens: number;
+  vision_profile_configured: boolean;
+}
+
+export type LlmProfileName =
+  | "chat" | "reflect" | "ingest" | "vision" | "audio";
+
+export interface LlmProfileResolved {
+  provider: string;
+  api_key: string | null;
+  api_key_set: boolean;
+  base_url: string | null;
+  model: string;
+}
+
+export interface LlmSettings {
+  profiles: Record<LlmProfileName, LlmProfileResolved>;
+  overlay: Record<string, string | number | null>;
+  defaults: {
+    provider: string;
+    model: string;
+    base_url: string | null;
+    api_key: string | null;
+    api_key_set: boolean;
+  };
+}
