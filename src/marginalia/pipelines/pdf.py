@@ -81,7 +81,9 @@ You receive the full text of a PDF, page-by-page. Produce a structured
 index that lets a downstream agent decide whether to retrieve the document
 and find the relevant page.
 
-`summary` (2-4 sentences in the document's own language) is content-focused.
+`summary` is one or two sentences (≤60 中文字 / ≤30 English words) in the
+document's own language — the spine of what the document is and why a
+reader would open it. Keep it tight; depth belongs in `description`.
 `description` is a free-text walk-through of the document's structure and
 key points. `sections` lists every meaningful section/heading; each line
 takes the form `id | <pages X-Y> | title | one-or-two-sentence summary |

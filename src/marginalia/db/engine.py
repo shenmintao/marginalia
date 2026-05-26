@@ -26,6 +26,13 @@ def _build_engine(settings: Settings) -> AsyncEngine:
             cursor.execute("PRAGMA journal_mode=WAL")
             cursor.execute("PRAGMA foreign_keys=ON")
             cursor.execute("PRAGMA synchronous=NORMAL")
+            # WAL allows readers + one writer concurrently, but a second
+            # writer (e.g. another worker committing audit_events while
+            # ingest_file commits its own) gets SQLITE_BUSY immediately
+            # unless busy_timeout is set. 5s of patient retry is plenty
+            # for our writer cadence and stops "database is locked" from
+            # killing background tasks.
+            cursor.execute("PRAGMA busy_timeout=5000")
             cursor.close()
 
         return engine

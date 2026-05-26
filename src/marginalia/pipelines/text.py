@@ -61,7 +61,9 @@ Your job: read a single text document and produce a structured index that lets
 a downstream agent decide whether to retrieve it, and once retrieved, jump to
 the relevant section by anchor.
 
-`summary` (2-4 sentences in the document's own language) is content-focused.
+`summary` is one or two sentences (≤60 中文字 / ≤30 English words) in the
+document's own language — the spine of what the document is and why a
+reader would open it. Keep it tight; depth belongs in `description`.
 `description` is a free-text walk-through of what the document covers and how
 it is organised — multi-paragraph if useful. `sections` lists every meaningful
 heading or logical chunk; each line takes the form

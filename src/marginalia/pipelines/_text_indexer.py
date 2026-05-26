@@ -34,7 +34,9 @@ Your job: read a single document and produce a structured index that
 lets a downstream agent decide whether to retrieve it, and once
 retrieved, jump to the relevant section by anchor.
 
-`summary` (2-4 sentences in the document's own language) is content-focused.
+`summary` is one or two sentences (≤60 中文字 / ≤30 English words) in the
+document's own language — the spine of what the document is and why a
+reader would open it. Keep it tight; depth belongs in `description`.
 `description` is a free-text walk-through of the document's organisation —
 multi-paragraph if useful. `sections` lists every meaningful heading or
 logical chunk; each line: `id | <heading-path or lines X-Y> | title |
@@ -74,7 +76,12 @@ async def index_extracted_text(
     )
 
     client = get_chat_client("ingest")
-    max_out = min(8192, max(2048, len(body) // 8))
+    # Budget covers reasoning + output. qwen3.6-plus and similar reasoning
+    # models routinely burn 4-6k tokens on internal CoT before emitting
+    # anything; a 2-3k cap leaves nothing for the actual <summary>/<sections>
+    # block and the response comes back empty. Floor at 8k, scale up to 16k
+    # for long bodies.
+    max_out = min(16384, max(8192, len(body) // 8))
 
     resp = await client.complete(ChatRequest(
         system=INDEXER_SYSTEM,

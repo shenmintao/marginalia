@@ -102,8 +102,9 @@ IMAGE_PIPELINE_SYSTEM = """You are Marginalia's image indexer.
 Your job: look at one image and produce a structured index that lets a
 downstream agent decide whether to retrieve it.
 
-`summary` (2-4 sentences in the user's likely language) describes the
-image content. `description` is a free-text walk-through of what the
+`summary` is one or two sentences (≤60 中文字 / ≤30 English words) in the
+user's likely language — the spine of what the image is. Keep it tight;
+detail belongs in `description`. `description` is a free-text walk-through of what the
 image shows — visible text, key objects, layout — multi-paragraph if
 useful. `extra` carries machine-friendly insights as `key: value` lines
 (one per line; keys like `primary_color`, `detected_text_lang`,

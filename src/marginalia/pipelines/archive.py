@@ -100,8 +100,9 @@ files inside an archive (zip / tar / 7z / rar / .gz / etc.). Produce a
 structured index that lets a downstream agent decide whether to retrieve
 the archive and find the relevant inner file.
 
-`summary` (2-4 sentences in the dominant language) describes what the
-archive contains and what kind of artefact it looks like. `description`
+`summary` is one or two sentences (≤60 中文字 / ≤30 English words) in the
+dominant language — the spine of what the archive contains and what kind
+of artefact it looks like. Keep it tight; depth belongs in `description`. `description`
 is a free-text walk-through of the archive's organisation — directory
 layout, notable subprojects, anything that helps the agent navigate.
 

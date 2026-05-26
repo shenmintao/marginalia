@@ -44,6 +44,7 @@ _TAG_RE = re.compile(
     r"<\s*(?P<name>[a-z_][a-z0-9_]*)\s*>(?P<body>.*?)<\s*/\s*(?P=name)\s*>",
     re.IGNORECASE | re.DOTALL,
 )
+_OPEN_TAG_RE = re.compile(r"<\s*(?P<name>[a-z_][a-z0-9_]*)\s*>", re.IGNORECASE)
 _FENCE_RE = re.compile(r"^```[a-zA-Z0-9_-]*\n|\n```$", re.MULTILINE)
 
 
@@ -52,12 +53,30 @@ def parse_tagged(text: str) -> dict[str, str]:
 
     Repeated tags: the LAST occurrence wins. Reasoning models often
     "draft then refine" — the second pass is what we want.
+
+    Truncation tolerance: if the model hits `max_tokens` mid-tag and the
+    last block is left unclosed (e.g. `<summary>...EOF`), we recover its
+    body from open-tag-to-EOF. We'd rather use the partial summary the
+    model produced than fail the whole ingest and re-bill the run.
     """
+    text = text or ""
     out: dict[str, str] = {}
-    for m in _TAG_RE.finditer(text or ""):
+    last_end = 0
+    for m in _TAG_RE.finditer(text):
         body = m.group("body").strip()
         body = _FENCE_RE.sub("", body).strip()
         out[m.group("name").lower()] = body
+        last_end = m.end()
+
+    tail = text[last_end:]
+    open_match: re.Match[str] | None = None
+    for m in _OPEN_TAG_RE.finditer(tail):
+        open_match = m  # rightmost wins
+    if open_match is not None:
+        name = open_match.group("name").lower()
+        body = _FENCE_RE.sub("", tail[open_match.end():]).strip()
+        if body:
+            out[name] = body
     return out
 
 
@@ -207,7 +226,8 @@ def render_format_hint(*, kinds: tuple[str, ...] | None = None) -> str:
         )
     return (
         "Output format — use these tags, in any order, in plain text:\n"
-        "  <summary>2-4 sentences of prose.</summary>\n"
+        "  <summary>1-2 sentences (≤60 中文字 / ≤30 English words). "
+        "The spine of the document, not a retell.</summary>\n"
         "  <description>free-form prose; multi-paragraph OK.</description>"
         + kind_hint + "\n"
         "  <extra>\n"
