@@ -12,6 +12,7 @@ import { useEffect, useState, useCallback } from "react";
 import {
   ChevronDown, ChevronRight, Folder as FolderIcon, FolderOpen,
   FileText, Loader2, Plus, Upload as UploadIcon, Download, RefreshCw, Trash2,
+  AlertTriangle,
 } from "lucide-react";
 
 import { folders, fileEntries, files, ApiError } from "@/api/client";
@@ -305,10 +306,14 @@ function FileRow({ entry, depth, selected, ingesting, onClick, onDeleted }: {
 }) {
   const [reprocessing, setReprocessing] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const failed = entry.ingest_status === "failed";
   const onReprocess = async (e: React.MouseEvent) => {
     e.stopPropagation();
     if (reprocessing || ingesting) return;
-    if (!confirm(`Re-run AI analysis on "${entry.display_name}"?\n\nThis clears the existing summary and tags, then re-ingests with the current LLM.`)) {
+    const prompt = failed
+      ? `Retry AI analysis on "${entry.display_name}"?\n\nThe previous ingest failed. This re-runs with the current LLM.`
+      : `Re-run AI analysis on "${entry.display_name}"?\n\nThis clears the existing summary and tags, then re-ingests with the current LLM.`;
+    if (!confirm(prompt)) {
       return;
     }
     setReprocessing(true);
@@ -351,13 +356,25 @@ function FileRow({ entry, depth, selected, ingesting, onClick, onDeleted }: {
       >
         <FileText size={12} className="shrink-0 text-fg-subtle" />
         <span className="flex-1 truncate">{entry.display_name}</span>
+        {failed && (
+          <AlertTriangle
+            size={11}
+            className="shrink-0 text-danger"
+            aria-label="ingest failed"
+          />
+        )}
       </button>
       {ingesting && <Loader2 size={11} className="shrink-0 animate-spin text-fg-subtle" />}
       <button
         onClick={onReprocess}
         disabled={reprocessing || ingesting}
-        title="Re-run AI analysis"
-        className="hidden shrink-0 rounded p-0.5 text-fg-subtle hover:bg-bg-base hover:text-fg-base group-hover:flex disabled:opacity-50"
+        title={failed ? "Retry AI analysis (previous run failed)" : "Re-run AI analysis"}
+        className={cn(
+          "shrink-0 rounded p-0.5 disabled:opacity-50",
+          failed
+            ? "flex text-danger hover:bg-bg-base hover:text-danger"
+            : "hidden text-fg-subtle hover:bg-bg-base hover:text-fg-base group-hover:flex",
+        )}
       >
         {reprocessing
           ? <Loader2 size={11} className="animate-spin" />

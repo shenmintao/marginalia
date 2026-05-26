@@ -4,7 +4,7 @@ Caller owns the transaction.
 """
 from __future__ import annotations
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from marginalia.db.models import File, FileEntry
@@ -157,6 +157,36 @@ async def list_live_entry_ids_for_file(
                 FileEntry.file_id == file_id,
                 FileEntry.deleted_at.is_(None),
             )
+        )
+    ).scalars().all()
+    return list(rows)
+
+
+async def find_low_quality(
+    db: AsyncSession, *, min_summary_chars: int, limit: int,
+) -> list[str]:
+    """Live, already-ingested file ids whose summary is empty or shorter
+    than `min_summary_chars`. Oldest-ingested first so the periodic
+    self-heal makes steady forward progress instead of thrashing the
+    same recent file. Used by periodic_tick._dispatch_reprocess_low_quality.
+
+    `ingested_at IS NOT NULL` filters out files mid-pipeline — those will
+    set their summary on this run; we only want files that already
+    finished and produced a poor result.
+    """
+    rows = (
+        await db.execute(
+            select(File.id)
+            .where(
+                File.deleted_at.is_(None),
+                File.ingested_at.is_not(None),
+                or_(
+                    File.summary.is_(None),
+                    func.length(func.coalesce(func.trim(File.summary), "")) < min_summary_chars,
+                ),
+            )
+            .order_by(File.ingested_at.asc())
+            .limit(limit)
         )
     ).scalars().all()
     return list(rows)

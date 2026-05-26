@@ -154,7 +154,9 @@ function ProfileRow({ name, data, isOpen, onToggle, onChange }: RowProps) {
           {overrideCount > 0
             ? `${overrideCount} override${overrideCount > 1 ? "s" : ""}`
             : optional
-              ? "not configured"
+              ? profile.model || profile.api_key_set
+                ? "from .env"
+                : "not configured"
               : "inherited"}
         </span>
       </button>
@@ -168,7 +170,11 @@ function ProfileRow({ name, data, isOpen, onToggle, onChange }: RowProps) {
               className="w-full rounded border border-border bg-bg-base px-2 py-1 text-sm"
             >
               <option value="">
-                {optional ? "(unset)" : `(inherit: ${data.defaults.provider})`}
+                {optional
+                  ? profile.provider
+                    ? `(from .env: ${profile.provider})`
+                    : "(unset)"
+                  : `(inherit: ${data.defaults.provider})`}
               </option>
               <option value="openai">openai</option>
               <option value="openai-compatible">openai-compatible</option>
@@ -180,7 +186,11 @@ function ProfileRow({ name, data, isOpen, onToggle, onChange }: RowProps) {
               value={form.model ?? ""}
               onChange={(e) => setForm({ ...form, model: e.target.value })}
               placeholder={
-                optional ? "(unset)" : `(inherit: ${data.defaults.model})`
+                optional
+                  ? profile.model
+                    ? `(from .env: ${profile.model})`
+                    : "(unset)"
+                  : `(inherit: ${data.defaults.model})`
               }
               className="w-full rounded border border-border bg-bg-base px-2 py-1 font-mono text-sm"
             />
@@ -191,7 +201,9 @@ function ProfileRow({ name, data, isOpen, onToggle, onChange }: RowProps) {
               onChange={(e) => setForm({ ...form, base_url: e.target.value })}
               placeholder={
                 optional
-                  ? "(unset)"
+                  ? profile.base_url
+                    ? `(from .env: ${profile.base_url})`
+                    : "(unset)"
                   : data.defaults.base_url || "(provider default)"
               }
               className="w-full rounded border border-border bg-bg-base px-2 py-1 font-mono text-sm"

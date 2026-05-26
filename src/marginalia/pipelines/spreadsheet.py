@@ -54,7 +54,7 @@ class SpreadsheetPipeline(Pipeline):
         storage: StorageBackend,
     ) -> PipelineResult:
         body = await self._extract_text(storage, ctx.storage_key)
-        return await index_extracted_text(body, ctx, kind="spreadsheet")
+        return await index_extracted_text(body, ctx, kind="table")
 
     async def read_segment(
         self,
