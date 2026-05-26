@@ -120,6 +120,7 @@ export function LibraryPage() {
             }
             triggerRefresh();
           }}
+          onClearSelection={clearSelection}
         />
       </div>
 

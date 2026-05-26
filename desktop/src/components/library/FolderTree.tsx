@@ -40,6 +40,7 @@ interface Props {
   onNewFolderHere: (parentId: string | null) => void;
   onEntryDeleted: (entryId: string) => void;
   onFolderDeleted: (folderId: string) => void;
+  onClearSelection: () => void;
 }
 
 export function FolderTree(props: Props) {
@@ -117,7 +118,13 @@ export function FolderTree(props: Props) {
           </button>
         </div>
       </div>
-      <div className="flex-1 overflow-y-auto px-1 py-2 text-sm">
+      <div
+        className="flex-1 overflow-y-auto px-1 py-2 text-sm"
+        onClick={(e) => {
+          // Click on bare scroll area (not a row) clears selection.
+          if (e.target === e.currentTarget) props.onClearSelection();
+        }}
+      >
         {err && <p className="px-2 text-xs text-danger">{err}</p>}
         {roots === null && !err && (
           <p className="px-2 text-xs text-fg-subtle">loading…</p>
@@ -157,6 +164,7 @@ function FolderRow({
   refreshKey,
   onUploadHere, onNewFolderHere,
   onEntryDeleted, onFolderDeleted,
+  onClearSelection,
 }: { folder: Folder; depth: number } & Props) {
   const [open, setOpen] = useState(false);
   const [children, setChildren] = useState<Folder[] | null>(null);
@@ -270,6 +278,7 @@ function FolderRow({
               onNewFolderHere={onNewFolderHere}
               onEntryDeleted={onEntryDeleted}
               onFolderDeleted={(id) => { loadDetail(); onFolderDeleted(id); }}
+              onClearSelection={onClearSelection}
             />
           ))}
           {entries?.map((e) => (
