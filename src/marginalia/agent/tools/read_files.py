@@ -80,6 +80,13 @@ SCHEMA: dict[str, Any] = {
                                 "max_matches": {"type": "integer", "minimum": 1},
                                 # container
                                 "member_path": {"type": "string"},
+                                # VLM-on-read: required when reading an
+                                # image entry or a PDF flagged as
+                                # OCR-only at ingest. The pipeline sends
+                                # the original image / requested pages
+                                # to the vision model with this question
+                                # and returns the targeted answer.
+                                "question": {"type": "string", "minLength": 1},
                             },
                         },
                     },
@@ -98,8 +105,11 @@ SCHEMA: dict[str, Any] = {
         "pipeline understands (offset/max_chars for any file; "
         "page_start/page_end for PDF; line_start/line_end / section_id / "
         "heading for text; pattern for regex search; member_path for "
-        "container members). Use AFTER read_entries_metadata identified "
-        "relevant sections."
+        "container members). For image entries and PDFs that were "
+        "OCR-indexed at ingest, pass `question` — the pipeline sends the "
+        "image / rendered pages to the vision model and returns a "
+        "targeted answer instead of frozen ingest-time text. Use AFTER "
+        "read_entries_metadata identified relevant sections."
     ),
     schema=SCHEMA,
 )

@@ -207,10 +207,24 @@ class ImagePipeline(Pipeline):
         args: dict[str, Any],
         storage: StorageBackend,
     ) -> SegmentResult:
-        """Images don't have a text body. read_segment renders the
-        ingested description as text — summary plus per-region notes —
-        so the agent can quote from it. Generic offset/max_chars still
-        apply for chunked reads of long descriptions."""
+        """Two modes, picked by whether `args["question"]` is set.
+
+        With `question`: send the original image (downscaled) to the VLM
+        with the agent's question and return the VLM's targeted answer.
+        This is the right shape — an image's "body" is the image itself,
+        and the ingest-time summary is a frozen high-level index, not a
+        substitute for actually looking at the picture when the agent
+        has a specific question.
+
+        Without `question`: fall back to rendering the persisted summary
+        + description as text. Generic offset / max_chars apply for
+        chunked reads of long descriptions.
+        """
+        question = (args.get("question") or "").strip() if isinstance(args, dict) else ""
+        if question:
+            return await self._answer_with_vlm(
+                file_row=file_row, question=question, storage=storage,
+            )
         body = _render_image_description(file_row)
         offset = max(0, int(args.get("offset") or 0))
         max_chars = int(args.get("max_chars") or 8000)
@@ -231,6 +245,57 @@ class ImagePipeline(Pipeline):
         if not chunk:
             return SegmentResult(text="", error="empty result", extras=extras)
         return SegmentResult(text=chunk, extras=extras)
+
+    async def _answer_with_vlm(
+        self,
+        *,
+        file_row: Any,
+        question: str,
+        storage: StorageBackend,
+    ) -> SegmentResult:
+        if not has_vision_profile():
+            return SegmentResult(error=(
+                "image read with `question` requires the `vision` LLM "
+                "profile; configure it or omit `question` to fall back "
+                "to the persisted description"
+            ), extras={"kind": "image"})
+        try:
+            body = await self._read_bytes(storage, file_row.storage_key)
+        except Exception as exc:  # noqa: BLE001
+            return SegmentResult(error=f"image read failed: {exc}",
+                                 extras={"kind": "image"})
+        scaled, media_type = downscale_for_vlm(body)
+        b64 = base64.b64encode(scaled).decode("ascii")
+        client = get_chat_client("vision")
+        try:
+            resp = await client.complete(ChatRequest(
+                system=(
+                    "You are looking at one image and answering the user's "
+                    "specific question about it. Be concise, ground every "
+                    "claim in what is visible. If the question can't be "
+                    "answered from the image alone, say so plainly."
+                ),
+                messages=[ChatMessage(role="user", content=[
+                    TextBlock(text=f"Question: {question}"),
+                    ImageBlock(media_type=media_type, data_b64=b64),
+                ])],
+                max_tokens=1024,
+                temperature=0.2,
+            ))
+        except Exception as exc:  # noqa: BLE001
+            return SegmentResult(error=f"VLM call failed: {exc}",
+                                 extras={"kind": "image"})
+        text = (resp.text or "").strip()
+        return SegmentResult(
+            text=text or "(VLM returned empty response)",
+            extras={
+                "kind": "image",
+                "vlm_used": True,
+                "question": question,
+                "bytes": len(body),
+                "scaled_bytes": len(scaled),
+            },
+        )
 
     async def read_segment_from_bytes(
         self,

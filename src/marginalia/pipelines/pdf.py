@@ -260,8 +260,138 @@ class PdfPipeline(Pipeline):
         args: dict[str, Any],
         storage: StorageBackend,
     ) -> SegmentResult:
+        """Two paths, picked by whether this PDF was OCR-indexed at
+        ingest and whether the agent passed `question`:
+
+        * description.ocr present + question set → render the requested
+          pages to JPEG and ask the VLM the question directly. The
+          ingest-time OCR text was lossy by definition; for an actual
+          query, sending pixels to the VLM is closer to what was
+          originally on the page.
+        * description.ocr present + no question → return a clean error
+          telling the agent to pass `question`. We refuse to fall back
+          to pypdf text extraction here because for OCR PDFs that
+          extraction is empty, and silently returning empty text just
+          wastes a turn.
+        * otherwise (text-layer PDFs) → existing behaviour: pypdf text
+          extraction + page/pattern slicing.
+        """
+        is_ocr_pdf = _file_was_ocr_indexed(file_row)
+        question = (args.get("question") or "").strip() if isinstance(args, dict) else ""
+        if is_ocr_pdf:
+            if not question:
+                return SegmentResult(error=(
+                    "this PDF was OCR-indexed at ingest; pass `question` "
+                    "to query specific pages via the vision model — text "
+                    "extraction would be empty"
+                ), extras={"kind": "pdf", "ocr_indexed": True})
+            return await self._answer_with_vlm(
+                file_row=file_row, question=question, args=args, storage=storage,
+            )
         pdf_bytes = await self._read_bytes(storage, file_row.storage_key)
         return self._slice(pdf_bytes, args)
+
+    async def _answer_with_vlm(
+        self,
+        *,
+        file_row: Any,
+        question: str,
+        args: dict[str, Any],
+        storage: StorageBackend,
+    ) -> SegmentResult:
+        """Render the requested page range to JPEGs and ask the VLM."""
+        if not has_vision_profile():
+            return SegmentResult(error=(
+                "OCR PDF read with `question` requires the `vision` LLM "
+                "profile; configure it before retrying"
+            ), extras={"kind": "pdf", "ocr_indexed": True})
+        try:
+            pdf_bytes = await self._read_bytes(storage, file_row.storage_key)
+        except Exception as exc:  # noqa: BLE001
+            return SegmentResult(error=f"PDF read failed: {exc}",
+                                 extras={"kind": "pdf"})
+
+        # Page selection: explicit page_start/page_end if given, else
+        # OCR_MAX_PAGES from the start (matches ingest-time coverage).
+        try:
+            from pypdf import PdfReader
+            total_pages = len(PdfReader(io.BytesIO(pdf_bytes)).pages)
+        except Exception:  # noqa: BLE001
+            total_pages = 0
+        ps_arg = args.get("page_start")
+        pe_arg = args.get("page_end")
+        if ps_arg:
+            try:
+                ps = max(1, int(ps_arg))
+                pe = int(pe_arg) if pe_arg else ps
+                pe = max(ps, pe)
+            except (TypeError, ValueError):
+                return SegmentResult(error="page_start/page_end must be integers")
+        else:
+            ps, pe = 1, min(total_pages or OCR_MAX_PAGES, OCR_MAX_PAGES)
+        # Cap span at OCR_MAX_PAGES to keep the VLM call bounded.
+        pe = min(pe, ps + OCR_MAX_PAGES - 1)
+
+        # Render pages [1..pe], then drop everything before ps. The
+        # underlying renderer takes a leading page_count, so we render
+        # up to pe and slice — the cost difference vs adding a start
+        # offset to the helper isn't worth a signature change here.
+        try:
+            jpegs_all = await asyncio.to_thread(
+                _render_pdf_pages_to_jpeg, pdf_bytes, pe,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return SegmentResult(error=f"PDF render failed: {exc}",
+                                 extras={"kind": "pdf"})
+        jpegs = jpegs_all[ps - 1: pe]
+        if not jpegs:
+            return SegmentResult(error="no pages rendered",
+                                 extras={"kind": "pdf"})
+
+        content: list[Any] = [TextBlock(text=(
+            f"Question: {question}\n\n"
+            f"You are looking at pages {ps}-{ps + len(jpegs) - 1} of a "
+            f"scanned PDF. Answer the question concisely, ground every "
+            f"claim in what is visible, cite the page number when useful. "
+            f"If the answer isn't on these pages, say so plainly."
+        ))]
+        for offset, jpeg in enumerate(jpegs):
+            scaled, media_type = downscale_for_vlm(
+                jpeg, max_long_edge=OCR_VLM_MAX_LONG_EDGE,
+            )
+            content.append(TextBlock(text=f"Page {ps + offset}:"))
+            content.append(ImageBlock(
+                media_type=media_type,
+                data_b64=base64.b64encode(scaled).decode("ascii"),
+            ))
+
+        client = get_chat_client("vision")
+        try:
+            resp = await client.complete(ChatRequest(
+                system=(
+                    "You answer questions about scanned document pages. "
+                    "Be concise and ground every claim in what is visible."
+                ),
+                messages=[ChatMessage(role="user", content=content)],
+                max_tokens=2048,
+                temperature=0.2,
+            ))
+        except Exception as exc:  # noqa: BLE001
+            return SegmentResult(error=f"VLM call failed: {exc}",
+                                 extras={"kind": "pdf", "ocr_indexed": True})
+        text = (resp.text or "").strip()
+        return SegmentResult(
+            text=text or "(VLM returned empty response)",
+            extras={
+                "kind": "pdf",
+                "ocr_indexed": True,
+                "vlm_used": True,
+                "question": question,
+                "page_start": ps,
+                "page_end": ps + len(jpegs) - 1,
+                "pages_sent": len(jpegs),
+            },
+        )
 
     async def read_segment_from_bytes(
         self,
@@ -424,6 +554,17 @@ FIGURE_DESCRIBE_SYSTEM = (
 
 
 # ---- scanned-PDF OCR via VLM ---------------------------------------------
+
+def _file_was_ocr_indexed(file_row: Any) -> bool:
+    """True iff the ingest pipeline marked this PDF as OCR-only.
+
+    Set by `PdfPipeline.run` when the text-layer extraction came back
+    nearly empty and the VLM was used to reconstruct page text. Stored
+    as `description.ocr` (a dict carrying engine + page counts).
+    """
+    desc = getattr(file_row, "description", None)
+    return isinstance(desc, dict) and isinstance(desc.get("ocr"), dict)
+
 
 async def _ocr_pdf_pages(pdf_bytes: bytes, total_pages: int) -> list[str]:
     """Render the first OCR_MAX_PAGES pages to JPEG via pypdfium2,
