@@ -15,7 +15,6 @@
  */
 import "katex/dist/katex.min.css";
 
-import { useState } from "react";
 import { Check, Copy } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
@@ -28,6 +27,8 @@ import rehypeKatex from "rehype-katex";
 import type { Pluggable } from "unified";
 
 import { useTheme } from "@/lib/theme";
+import { processLatexBrackets } from "@/lib/markdown";
+import { useTemporaryValue } from "@/hooks/useTemporaryValue";
 import { cn } from "@/lib/utils";
 
 interface Props {
@@ -86,7 +87,7 @@ export function MarkdownView({ content, onEntryLink, className }: Props) {
           pre: ({ children }) => <>{children}</>,
         }}
       >
-        {content}
+        {processLatexBrackets(content)}
       </ReactMarkdown>
     </div>
   );
@@ -111,12 +112,11 @@ function CodeRenderer({
 
 function CodeBlock({ language, text }: { language: string; text: string }) {
   const { effective } = useTheme();
-  const [copied, setCopied] = useState(false);
+  const [copied, setCopied] = useTemporaryValue(false, 1500);
   const onCopy = async () => {
     try {
       await navigator.clipboard.writeText(text);
       setCopied(true);
-      window.setTimeout(() => setCopied(false), 1500);
     } catch { /* ignore — non-secure context, clipboard blocked, etc. */ }
   };
   return (
