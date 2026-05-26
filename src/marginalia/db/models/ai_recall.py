@@ -12,7 +12,6 @@ from typing import Any
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
-    DateTime,
     ForeignKey,
     Index,
     Integer,
@@ -23,7 +22,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
-from marginalia.db.models.base import Base, IdMixin
+from marginalia.db.models.base import Base, IdMixin, UtcDateTime
 from marginalia.db.models.enums import (
     ENTRY_RELATION_SOURCE_KINDS,
     JOURNAL_SOURCE_KINDS,
@@ -62,7 +61,7 @@ class EntryRelation(Base, IdMixin):
     )
     note: Mapped[str] = mapped_column(Text, nullable=False)
     source_kind: Mapped[str] = mapped_column(String(40), nullable=False)
-    last_observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_observed_at: Mapped[datetime] = mapped_column(UtcDateTime(), nullable=False)
     observation_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     # vetted: NULL = not yet judged by vet_relations; True/False = LLM verdict.
     # vetted_observation_count: snapshot of observation_count at vet time;
@@ -71,12 +70,12 @@ class EntryRelation(Base, IdMixin):
     vetted: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=None)
     vetted_reason: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     vetted_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True, default=None,
+        UtcDateTime(), nullable=True, default=None,
     )
     vetted_observation_count: Mapped[int | None] = mapped_column(
         Integer, nullable=True, default=None,
     )
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime(), nullable=False)
 
 
 class Journal(Base, IdMixin):
@@ -142,4 +141,4 @@ class Journal(Base, IdMixin):
     summarized_journal_ids: Mapped[Any | None] = mapped_column(
         JSON, nullable=True, default=None,
     )
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime(), nullable=False)

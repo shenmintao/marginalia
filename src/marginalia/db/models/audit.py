@@ -12,7 +12,6 @@ from typing import Any
 
 from sqlalchemy import (
     CheckConstraint,
-    DateTime,
     ForeignKey,
     Index,
     Integer,
@@ -23,7 +22,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
-from marginalia.db.models.base import Base, IdMixin
+from marginalia.db.models.base import Base, IdMixin, UtcDateTime
 from marginalia.db.models.enums import SESSION_END_REASONS, _in_clause
 
 
@@ -51,7 +50,7 @@ class AuditEvent(Base, IdMixin):
         Index("ix_audit_events_kind_occurred", "kind", "occurred_at"),
     )
 
-    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(UtcDateTime(), nullable=False)
     kind: Mapped[str] = mapped_column(String(64), nullable=False)
     session_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     conversation_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
@@ -78,11 +77,11 @@ class Session(Base, IdMixin):
         ),
     )
 
-    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    started_at: Mapped[datetime] = mapped_column(UtcDateTime(), nullable=False)
+    ended_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
     end_reason: Mapped[str | None] = mapped_column(String(16), nullable=True)
     deleted_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True, default=None,
+        UtcDateTime(), nullable=True, default=None,
     )
     initiating_user_message: Mapped[str] = mapped_column(Text, nullable=False)
     turn_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
@@ -119,8 +118,8 @@ class Conversation(Base, IdMixin):
         String(36), ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False
     )
     turn_index: Mapped[int] = mapped_column(Integer, nullable=False)
-    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    started_at: Mapped[datetime] = mapped_column(UtcDateTime(), nullable=False)
+    ended_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
     user_message: Mapped[str] = mapped_column(Text, nullable=False)
     agent_response: Mapped[str | None] = mapped_column(Text, nullable=True)
     tool_calls: Mapped[Any] = mapped_column(JSON, nullable=False, default=list)

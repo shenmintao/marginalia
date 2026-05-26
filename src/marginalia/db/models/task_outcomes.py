@@ -19,10 +19,10 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import DateTime, Index, JSON, String
+from sqlalchemy import Index, JSON, String
 from sqlalchemy.orm import Mapped, mapped_column
 
-from marginalia.db.models.base import Base, IdMixin
+from marginalia.db.models.base import Base, IdMixin, UtcDateTime
 
 
 class TaskOutcome(Base, IdMixin):
@@ -46,4 +46,4 @@ class TaskOutcome(Base, IdMixin):
     task_run_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     outcome: Mapped[str] = mapped_column(String(16), nullable=False)
     detail: Mapped[Any | None] = mapped_column(JSON, nullable=True)
-    completed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    completed_at: Mapped[datetime] = mapped_column(UtcDateTime(), nullable=False)

@@ -3,10 +3,10 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import CheckConstraint, JSON, DateTime, Index, Integer, String, Text
+from sqlalchemy import CheckConstraint, JSON, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
-from marginalia.db.models.base import Base, IdMixin
+from marginalia.db.models.base import Base, IdMixin, UtcDateTime
 from marginalia.db.models.enums import TASK_STATUSES, _in_clause
 
 
@@ -34,14 +34,14 @@ class Task(Base, IdMixin):
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=5)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    scheduled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    scheduled_at: Mapped[datetime] = mapped_column(UtcDateTime(), nullable=False)
     lease_expires_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
+        UtcDateTime(), nullable=True
     )
     last_heartbeat_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
+        UtcDateTime(), nullable=True
     )
     locked_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime(), nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)

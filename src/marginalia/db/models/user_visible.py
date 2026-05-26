@@ -7,7 +7,6 @@ from typing import Any
 from sqlalchemy import (
     BigInteger,
     CheckConstraint,
-    DateTime,
     ForeignKey,
     Index,
     Integer,
@@ -18,7 +17,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
-from marginalia.db.models.base import Base, IdMixin, TimestampMixin
+from marginalia.db.models.base import Base, IdMixin, TimestampMixin, UtcDateTime
 from marginalia.db.models.enums import (
     ENTRY_LIFECYCLES,
     FILE_KINDS,
@@ -41,7 +40,7 @@ class Folder(Base, IdMixin, TimestampMixin):
         String(36), ForeignKey("folders.id", ondelete="RESTRICT"), nullable=True, index=True
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
-    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
 
 
 class FileEntry(Base, IdMixin, TimestampMixin):
@@ -74,8 +73,8 @@ class FileEntry(Base, IdMixin, TimestampMixin):
         String(36), ForeignKey("catalogs.id", ondelete="SET NULL"), nullable=True
     )
     extra: Mapped[str | None] = mapped_column(Text, nullable=True)
-    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    purge_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
+    purge_after: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
 
 
 class File(Base, IdMixin, TimestampMixin):
@@ -114,5 +113,5 @@ class File(Base, IdMixin, TimestampMixin):
     extra: Mapped[str | None] = mapped_column(Text, nullable=True)
     # pending | processing | done | failed
     ingest_status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
-    ingested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ingested_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)

@@ -11,7 +11,6 @@ from typing import Any
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
-    DateTime,
     ForeignKey,
     Index,
     Integer,
@@ -22,7 +21,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
-from marginalia.db.models.base import Base, IdMixin, TimestampMixin
+from marginalia.db.models.base import Base, IdMixin, TimestampMixin, UtcDateTime
 from marginalia.db.models.enums import (
     ENTRY_TAG_SOURCES,
     TAG_FACETS,
@@ -60,7 +59,7 @@ class Catalog(Base, IdMixin, TimestampMixin):
     extra: Mapped[str | None] = mapped_column(Text, nullable=True)
     tags: Mapped[Any | None] = mapped_column(JSON, nullable=True)
     is_system: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
 
 
 class View(Base, IdMixin, TimestampMixin):
@@ -79,7 +78,7 @@ class View(Base, IdMixin, TimestampMixin):
     extra: Mapped[str | None] = mapped_column(Text, nullable=True)
     tags: Mapped[Any | None] = mapped_column(JSON, nullable=True)
     filter_spec: Mapped[Any] = mapped_column(JSON, nullable=False, default=dict)
-    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
 
 
 class Tag(Base, IdMixin, TimestampMixin):
@@ -104,9 +103,9 @@ class Tag(Base, IdMixin, TimestampMixin):
         String(36), ForeignKey("tags.id", ondelete="RESTRICT"), nullable=True
     )
     doc_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_used_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
     last_reaffirmed_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
+        UtcDateTime(), nullable=True
     )
     reaffirm_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
@@ -126,7 +125,7 @@ class TagAlias(Base, IdMixin):
         String(36), ForeignKey("tags.id", ondelete="CASCADE"), nullable=False
     )
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime(), nullable=False)
 
 
 class EntryTag(Base):
@@ -155,8 +154,8 @@ class EntryTag(Base):
         primary_key=True,
     )
     source: Mapped[str] = mapped_column(String(16), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime(), nullable=False)
     last_reaffirmed_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
+        UtcDateTime(), nullable=True
     )
     reaffirm_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
