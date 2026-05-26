@@ -19,6 +19,7 @@ from sqlalchemy import (
     Numeric,
     String,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -110,7 +111,19 @@ class Conversation(Base, IdMixin):
 
     __tablename__ = "conversations"
     __table_args__ = (
-        Index("ix_conversations_session_turn", "session_id", "turn_index"),
+        # Unique-constrained covering index: serves both the
+        # `WHERE session_id=? ORDER BY turn_index` lookups and the
+        # data-integrity invariant. Without this, two concurrent
+        # `run_turn` calls for the same session race on the
+        # `latest_turn_index() + 1` read-modify-write and silently
+        # write two rows with the same turn_index. The route layer
+        # also serialises with a per-session asyncio.Lock; this
+        # constraint is the database-level backstop that survives
+        # multi-process deploys (Postgres + multiple workers).
+        UniqueConstraint(
+            "session_id", "turn_index",
+            name="uq_conversations_session_turn",
+        ),
         Index("ix_conversations_started_at", "started_at"),
     )
 

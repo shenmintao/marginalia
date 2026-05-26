@@ -29,9 +29,12 @@ so ephemeral cache breakpoints stay valid):
   - Doom-loop guard: if the same (name, args) appears K times in the last
     N tool calls, the next tool result message gets a STOP nudge appended.
 
-Concurrency: this runtime assumes one in-flight turn per session. The API
-layer should serialise per-session turns or the conversation rows will
-race.
+Concurrency: this runtime assumes one in-flight turn per session. The
+HTTP route layer (api/routes_chat.py) enforces this with a per-session
+asyncio.Lock held for the whole SSE stream; the cross-process backstop
+is `UNIQUE(session_id, turn_index)` on `conversations`. Anything else
+calling `run_turn` directly (tests, scripts) MUST serialise per session
+or risk duplicate-row IntegrityError on the second writer.
 """
 from __future__ import annotations
 
@@ -169,7 +172,12 @@ async def run_turn(
 
     async with session_scope() as db:
         last = await session_service.latest_turn_index(db, session_id)
-        turn_index = (last or -1) + 1
+        # Explicit None check — `last or -1` would treat turn_index 0 as
+        # falsy and re-issue 0 for the second turn, colliding with the
+        # UNIQUE(session_id, turn_index) constraint. (Long-standing bug
+        # masked by the previous non-unique index; second turns silently
+        # overwrote turn 0 in any read that joined on (session, turn).)
+        turn_index = 0 if last is None else last + 1
 
         conv = await session_service.start_conversation(
             db, session_id=session_id, turn_index=turn_index,
