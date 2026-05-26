@@ -211,6 +211,13 @@ async def run_turn(
             data=await _rewrite_footnotes_for_display(no_plan_answer),
         )
     else:
+        # Resume: replay every prior turn into the executor's message
+        # tape so it sees the full session arc, not just the current
+        # question. Plan phase stays history-free — it's about scoping
+        # this turn, not remembering past ones.
+        resumed_history = await _build_resumed_messages(
+            session_id, current_conversation_id=conversation_id,
+        )
         async for ev in _run_execute_phase(
             chat=chat,
             system_prompt=execute_system,
@@ -219,6 +226,7 @@ async def run_turn(
             conversation_id=conversation_id,
             session_id=session_id,
             outcome=outcome,
+            resumed_history=resumed_history,
         ):
             yield ev
 
@@ -312,6 +320,86 @@ def _strip_leaked_no_plan(answer: str) -> str:
     if stripped.startswith(NO_PLAN_PREFIX):
         return stripped[len(NO_PLAN_PREFIX):].lstrip()
     return answer
+
+
+RESUME_BOUNDARY_NOTE = (
+    "（以上为本会话之前已完成的回合回放；接下来的 user 消息是新一轮真实输入，"
+    "请基于完整对话上下文继续调查与作答。）"
+)
+
+
+async def _build_resumed_messages(
+    session_id: str, *, current_conversation_id: str,
+) -> list[ChatMessage]:
+    """Reconstruct the LLM's prior conversation history for an open session.
+
+    Replays every prior turn — user message, every tool_call/tool_result
+    pair, and the final agent_response — so the executor sees the same
+    context it would have during the original turns. Synthesizes fresh
+    `tool_use_id`s per resumed turn (`tu_resume_<turn>_<idx>`); the model
+    only needs ToolUse↔ToolResult ids to be self-consistent within one
+    request, not stable across turns.
+
+    Closes with a Chinese boundary note (system-note in user-role since
+    the top-level `system` field is already pinned) so the model can
+    distinguish replayed history from the live new turn.
+
+    Cost: full backfill is the most token-expensive option but the most
+    faithful — agent sees every tool call it ran. If sessions grow long
+    we can swap this for a Q+A-only or sliding-window flavour later.
+    """
+    async with session_scope() as db:
+        rows = await session_service.list_for_session_ordered(db, session_id)
+
+    history: list[ChatMessage] = []
+    for conv in rows:
+        if conv.id == current_conversation_id:
+            continue
+        if not conv.user_message:
+            continue
+        history.append(ChatMessage(role="user", content=conv.user_message))
+
+        tool_calls = [tc for tc in (conv.tool_calls or []) if isinstance(tc, dict)]
+        if tool_calls:
+            assistant_blocks: list = []
+            tool_blocks: list[ToolResultBlock] = []
+            for idx, tc in enumerate(tool_calls):
+                tu_id = f"tu_resume_{conv.turn_index}_{idx}"
+                assistant_blocks.append(ToolUseBlock(
+                    id=tu_id,
+                    name=str(tc.get("name") or "tool"),
+                    arguments=dict(tc.get("arguments") or {}),
+                ))
+                result = tc.get("result")
+                err = tc.get("error")
+                if err:
+                    body = f"[error] {err}"
+                    is_error = True
+                elif isinstance(result, dict):
+                    try:
+                        body = json.dumps(result, ensure_ascii=False)
+                    except (TypeError, ValueError):
+                        body = str(result)
+                    is_error = False
+                else:
+                    body = str(result) if result is not None else ""
+                    is_error = False
+                if len(body) > MAX_TOOL_RESULT_LEN:
+                    body = body[:MAX_TOOL_RESULT_LEN] + "\n…[truncated on resume]"
+                tool_blocks.append(ToolResultBlock(
+                    tool_call_id=tu_id, content=body, is_error=is_error,
+                ))
+            history.append(ChatMessage(role="assistant", content=assistant_blocks))
+            history.append(ChatMessage(role="user", content=tool_blocks))
+
+        if conv.agent_response:
+            history.append(ChatMessage(
+                role="assistant", content=conv.agent_response,
+            ))
+
+    if history:
+        history.append(ChatMessage(role="user", content=RESUME_BOUNDARY_NOTE))
+    return history
 
 
 async def _run_plan_phase(
@@ -427,6 +515,7 @@ async def _run_execute_phase(
     conversation_id: str,
     session_id: str,
     outcome: _ExecuteOutcome,
+    resumed_history: list[ChatMessage] | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Execute loop as event stream.
 
@@ -435,12 +524,17 @@ async def _run_execute_phase(
     instead of mixed into the stream — keeps the public event stream
     clean (no internal sentinels) and lets the caller branch on plain
     Python attributes.
+
+    `resumed_history` (when present) is the replayed prior-turns context
+    built by `_build_resumed_messages` and is prepended ahead of the
+    current turn's user message, with a boundary note baked in by the
+    builder.
     """
     tool_defs = all_tool_defs()
     ctx = ToolContext(session_id=session_id, conversation_id=conversation_id)
     guard = _CallGuard()
 
-    messages: list[ChatMessage] = [
+    messages: list[ChatMessage] = list(resumed_history or []) + [
         ChatMessage(role="user", content=user_message),
         ChatMessage(role="assistant", content=(
             "已制定计划：\n" + (plan_text or "(无具体计划，直接基于问题回答)")
