@@ -43,6 +43,7 @@ import json
 import logging
 import re
 import time
+import urllib.parse
 from collections import deque
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -374,173 +375,28 @@ async def _run_plan_phase(
 
 # ---- live-render footnote rewrite ----------------------------------------
 
-
-def _capture_locators(
-    tool_call: Any, locators: dict[str, dict[str, Any]],
-) -> None:
-    """Sniff `read_files` tool calls and stash the most recent segment
-    locator per entry into `locators`. Used as the C-style fallback when
-    the agent emits a citation footnote without an explicit `lines=`/`page=`.
-
-    Shape inside read_files args:
-        {"requests": [{"entry_id": "<uuid>", "reads": [{...}, ...]}]}
-    Each `reads[i]` carries pipeline-specific keys (see read_files SCHEMA):
-    text/markdown set `line_start` (+ optional `line_end`); PDF sets
-    `page_start` (+ optional `page_end`). We capture the LAST one because
-    if the agent reads multiple ranges then cites, the most recent read
-    is the closest in attention to the citation.
-    """
-    if getattr(tool_call, "name", None) != "read_files":
-        return
-    args = getattr(tool_call, "arguments", None) or {}
-    requests = args.get("requests") if isinstance(args, dict) else None
-    if not isinstance(requests, list):
-        return
-    for req in requests:
-        if not isinstance(req, dict):
-            continue
-        eid = req.get("entry_id")
-        reads = req.get("reads")
-        if not isinstance(eid, str) or not isinstance(reads, list) or not reads:
-            continue
-        for read in reads:
-            if not isinstance(read, dict):
-                continue
-            ls = read.get("line_start")
-            le = read.get("line_end")
-            ps = read.get("page_start")
-            pe = read.get("page_end")
-            try:
-                ls = int(ls) if ls is not None else None
-            except (TypeError, ValueError):
-                ls = None
-            try:
-                le = int(le) if le is not None else None
-            except (TypeError, ValueError):
-                le = None
-            try:
-                ps = int(ps) if ps is not None else None
-            except (TypeError, ValueError):
-                ps = None
-            try:
-                pe = int(pe) if pe is not None else None
-            except (TypeError, ValueError):
-                pe = None
-            if ls is not None:
-                value = f"{ls}-{le}" if le is not None and le > ls else str(ls)
-                locators[eid] = {"kind": "line", "value": value}
-            elif ps is not None:
-                value = f"{ps}-{pe}" if pe is not None and pe > ps else str(ps)
-                locators[eid] = {"kind": "page", "value": value}
-
-
-def _capture_locators_from_result(
-    tool_name: str, result: Any, locators: dict[str, dict[str, Any]],
-) -> None:
-    """Sniff `read_files` tool results and stash locators from `extras`.
-
-    Pipelines include position data (line_start/line_end, page_start/page_end,
-    paragraph_start/paragraph_end) in their SegmentResult extras. This
-    function extracts those from the tool result, complementing
-    _capture_locators which reads from tool-call args. The result extras are
-    authoritative — they reflect what the pipeline actually returned, even
-    when the LLM read by offset rather than explicit line/page ranges.
-    """
-    if tool_name != "read_files" or not isinstance(result, dict):
-        return
-    results = result.get("results")
-    if not isinstance(results, list):
-        return
-    for entry_result in results:
-        if not isinstance(entry_result, dict):
-            continue
-        eid = entry_result.get("entry_id")
-        if not isinstance(eid, str):
-            continue
-        reads = entry_result.get("reads") or []
-        for read_item in reads:
-            if not isinstance(read_item, dict):
-                continue
-            extras = read_item.get("extras")
-            if not isinstance(extras, dict):
-                continue
-            ls = extras.get("line_start")
-            le = extras.get("line_end")
-            ps = extras.get("page_start")
-            pe = extras.get("page_end")
-            para_s = extras.get("paragraph_start")
-            para_e = extras.get("paragraph_end")
-            try:
-                ls = int(ls) if ls is not None else None
-            except (TypeError, ValueError):
-                ls = None
-            try:
-                le = int(le) if le is not None else None
-            except (TypeError, ValueError):
-                le = None
-            try:
-                ps = int(ps) if ps is not None else None
-            except (TypeError, ValueError):
-                ps = None
-            try:
-                pe = int(pe) if pe is not None else None
-            except (TypeError, ValueError):
-                pe = None
-            try:
-                para_s = int(para_s) if para_s is not None else None
-            except (TypeError, ValueError):
-                para_s = None
-            try:
-                para_e = int(para_e) if para_e is not None else None
-            except (TypeError, ValueError):
-                para_e = None
-            if ls is not None:
-                value = f"{ls}-{le}" if le is not None and le > ls else str(ls)
-                locators[eid] = {"kind": "line", "value": value}
-            elif ps is not None:
-                value = f"{ps}-{pe}" if pe is not None and pe > ps else str(ps)
-                locators[eid] = {"kind": "page", "value": value}
-            elif para_s is not None:
-                value = f"{para_s}-{para_e}" if para_e is not None and para_e > para_s else str(para_s)
-                locators[eid] = {"kind": "line", "value": value}
-
-# Same shape as services/exports.py:_FOOTNOTE_RE — agent emits citation
-# defs as `[^a]: entry_id=<id>[, lines=...|page=...|section_id=...] - reason`.
-# For the live SSE answer we resolve the id to display_name and rewrite
-# to a user-friendly form. The persisted `agent_response` (and therefore
-# downstream exports) keep the raw form so the export parser still works.
+# Agent emits citation defs as:
+#     [^a]: entry_id=<id>, quote="<verbatim excerpt>" - reason   (text/md/code/docx)
+#     [^a]: entry_id=<id>, page=<n> - reason                     (pdf only)
 #
-# `<id>` accepts a full uuid OR a hex-only short prefix (>= 8 chars, dashes
-# optional). entries_repo.resolve_entry_id_prefix promotes the prefix to a
-# full uuid; ambiguous / unknown prefixes drop into the "(entry … unavailable)"
-# branch. Models routinely wrap the id (and locator value) in backticks
-# because they treat ids as inline code — `\`?` makes those backticks
-# optional so the rewrite still fires.
+# The GUI deep-links via `?q=<urlencoded>` for quote-bearing footnotes (a
+# DOM text search highlights the match) and `?page=<n>` for PDFs (the
+# browser PDF viewer scrolls). Legacy fields (`lines=`, `section_id=`,
+# descriptive `lines=...`) are still tolerated by the regex so historical
+# turns don't crash on replay/export, but they don't produce any query
+# string — the link opens the file without a jump.
 #
-# Locator group order matters: `lines=` (text/markdown) and `page=` (PDF)
-# are the new-style locators that the GUI deep-links on. `section_id=` is
-# the legacy form — captured but ignored for display, kept here so old
-# turns don't regress.
-#
-# IMPORTANT: `lines=` captures two forms:
-#   numeric:   `lines=10-30` or `lines=42` — deep-links to that line range
-#   descriptive: `lines=合同第4.6条` — no deep-link (GUI opens file
-#     without position jump) but the text is preserved for display.
-# When the LLM writes a descriptive locator instead of numeric, the
-# numeric group (3) doesn't match but the descriptive fallback (4) does.
-# The rewrite uses numeric for the `?line=` query param (deep-link);
-# descriptive text is shown inline but doesn't produce a query param.
-# The authoritative locator source is `_capture_locators` (tool-call
-# args), which always provides numeric values from `line_start`/`line_end`.
+# `<id>` accepts a full uuid or a hex-only short prefix (>= 8 chars).
+# Backticks around the id / page / quote are tolerated. Quote bodies use
+# `\"` and `\\` for embedded `"` and `\`.
 _LIVE_FOOTNOTE_RE = re.compile(
     r"^\[\^([^\]]+)\]:\s*entry_id\s*=\s*`?"
-    r"([0-9a-fA-F][0-9a-fA-F\-]{6,35})"
-    r"`?"
+    r"([0-9a-fA-F][0-9a-fA-F\-]{6,35})`?"
     r"(?:\s*,\s*(?:"
-    r"lines\s*=\s*`?([0-9]+(?:-[0-9]+)?)`?"             # numeric (group 3)
-    r"|lines\s*=\s*`?([^,\n`]+?)`?"                      # descriptive (group 4)
-    r"|page\s*=\s*`?([0-9]+(?:-[0-9]+)?)`?"              # numeric page (group 5)
-    r"|section_id\s*=\s*`?[^\s,`]+`?"
+    r'quote\s*=\s*"((?:[^"\\]|\\.)*)"'                  # group 3: quote
+    r"|page\s*=\s*`?([0-9]+(?:-[0-9]+)?)`?"             # group 4: page
+    r"|lines?\s*=\s*`?\S+`?"                             # legacy lines: tolerated
+    r"|section_id\s*=\s*`?[^\s,`]+`?"                   # legacy section_id: tolerated
     r"))*"
     r"(?:\s+\([^)]*\))?"
     r"(?:\s*[-—–]\s*(.+?))?"
@@ -549,21 +405,18 @@ _LIVE_FOOTNOTE_RE = re.compile(
 )
 
 
-async def _rewrite_footnotes_for_display(
-    answer: str,
-    locators: dict[str, dict[str, Any]] | None = None,
-) -> str:
-    """Resolve `[^a]: entry_id=<uuid>...` defs to `[^a]: [name](entry:<short>)...`.
+def _unescape_quote(s: str) -> str:
+    return s.replace(r"\"", '"').replace(r"\\", "\\")
 
-    Same logic as services/exports.py:render_inline_markdown but for live
-    streaming — looks up display_name in one DB round trip and rewrites
-    each definition. Missing entries fall back to `(entry <short> unavailable)`.
-    Body `[^a]` markers are untouched so GFM footnote linking still works.
 
-    `locators` is the per-turn read_segment fallback: { entry_id -> {kind, value} }.
-    Used only when the agent's footnote didn't carry an explicit `lines=` or
-    `page=`. The link is decorated with `?line=...` / `?page=...` so the GUI
-    routes deep into the right viewer position.
+async def _rewrite_footnotes_for_display(answer: str) -> str:
+    """Resolve `[^a]: entry_id=<uuid>, quote="..." | page=N - reason` defs to
+    `[^a]: [name](entry:<id>?q=...|?page=N) — reason` for live SSE rendering.
+
+    The persisted `agent_response` keeps the raw form so downstream exports
+    still parse. Missing/ambiguous ids fall back to `(entry <short> unavailable)`.
+    Legacy `lines=`/`section_id=` fields are tolerated but don't produce a
+    deep-link query string.
     """
     if not answer or "entry_id" not in answer:
         return answer
@@ -573,8 +426,6 @@ async def _rewrite_footnotes_for_display(
 
     raw_ids = list({m.group(2).strip() for m in matches})
     name_by_id: dict[str, str] = {}
-    # raw -> resolved-full-uuid so we can both look up display_name AND
-    # emit the canonical full id in the rewritten link href.
     resolved: dict[str, str] = {}
     try:
         async with session_scope() as db:
@@ -594,56 +445,28 @@ async def _rewrite_footnotes_for_display(
     def _replace(m: re.Match[str]) -> str:
         marker = m.group(1)
         raw_eid = m.group(2).strip()
-        numeric_lines = (m.group(3) or "").strip() or None
-        desc_lines = (m.group(4) or "").strip() or None
-        page_loc = (m.group(5) or "").strip() or None
-        reason = m.group(6).strip() if m.group(6) else None
+        quote = m.group(3)
+        page = (m.group(4) or "").strip() or None
+        reason = m.group(5).strip() if m.group(5) else None
 
-        # Resolved full uuid (or the raw input if resolution failed).
         full_eid = resolved.get(raw_eid, raw_eid)
-
-        # Fall back to the read_segment locator cache when the agent
-        # didn't write an explicit numeric locator. Try both raw and
-        # resolved keys. This is the authoritative source — tool-call
-        # args (line_start/line_end) are always numeric and correspond
-        # to actual file content positions.
-        if not numeric_lines and not page_loc and locators:
-            stash = locators.get(full_eid) or locators.get(raw_eid)
-            if stash:
-                kind = stash.get("kind")
-                value = stash.get("value")
-                if kind == "line" and value:
-                    numeric_lines = value
-                elif kind == "page" and value:
-                    page_loc = value
-
         short = full_eid[:8]
         name = name_by_id.get(full_eid)
         if name is None:
             head = f"(entry {short} unavailable)"
         else:
             qs = ""
-            # Only numeric lines/page produce a deep-link query param.
-            # Descriptive lines (e.g. "合同第4.6条") are shown inline
-            # but don't deep-link — GUI opens the file without position
-            # jump.
-            if numeric_lines:
-                qs = f"?line={numeric_lines}"
-            elif page_loc:
-                qs = f"?page={page_loc}"
-            # Build display text: include descriptive locator as inline
-            # annotation when it's present and not redundant with the
-            # numeric deep-link.
-            display_name = name
-            if desc_lines and not numeric_lines:
-                head = f"[{display_name} ({desc_lines})](entry:{full_eid})"
-            else:
-                head = f"[{display_name}](entry:{full_eid}{qs})"
+            if quote is not None:
+                qs = f"?q={urllib.parse.quote_plus(_unescape_quote(quote))}"
+            elif page:
+                qs = f"?page={page}"
+            head = f"[{name}](entry:{full_eid}{qs})"
         if reason:
             return f"[^{marker}]: {head} — {reason}"
         return f"[^{marker}]: {head}"
 
     return _LIVE_FOOTNOTE_RE.sub(_replace, answer)
+
 
 
 # ---- execute --------------------------------------------------------------
@@ -675,12 +498,6 @@ async def _run_execute_phase(
     tool_defs = all_tool_defs()
     ctx = ToolContext(session_id=session_id, conversation_id=conversation_id)
     guard = _CallGuard()
-    # Per-turn locator cache: when the agent calls `read_files` with
-    # `reads=[{start_line, end_line}]` (text/markdown) or `[{page}]` (PDF),
-    # we stash the latest read for each entry. _rewrite_footnotes_for_display
-    # consults this when the citation footnote didn't carry an explicit
-    # `lines=`/`page=` of its own. See module-level comment on Plan C.
-    locators: dict[str, dict[str, Any]] = {}
 
     messages: list[ChatMessage] = list(resumed_history or []) + [
         ChatMessage(role="user", content=user_message),
@@ -733,7 +550,6 @@ async def _run_execute_phase(
                 assistant_blocks.append(ToolUseBlock(
                     id=tc.id, name=tc.name, arguments=tc.arguments,
                 ))
-                _capture_locators(tc, locators)
             messages.append(ChatMessage(role="assistant", content=assistant_blocks))
 
             tool_result_blocks: list[ToolResultBlock] = []
@@ -743,7 +559,6 @@ async def _run_execute_phase(
                 conversation_id=conversation_id,
                 result_blocks=tool_result_blocks,
                 guard=guard,
-                locators=locators,
             ):
                 yield ev
             messages.append(ChatMessage(role="tool", content=tool_result_blocks))
@@ -756,7 +571,7 @@ async def _run_execute_phase(
             outcome.answer = answer
             yield AgentEvent(
                 event_type="answer",
-                data=await _rewrite_footnotes_for_display(answer, locators),
+                data=await _rewrite_footnotes_for_display(answer),
             )
             return
         if resp.stop_reason == "max_tokens":
@@ -765,7 +580,7 @@ async def _run_execute_phase(
             outcome.answer = answer
             yield AgentEvent(
                 event_type="answer",
-                data=await _rewrite_footnotes_for_display(answer, locators),
+                data=await _rewrite_footnotes_for_display(answer),
             )
             return
 
@@ -779,7 +594,7 @@ async def _run_execute_phase(
     outcome.answer = fallback
     yield AgentEvent(
         event_type="answer",
-        data=await _rewrite_footnotes_for_display(fallback, locators),
+        data=await _rewrite_footnotes_for_display(fallback),
     )
 
 
@@ -831,7 +646,6 @@ async def _dispatch_tool_calls(
     conversation_id: str,
     result_blocks: list[ToolResultBlock],
     guard: _CallGuard,
-    locators: dict[str, dict[str, Any]] | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Preflight + parallel execution + completion-order drain.
 
@@ -1095,11 +909,6 @@ async def _dispatch_tool_calls(
                     result=result, error=None,
                     duration_ms=duration_ms,
                 )
-                # Extract locators from read_files result extras so
-                # footnotes can deep-link even when the LLM read by
-                # offset rather than explicit line/page ranges.
-                if locators is not None:
-                    _capture_locators_from_result(tc.name, result, locators)
                 if user_only is not None:
                     yield AgentEvent(
                         event_type="user_artifact",

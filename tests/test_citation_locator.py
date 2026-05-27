@@ -1,26 +1,24 @@
-"""Pure-function tests for the citation locator pipeline.
+"""Pure-function tests for the citation locator pipeline (quote-based).
 
-The end-to-end agent test (test_agent_e2e.py) needs a real LLM stub and
-takes ~30s. These tests pin the two pieces that decide whether deep-link
-citations work at all — both pure functions:
+Footnotes the agent emits look like:
 
-  1. _LIVE_FOOTNOTE_RE: parses agent-emitted footnote defs
-       [^a]: entry_id=<uuid>, lines=10-40 - reason
-     into (marker, eid, lines_loc, page_loc, reason). Regression here
-     produces empty links so chat citations stop scrolling.
+  [^a]: entry_id=<uuid>, quote="<verbatim 10-60 char excerpt>" - reason
+  [^p]: entry_id=<uuid>, page=<n> - reason   # PDF only
 
-  2. _capture_locators(): sniffs read_files tool calls and remembers the
-     latest segment locator per entry. Used as the C-style fallback when
-     the agent forgets to write `lines=` / `page=`.
+`_LIVE_FOOTNOTE_RE` parses these. `_rewrite_footnotes_for_display` looks
+up the entry name and emits
 
-  3. _rewrite_footnotes_for_display(): the wiring of the two — explicit
-     locator wins, cache fills in, both missing leaves the link plain.
-     We patch the entry-name DB lookup to keep the test pure-Python.
+  [^a]: [name](entry:<uuid>?q=<urlencoded>) — reason
+  [^p]: [name](entry:<uuid>?page=<n>) — reason
+
+Legacy `lines=`/`section_id=` are still tolerated by the regex so old
+sessions don't crash on replay/export, but they produce no query string.
 """
 from __future__ import annotations
 
 import asyncio
 import sys
+import urllib.parse
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -38,51 +36,54 @@ def _import_runtime():
 
 def _check_regex():
     rt = _import_runtime()
+    # Group layout: 1=marker, 2=eid, 3=quote, 4=page, 5=reason
+    eid = "12345678-1234-1234-1234-123456789012"
     cases = [
-        # (line, expected_groups[1..])
-        # Group layout: 1=marker, 2=eid, 3=numeric_lines, 4=desc_lines,
-        # 5=page, 6=reason
+        # quote, simple
         (
-            "[^a]: entry_id=12345678-1234-1234-1234-123456789012, lines=10-40 - reason",
-            ("a", "12345678-1234-1234-1234-123456789012", "10-40", None, None, "reason"),
+            f'[^a]: entry_id={eid}, quote="合同第4.6条规定" - 论证 Y',
+            ("a", eid, "合同第4.6条规定", None, "论证 Y"),
         ),
+        # quote with embedded escaped double-quote
         (
-            "[^b]: entry_id=12345678-1234-1234-1234-123456789012, page=3 - reason",
-            ("b", "12345678-1234-1234-1234-123456789012", None, None, "3", "reason"),
+            f'[^b]: entry_id={eid}, quote="he said \\"yes\\"" - r',
+            ("b", eid, 'he said \\"yes\\"', None, "r"),
         ),
+        # page (PDF case)
         (
-            "[^c]: entry_id=12345678-1234-1234-1234-123456789012, lines=42 - single",
-            ("c", "12345678-1234-1234-1234-123456789012", "42", None, None, "single"),
+            f"[^c]: entry_id={eid}, page=3 - reason",
+            ("c", eid, None, "3", "reason"),
         ),
-        # legacy section_id still parses but contributes no locator
+        # backticks around uuid + page
         (
-            "[^d]: entry_id=12345678-1234-1234-1234-123456789012, section_id=s1 - reason",
-            ("d", "12345678-1234-1234-1234-123456789012", None, None, None, "reason"),
+            f"[^d]: entry_id=`{eid}`, page=`12` - r",
+            ("d", eid, None, "12", "r"),
+        ),
+        # short hex prefix
+        (
+            '[^e]: entry_id=019e63b9, quote="第三条" - r',
+            ("e", "019e63b9", "第三条", None, "r"),
         ),
         # bare entry_id, no locator, no reason
         (
-            "[^e]: entry_id=12345678-1234-1234-1234-123456789012",
-            ("e", "12345678-1234-1234-1234-123456789012", None, None, None, None),
+            f"[^f]: entry_id={eid}",
+            ("f", eid, None, None, None),
         ),
-        # backticks around uuid + lines (models often inline-code these)
+        # legacy lines= still parses (group 3/4 None) — tolerated for
+        # historical sessions, but no query string is emitted downstream
         (
-            "[^f]: entry_id=`12345678-1234-1234-1234-123456789012`, lines=`5-9` - r",
-            ("f", "12345678-1234-1234-1234-123456789012", "5-9", None, None, "r"),
+            f"[^g]: entry_id={eid}, lines=10-40 - r",
+            ("g", eid, None, None, "r"),
         ),
-        # short hex prefix (>= 8 chars)
+        # legacy section_id= same: tolerated but no query string
         (
-            "[^g]: entry_id=019e63b9, page=3 - r",
-            ("g", "019e63b9", None, None, "3", "r"),
+            f"[^h]: entry_id={eid}, section_id=s1 - r",
+            ("h", eid, None, None, "r"),
         ),
-        # 12-char prefix, no dashes
+        # legacy descriptive lines=
         (
-            "[^h]: entry_id=019e63b91234, lines=10-40 - r",
-            ("h", "019e63b91234", "10-40", None, None, "r"),
-        ),
-        # descriptive lines (contract clause reference, not numeric)
-        (
-            "[^i]: entry_id=0eda34edaf06, lines=合同第4.6条 / 第4.9条 - 年终奖以书面决定为准",
-            ("i", "0eda34edaf06", None, "合同第4.6条 / 第4.9条", None, "年终奖以书面决定为准"),
+            f"[^i]: entry_id={eid}, lines=合同第4.6条 - r",
+            ("i", eid, None, None, "r"),
         ),
     ]
     for line, expected in cases:
@@ -93,108 +94,17 @@ def _check_regex():
     print(f"[1] regex matched all {len(cases)} forms")
 
 
-def _check_capture_locators():
-    rt = _import_runtime()
-    locators: dict[str, dict] = {}
-
-    # text/markdown: line_start + line_end (matches read_files SCHEMA)
-    tc = SimpleNamespace(name="read_files", arguments={
-        "requests": [{
-            "entry_id": "ent-A",
-            "reads": [{"line_start": 10, "line_end": 40}],
-        }],
-    })
-    rt._capture_locators(tc, locators)
-    assert locators["ent-A"] == {"kind": "line", "value": "10-40"}, locators
-
-    # PDF: page_start (+ optional page_end)
-    tc2 = SimpleNamespace(name="read_files", arguments={
-        "requests": [{"entry_id": "ent-B", "reads": [{"page_start": 7}]}],
-    })
-    rt._capture_locators(tc2, locators)
-    assert locators["ent-B"] == {"kind": "page", "value": "7"}
-
-    # PDF range: page_start + page_end -> "3-5"
-    tc2b = SimpleNamespace(name="read_files", arguments={
-        "requests": [{
-            "entry_id": "ent-B2",
-            "reads": [{"page_start": 3, "page_end": 5}],
-        }],
-    })
-    rt._capture_locators(tc2b, locators)
-    assert locators["ent-B2"] == {"kind": "page", "value": "3-5"}
-
-    # multiple reads on same entry: latest wins (closest to citation in attention)
-    tc3 = SimpleNamespace(name="read_files", arguments={
-        "requests": [{
-            "entry_id": "ent-A",
-            "reads": [
-                {"line_start": 1, "line_end": 5},
-                {"line_start": 80, "line_end": 100},
-            ],
-        }],
-    })
-    rt._capture_locators(tc3, locators)
-    assert locators["ent-A"] == {"kind": "line", "value": "80-100"}
-
-    # single line (no line_end): emits "42" not "42-42"
-    tc4 = SimpleNamespace(name="read_files", arguments={
-        "requests": [{"entry_id": "ent-C", "reads": [{"line_start": 42}]}],
-    })
-    rt._capture_locators(tc4, locators)
-    assert locators["ent-C"] == {"kind": "line", "value": "42"}
-
-    # legacy field names that don't match the SCHEMA must not populate the
-    # cache — this is the regression that shipped in a57932e: the original
-    # implementation read start_line/end_line/page, none of which read_files
-    # actually accepts, so the fallback never fired.
-    locators_legacy: dict[str, dict] = {}
-    rt._capture_locators(
-        SimpleNamespace(name="read_files", arguments={
-            "requests": [{
-                "entry_id": "ent-legacy",
-                "reads": [{"start_line": 1, "end_line": 9, "page": 2}],
-            }],
-        }),
-        locators_legacy,
-    )
-    assert locators_legacy == {}, (
-        "non-schema field names must not capture", locators_legacy,
-    )
-
-    # non-read_files tool calls leave the cache alone
-    before = dict(locators)
-    rt._capture_locators(
-        SimpleNamespace(name="search_journal", arguments={"query": "q"}),
-        locators,
-    )
-    assert locators == before
-
-    # malformed args don't blow up
-    rt._capture_locators(
-        SimpleNamespace(name="read_files", arguments=None),
-        locators,
-    )
-    rt._capture_locators(
-        SimpleNamespace(name="read_files", arguments={"requests": "nope"}),
-        locators,
-    )
-    print("[2] _capture_locators handles all four pipelines + malformed input")
-
-
 async def _check_rewrite():
     rt = _import_runtime()
     eid = "12345678-1234-1234-1234-123456789012"
 
-    # Stub the DB lookup so this test is pure
     fake_entry = SimpleNamespace(id=eid, display_name="my-doc.md")
+    fake_file = SimpleNamespace(id="file-1", description={})
 
     async def fake_list_live(db, ids):
-        return [(fake_entry, None)] if eid in ids else []
+        return [(fake_entry, fake_file)] if eid in ids else []
 
     async def fake_resolve_prefix(db, raw):
-        # Mimic the real resolver: full uuid pass-through; 8-char hex
-        # prefix resolves to `eid`; anything else returns an error.
         if raw == eid:
             return eid, None
         cleaned = raw.replace("-", "").lower()
@@ -211,68 +121,66 @@ async def _check_rewrite():
     ), patch.object(
         rt.entries_repo, "resolve_entry_id_prefix", new=fake_resolve_prefix,
     ), patch.object(rt, "session_scope", new=fake_session_scope):
-        # 1. agent emitted explicit lines= -> link carries ?line=10-40
+        # 1. quote → ?q=<urlencoded>
         out = await rt._rewrite_footnotes_for_display(
-            f"answer body[^a]\n\n[^a]: entry_id={eid}, lines=10-40 - reason",
-            locators=None,
+            f'body[^a]\n\n[^a]: entry_id={eid}, quote="合同第4.6条规定" - reason',
         )
-        assert f"[my-doc.md](entry:{eid}?line=10-40)" in out, out
+        expected_q = urllib.parse.quote_plus("合同第4.6条规定")
+        assert f"[my-doc.md](entry:{eid}?q={expected_q})" in out, out
 
-        # 2. no explicit locator, but cache has one -> fallback fills it
+        # 2. page → ?page=<n>
         out = await rt._rewrite_footnotes_for_display(
-            f"body[^a]\n\n[^a]: entry_id={eid} - reason",
-            locators={eid: {"kind": "line", "value": "5-7"}},
+            f"body[^a]\n\n[^a]: entry_id={eid}, page=3 - reason",
         )
-        assert f"[my-doc.md](entry:{eid}?line=5-7)" in out, out
+        assert f"[my-doc.md](entry:{eid}?page=3)" in out, out
 
-        # 3. neither -> bare link, no querystring
+        # 3. quote with escaped embedded double-quote — \" unescapes to "
+        # before urlencoding so the GUI search target matches the source.
         out = await rt._rewrite_footnotes_for_display(
-            f"body[^a]\n\n[^a]: entry_id={eid} - reason",
-            locators={},
+            f'body[^a]\n\n[^a]: entry_id={eid}, quote="he said \\"yes\\"" - r',
         )
-        assert f"[my-doc.md](entry:{eid})" in out, out
-        assert "?line=" not in out
+        expected_q = urllib.parse.quote_plus('he said "yes"')
+        assert f"entry:{eid}?q={expected_q}" in out, out
 
-        # 4. explicit lines= beats cache (agent's intent wins)
+        # 4. legacy lines= → no query string (link opens file without jump)
         out = await rt._rewrite_footnotes_for_display(
             f"body[^a]\n\n[^a]: entry_id={eid}, lines=10-40 - r",
-            locators={eid: {"kind": "page", "value": "9"}},
         )
-        assert f"entry:{eid}?line=10-40" in out, out
-        assert "?page=" not in out
+        assert f"[my-doc.md](entry:{eid})" in out, out
+        assert "?q=" not in out and "?line=" not in out and "?page=" not in out
 
-        # 5. page= locator
+        # 5. legacy section_id= → no query string
         out = await rt._rewrite_footnotes_for_display(
-            f"body[^a]\n\n[^a]: entry_id={eid}, page=3 - r",
-            locators=None,
+            f"body[^a]\n\n[^a]: entry_id={eid}, section_id=s1 - r",
         )
-        assert f"entry:{eid}?page=3" in out, out
+        assert f"[my-doc.md](entry:{eid})" in out, out
+        assert "?q=" not in out
 
-        # 6. agent wrote an 8-char prefix instead of the full uuid. The
-        # rewrite path must promote the prefix to the canonical id and
-        # still resolve display_name + emit the full id in the link.
+        # 6. bare entry_id, no locator → bare link
         out = await rt._rewrite_footnotes_for_display(
-            f"body[^a]\n\n[^a]: entry_id=12345678, lines=10-40 - r",
-            locators=None,
+            f"body[^a]\n\n[^a]: entry_id={eid}",
         )
-        assert f"[my-doc.md](entry:{eid}?line=10-40)" in out, out
+        assert f"[my-doc.md](entry:{eid})" in out, out
 
-        # 7. unresolvable prefix -> "(entry … unavailable)" branch, no
-        # crash, no fake link.
+        # 7. 8-char prefix is promoted to full uuid in the link
         out = await rt._rewrite_footnotes_for_display(
-            "body[^a]\n\n[^a]: entry_id=deadbeef, lines=1-9 - r",
-            locators=None,
+            'body[^a]\n\n[^a]: entry_id=12345678, quote="abc" - r',
+        )
+        assert f"[my-doc.md](entry:{eid}?q=abc)" in out, out
+
+        # 8. unresolvable prefix → "(entry … unavailable)" branch, no link
+        out = await rt._rewrite_footnotes_for_display(
+            'body[^a]\n\n[^a]: entry_id=deadbeef, quote="x" - r',
         )
         assert "(entry deadbeef unavailable)" in out, out
         assert "entry:deadbeef" not in out
         assert "my-doc.md" not in out
 
-    print("[3] _rewrite_footnotes_for_display: explicit > cache > bare, page+line both work, prefix resolution works")
+    print("[2] _rewrite_footnotes_for_display: quote/page/legacy/prefix all wire correctly")
 
 
 def main():
     _check_regex()
-    _check_capture_locators()
     asyncio.run(_check_rewrite())
     print("\nALL CITATION LOCATOR CHECKS PASSED")
 
@@ -280,10 +188,6 @@ def main():
 # pytest entry points
 def test_regex():
     _check_regex()
-
-
-def test_capture_locators():
-    _check_capture_locators()
 
 
 def test_rewrite():

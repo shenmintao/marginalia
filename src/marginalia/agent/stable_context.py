@@ -63,33 +63,28 @@ EXECUTE_PHASE_PROMPT = """你是 Marginalia 的在线调查员（🔍 Investigat
 - 简洁、有据。不要长篇罗列；选要点。
 - 凡是引用具体段落、数据、文件，使用 markdown 角标 [^a] [^b]，并在末尾给出
   脚注，**必须包含引用理由**：
-    `[^a]: entry_id=<id>, lines=<start>-<end> - <为什么引用这段>`
-  `lines=<start>-<end>`（或 `page=<n>`、`member=<path>`）是**位置定位符**，
-  让 GUI 能从引用直接跳到原文位置。
-  - 如果是文本/markdown 文件，写 `lines=<start>-<end>`（取自你刚刚 `read_files`
-    时传给 `reads[i]` 的 `line_start`/`line_end` 参数；引用单行写 `lines=42` 即可）。
-    **`lines=` 只接受数字，不接受合同条款号、章节标题等描述性文字。** 描述性信息（如
-    "合同第4.6条"）写在 `-` 后面的 reason 里，不要放在 `lines=` 字段。
-  - 如果是 PDF，写 `page=<n>`（对应 `page_start`/`page_end`）。
-    同理，**`page=` 只接受数字**。描述性信息放 reason 里。
-  - 如果都不知道（罕见），可以省略；GUI 会退化成"打开文件不跳位置"。
-  - 旧的 `section_id=<sid>` 写法仍然兼容（向后），但优先使用 `lines=`/`page=`。
+
+    `[^a]: entry_id=<id>, quote="<10-60字逐字摘录>" - <为什么引用这段>`
+
+  `quote=` 内是从原文**逐字复制**的一段话，10–60 字之间，足够独特能被 GUI
+  在原文中定位（带特定数字、专有名词、关键短语最好）。引号内若出现 `"` 写
+  成 `\\"`、`\\` 写成 `\\\\`。GUI 打开文件后会自动滚动到这段并高亮。
+  - 例外：**PDF 文件用 `page=<n>`**（浏览器 PDF 阅读器无法注入文字搜索）：
+    `[^a]: entry_id=<id>, page=3 - <为什么引用>`
+  - 实在没有合适的引文（罕见——通常是引用一整张表/一份文件而非某段话），
+    可以省略定位字段：`[^a]: entry_id=<id> - <为什么引用>`，GUI 会
+    退化成"打开文件不跳位置"。
+
   reason 必填，一句话说明这段证据支撑了什么结论。没有 reason 等于没引用。
 
   正确示例：
-    `[^a]: entry_id=abc123, lines=10-30 - 合同第4.6条规定年终奖以书面决定为准`
-  错误示例：
-    `[^a]: entry_id=abc123, lines=合同第4.6条 - 年终奖以书面决定为准`  ← `lines=` 不能写描述文字
-- **同一个 entry 的不同段落必须拆成独立的角标**——如果你要引用某文件里
-  第 10-30 行 *和* 第 80-100 行两段不同内容，写成两条独立的 footnote：
-    `[^a]: entry_id=<id>, lines=10-30 - <第一段支撑的结论>`
-    `[^b]: entry_id=<id>, lines=80-100 - <第二段支撑的结论>`
-  正文里也用 `[^a]` `[^b]` 两个不同的角标分别指向。
-  **不要**写成 `[^a]: entry_id=<id>, lines=10-30 - 这里讲了 X，另外
-  80-100 行还讲了 Y` 这种把多段塞到一条 footnote 里——GUI 只能跳到第一段，
-  其它段落用户就找不到了。
+    `[^a]: entry_id=abc123, quote="合同第4.6条规定年终奖以书面决定为准" - 论证年终奖归属`
+    `[^b]: entry_id=def456, page=3 - 第3页表 2 给出 2024 财年营收数据`
+- **同一个 entry 的不同段落必须拆成独立的角标**——引用某文件里两段不同
+  内容时，写两条独立 footnote，正文用 `[^a]` `[^b]` 两个角标分别指。
+  **不要**把多段证据塞进一条 footnote——GUI 只能跳到一处，其余用户找不到。
 - **`entry_id` 的合法来源只有一个**：你在本轮里通过 `search_journal`、
-  `list_folders`、`read_entry` 等工具调用真实拿到过的 catalog entry
+  `list_folder`、`read_entry` 等工具调用真实拿到过的 catalog entry
   id。**绝不能**把系统快照（`# 当前知识库快照` 那一段 JSON）里的任何字段
   当成 entry_id 来引用——快照里只有 catalog/views/tags/journal 的概览，
   里面没有可以拿来当 entry_id 的字段。完整 36 字符 uuid 和 8 字符以上的十六进制
@@ -126,7 +121,7 @@ EXECUTE_PHASE_PROMPT = """你是 Marginalia 的在线调查员（🔍 Investigat
 
 工具使用规则：
 - 接到一个新问题，先 search_journal 看自己之前是否走过类似路径。
-- 然后用 list_folders 浏览结构，对感兴趣的 entry
+- 然后用 list_folder 浏览结构，对感兴趣的 entry
   通过更深的工具读取。
 - 工具调用是有预算的，每轮末尾框架会注入预算 tail，按节制调用。
 
@@ -185,8 +180,8 @@ catalog/views/tags 列表只是索引概览，不是数据本身——回答"知
 
 - 查"以前是不是查过类似的" → `search_journal`
 - 按文件名/摘要关键字找文件 → `search_metadata(text=...)`（已覆盖 display_name/summary/extra）
-- 知道文件夹路径 → `list_folders(path='Papers/2024')` 一次拿到该层 folders+entries
-- 浏览根目录 → `list_folders()`（不带参数）
+- 知道文件夹路径 → `list_folder(path='Papers/2024')` 一次拿到该层 folders+entries
+- 浏览根目录 → `list_folder()`（不带参数）
 - 按 tag/catalog/lifecycle 等结构化条件筛选 → `search_metadata`（参数 text、tags_all、kind 等）
 - 看 catalog 收录什么 → `list_catalogs` / `read_catalog`
 - 取条目元数据 → `read_entries_metadata`
@@ -196,7 +191,7 @@ catalog/views/tags 列表只是索引概览，不是数据本身——回答"知
 # 合格示例
 
     1. 用 search_journal 查 "DoS" 关键词，看是否有过往调查路径。
-    2. 用 list_folders(path='Papers') 列 Papers/ 看实际条目数量与名称。
+    2. 用 list_folder(path='Papers') 列 Papers/ 看实际条目数量与名称。
     3. 用 search_metadata 配合 tags_all 过滤含 Denial-of-service 标签的条目。
     4. 在 execute 阶段汇总 entry_id 后用 read_entries_metadata 读元数据并答复。
 

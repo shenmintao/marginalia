@@ -31,8 +31,13 @@ from marginalia.services.user_files import get_user_metadata
 
 _FOOTNOTE_RE = re.compile(
     r"\[\^([^\]]+)\]:\s*entry_id\s*=\s*`?([0-9a-fA-F-]+)`?"
-    r"(?:\s*,\s*section_id\s*=\s*`?([^\s,`\-]+)`?)?"
-    r"(?:\s*[-—–]\s*(.+?))?"
+    r"(?:\s*,\s*(?:"
+    r'quote\s*=\s*"((?:[^"\\]|\\.)*)"'                  # group 3: quote
+    r"|page\s*=\s*`?([0-9]+(?:-[0-9]+)?)`?"             # group 4: page
+    r"|section_id\s*=\s*`?([^\s,`\-]+)`?"               # group 5: legacy section_id
+    r"|lines?\s*=\s*`?\S+`?"                             # legacy lines: tolerated (no capture)
+    r"))*"
+    r"(?:\s*[-—–]\s*(.+?))?"                             # group 6: reason
     r"\s*$",
     re.MULTILINE,
 )
@@ -50,7 +55,9 @@ class ConversationNotFoundError(Exception):
 class CitationRef:
     marker: str
     entry_id: str
-    section_id: str | None
+    section_id: str | None = None
+    quote: str | None = None
+    page: str | None = None
     reason: str | None = None
     display_name: str | None = None
     file_id: str | None = None
@@ -88,14 +95,21 @@ def parse_citations(agent_response: str) -> list[CitationRef]:
     for m in _FOOTNOTE_RE.finditer(agent_response):
         marker = m.group(1)
         entry_id = m.group(2).strip()
-        section_id = m.group(3).strip() if m.group(3) else None
-        reason = m.group(4).strip() if m.group(4) else None
+        quote_raw = m.group(3)
+        page = m.group(4).strip() if m.group(4) else None
+        section_id = m.group(5).strip() if m.group(5) else None
+        reason = m.group(6).strip() if m.group(6) else None
         if marker in seen_markers:
             continue
         seen_markers.add(marker)
+        quote = (
+            quote_raw.replace(r"\"", '"').replace(r"\\", "\\")
+            if quote_raw is not None
+            else None
+        )
         cites.append(CitationRef(
             marker=marker, entry_id=entry_id, section_id=section_id,
-            reason=reason,
+            quote=quote, page=page, reason=reason,
         ))
     return cites
 
@@ -172,6 +186,8 @@ def render_manifest(plan: ExportPlan) -> dict[str, Any]:
             "marker": c.marker,
             "entry_id": c.entry_id,
             "section_id": c.section_id,
+            "quote": c.quote,
+            "page": c.page,
             "reason": c.reason,
             "display_name": c.display_name,
             "file_id": c.file_id,
@@ -260,7 +276,11 @@ def _format_citation(
     summary = (meta.get("summary") or "").strip()
     if summary:
         pieces.append(f"  > {summary}")
-    if cite.section_id:
+    if cite.quote:
+        pieces.append(f"  quote: > {cite.quote}")
+    elif cite.page:
+        pieces.append(f"  page: `{cite.page}`")
+    elif cite.section_id:
         pieces.append(f"  section: `{cite.section_id}`")
     if cite.reason:
         pieces.append(f"  {cite.reason.strip()}")

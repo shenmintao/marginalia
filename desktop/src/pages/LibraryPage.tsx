@@ -37,10 +37,10 @@ export function LibraryPage() {
   // loads the leaf folder's contents).
   const [pendingEntryId, setPendingEntryId] = useState<string | null>(null);
   // Optional position locator that travelled in on the same ?entry=
-  // deep-link (`?line=10-40` or `?page=3`). FileViewer reads this and
-  // scrolls/jumps to the right spot once it has rendered the file.
+  // deep-link (`?q=<text>`, `?line=10-40`, or `?page=3`). FileViewer
+  // reads this and scrolls/jumps/highlights once the file renders.
   const [pendingLocator, setPendingLocator] = useState<
-    { kind: "line" | "page"; value: string } | null
+    { kind: "quote" | "line" | "page"; value: string } | null
   >(null);
 
   const [newFolderUnder, setNewFolderUnder] = useState<{ id: string | null; name: string } | null>(null);
@@ -70,11 +70,12 @@ export function LibraryPage() {
   // chain, hand the ids to FolderTree as expandPath so each parent
   // opens, and remember the entry id so the tree can complete the
   // selection once the leaf folder's contents come back.
-  // ?line= and ?page= ride along on the same URL — captured into
+  // ?q=, ?line=, ?page= ride along on the same URL — captured into
   // pendingLocator and consumed by FileViewer once the file loads.
   useEffect(() => {
     const entryId = searchParams.get("entry");
     if (!entryId) return;
+    const quoteParam = searchParams.get("q");
     const lineParam = searchParams.get("line");
     const pageParam = searchParams.get("page");
     let cancelled = false;
@@ -83,13 +84,15 @@ export function LibraryPage() {
         if (cancelled) return;
         setExpandPath(p.ancestors.map((a) => a.id));
         setPendingEntryId(p.entry_id);
-        if (lineParam) setPendingLocator({ kind: "line", value: lineParam });
+        if (quoteParam) setPendingLocator({ kind: "quote", value: quoteParam });
+        else if (lineParam) setPendingLocator({ kind: "line", value: lineParam });
         else if (pageParam) setPendingLocator({ kind: "page", value: pageParam });
         else setPendingLocator(null);
         // Drop the query params so a later navigation back to /library
         // (without them) doesn't keep retriggering the expansion.
         const next = new URLSearchParams(searchParams);
         next.delete("entry");
+        next.delete("q");
         next.delete("line");
         next.delete("page");
         setSearchParams(next, { replace: true });
@@ -98,6 +101,7 @@ export function LibraryPage() {
         if (!cancelled) {
           const next = new URLSearchParams(searchParams);
           next.delete("entry");
+          next.delete("q");
           next.delete("line");
           next.delete("page");
           setSearchParams(next, { replace: true });
@@ -109,6 +113,10 @@ export function LibraryPage() {
 
   useEffect(() => {
     if (!selectedEntry) { setMeta(null); return; }
+    // Reset meta immediately so stale metadata from a previous file
+    // doesn't cause wrong classification (e.g. PDF iframe loading a
+    // docx URL triggers a browser download).
+    setMeta(null);
     let cancelled = false;
     setMetaLoading(true);
     fileEntries.metadata(selectedEntry.id)

@@ -11,12 +11,17 @@
  *  to decide. Both are best-effort — Marginalia's mime detection is
  *  loose, so we fall back to extension when in doubt.
  *
- *  Deep-link locators (`{kind: "line"|"page", value}`) come from chat
- *  citations: text/markdown/code views scroll to the target line range
- *  and flash a highlight; PDF passes `#page=N` to the iframe so the
- *  browser PDF viewer jumps the page on load.
+ *  Deep-link locators (`{kind: "quote"|"line"|"page", value}`) come from
+ *  chat citations:
+ *    quote → walk the rendered DOM, surround the matching text with a
+ *            <mark>, scroll it into view, then unwrap after a flash
+ *    line  → text/code views scroll to the target line range; markdown
+ *            uses ratio approximation (legacy; stable_context no longer
+ *            asks the LLM to write `lines=`, but historical sessions and
+ *            manual deep-links still resolve)
+ *    page  → PDF iframe receives `#page=N`
  */
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { FileText, Download, AlertCircle, Loader2 } from "lucide-react";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { vscDarkPlus, prism } from "react-syntax-highlighter/dist/esm/styles/prism";
@@ -27,7 +32,7 @@ import type { FileMetadata } from "@/types/api";
 import { useTheme } from "@/lib/theme";
 
 export interface ViewerLocator {
-  kind: "line" | "page";
+  kind: "quote" | "line" | "page";
   value: string;
 }
 
@@ -81,6 +86,7 @@ export function FileViewer({ entryId, meta, locator, onLocatorConsumed }: Props)
 
   const lineLoc = locator?.kind === "line" ? parseLineRange(locator.value) : null;
   const pageLoc = locator?.kind === "page" ? parseInt(locator.value, 10) : null;
+  const quoteLoc = locator?.kind === "quote" ? locator.value : null;
   // PDF reads its locator straight from the URL fragment, so consume it
   // immediately. Text-family viewers consume it after their scroll runs.
   useEffect(() => {
@@ -105,20 +111,37 @@ export function FileViewer({ entryId, meta, locator, onLocatorConsumed }: Props)
         )}
         {kind === "image" && <ImageView url={contentUrl} />}
         {kind === "md" && (
-          <MdView url={contentUrl} lineRange={lineLoc} onScrolled={onLocatorConsumed} />
+          <MdView
+            url={contentUrl}
+            quote={quoteLoc}
+            lineRange={lineLoc}
+            onScrolled={onLocatorConsumed}
+          />
         )}
         {kind === "text" && (
-          <TextView url={contentUrl} lineRange={lineLoc} onScrolled={onLocatorConsumed} />
+          <TextView
+            url={contentUrl}
+            quote={quoteLoc}
+            lineRange={lineLoc}
+            onScrolled={onLocatorConsumed}
+          />
         )}
         {kind === "code" && (
           <CodeView
             url={contentUrl}
             lang={CODE_EXT_TO_LANG[(name.split(".").pop() || "").toLowerCase()] || "text"}
+            quote={quoteLoc}
             lineRange={lineLoc}
             onScrolled={onLocatorConsumed}
           />
         )}
-        {kind === "docx" && <DocxView url={contentUrl} />}
+        {kind === "docx" && (
+          <DocxView
+            url={contentUrl}
+            quote={quoteLoc}
+            onScrolled={onLocatorConsumed}
+          />
+        )}
         {kind === "binary" && <BinaryView url={downloadUrl} name={name} />}
       </div>
     </div>
@@ -166,30 +189,39 @@ function useTextResource(url: string, maxBytes = 2_000_000) {
   return { text, err, truncated };
 }
 
-interface LineJumpProps {
+interface JumpProps {
+  quote: string | null;
   lineRange: { start: number; end: number } | null;
   onScrolled?: () => void;
 }
 
-function MdView({ url, lineRange, onScrolled }:
-  { url: string } & LineJumpProps,
+function MdView({ url, quote, lineRange, onScrolled }:
+  { url: string } & JumpProps,
 ) {
   const { text, err } = useTextResource(url);
-  const { ref, flashKey } = useLineJumpForPlainBlock(text, lineRange, onScrolled);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const quoteState = useQuoteJump(containerRef, text, quote, onScrolled);
+  // Quote takes precedence; lineRange only fires when no quote.
+  const { flashKey: lineFlash } = useLineRatioJump(
+    containerRef, text, quote ? null : lineRange, onScrolled,
+  );
   if (err) return <ViewerError msg={err} />;
   if (text === null) return <ViewerLoading />;
   return (
-    <div className="h-full overflow-auto px-6 py-4" ref={ref}>
+    <div className="h-full overflow-auto px-6 py-4" ref={containerRef}>
       <div className="mx-auto max-w-3xl">
-        {flashKey != null && <LocatorBanner range={lineRange!} />}
+        {quoteState.banner}
+        {quoteState.banner == null && lineFlash != null && lineRange && (
+          <LocatorBanner kind="line" range={lineRange} />
+        )}
         <MarkdownView content={text} />
       </div>
     </div>
   );
 }
 
-function TextView({ url, lineRange, onScrolled }:
-  { url: string } & LineJumpProps,
+function TextView({ url, quote, lineRange, onScrolled }:
+  { url: string } & JumpProps,
 ) {
   const { text, err, truncated } = useTextResource(url);
   if (err) return <ViewerError msg={err} />;
@@ -197,6 +229,7 @@ function TextView({ url, lineRange, onScrolled }:
   return (
     <PlainTextLines
       text={text}
+      quote={quote}
       lineRange={lineRange}
       truncated={truncated}
       onScrolled={onScrolled}
@@ -204,41 +237,40 @@ function TextView({ url, lineRange, onScrolled }:
   );
 }
 
-function CodeView({ url, lang, lineRange, onScrolled }:
-  { url: string; lang: string } & LineJumpProps,
+function CodeView({ url, lang, quote, lineRange, onScrolled }:
+  { url: string; lang: string } & JumpProps,
 ) {
   const { text, err, truncated } = useTextResource(url);
   const { effective } = useTheme();
   const containerRef = useRef<HTMLDivElement>(null);
-  const [flashKey, setFlashKey] = useState<number | null>(null);
+  const [lineFlash, setLineFlash] = useState<number | null>(null);
+  const quoteState = useQuoteJump(containerRef, text, quote, onScrolled);
 
   useEffect(() => {
+    if (quote) return;  // quote path owns the highlight
     if (!text || !lineRange) return;
-    // SyntaxHighlighter wraps each line with showLineNumbers in a
-    // `.linenumber` span. The line number value isn't a DOM id, so we
-    // count children of the rendered code block and scroll the matching
-    // index into view.
     const root = containerRef.current;
     if (!root) return;
     const lineEls = root.querySelectorAll<HTMLElement>(".react-syntax-highlighter-line-number");
-    // showLineNumbers gives one .linenumber per line — its parent is the
-    // line wrapper. Scroll the wrapper at index (start-1).
     const target = lineEls[lineRange.start - 1]?.parentElement;
     if (target) {
       target.scrollIntoView({ block: "center", behavior: "smooth" });
-      setFlashKey(Date.now());
+      setLineFlash(Date.now());
       onScrolled?.();
-      const t = window.setTimeout(() => setFlashKey(null), 1600);
+      const t = window.setTimeout(() => setLineFlash(null), 1600);
       return () => window.clearTimeout(t);
     }
-  }, [text, lineRange, onScrolled]);
+  }, [text, lineRange, quote, onScrolled]);
 
   if (err) return <ViewerError msg={err} />;
   if (text === null) return <ViewerLoading />;
   return (
     <div className="h-full overflow-auto" ref={containerRef}>
       {truncated && <TruncatedBanner />}
-      {flashKey != null && lineRange && <LocatorBanner range={lineRange} />}
+      {quoteState.banner}
+      {quoteState.banner == null && lineFlash != null && lineRange && (
+        <LocatorBanner kind="line" range={lineRange} />
+      )}
       <SyntaxHighlighter
         language={lang}
         style={effective === "dark" ? vscDarkPlus : prism}
@@ -253,9 +285,10 @@ function CodeView({ url, lang, lineRange, onScrolled }:
 }
 
 function PlainTextLines({
-  text, lineRange, truncated, onScrolled,
+  text, quote, lineRange, truncated, onScrolled,
 }: {
   text: string;
+  quote: string | null;
   lineRange: { start: number; end: number } | null;
   truncated: boolean;
   onScrolled?: () => void;
@@ -263,33 +296,38 @@ function PlainTextLines({
   const lines = useMemo(() => text.split("\n"), [text]);
   const containerRef = useRef<HTMLDivElement>(null);
   const targetRef = useRef<HTMLDivElement>(null);
-  const [flashKey, setFlashKey] = useState<number | null>(null);
+  const [lineFlash, setLineFlash] = useState<number | null>(null);
+  const quoteState = useQuoteJump(containerRef, text, quote, onScrolled);
 
   useEffect(() => {
+    if (quote) return;
     if (!lineRange || !targetRef.current) return;
     targetRef.current.scrollIntoView({ block: "center", behavior: "smooth" });
-    setFlashKey(Date.now());
+    setLineFlash(Date.now());
     onScrolled?.();
-    const t = window.setTimeout(() => setFlashKey(null), 1600);
+    const t = window.setTimeout(() => setLineFlash(null), 1600);
     return () => window.clearTimeout(t);
-  }, [lineRange, onScrolled]);
+  }, [lineRange, quote, onScrolled]);
 
   return (
     <div className="h-full overflow-auto" ref={containerRef}>
       {truncated && <TruncatedBanner />}
-      {flashKey != null && lineRange && <LocatorBanner range={lineRange} />}
+      {quoteState.banner}
+      {quoteState.banner == null && lineFlash != null && lineRange && (
+        <LocatorBanner kind="line" range={lineRange} />
+      )}
       <pre className="whitespace-pre-wrap break-all px-4 py-3 font-mono text-xs">
         {lines.map((ln, i) => {
           const lineNo = i + 1;
           const inRange =
-            lineRange && lineNo >= lineRange.start && lineNo <= lineRange.end;
-          const isStart = lineRange && lineNo === lineRange.start;
+            !quote && lineRange && lineNo >= lineRange.start && lineNo <= lineRange.end;
+          const isStart = !quote && lineRange && lineNo === lineRange.start;
           return (
             <div
               key={i}
               ref={isStart ? targetRef : undefined}
               className={
-                inRange && flashKey != null
+                inRange && lineFlash != null
                   ? "-mx-1 rounded bg-accent/15 px-1 transition-colors duration-1000"
                   : undefined
               }
@@ -304,23 +342,20 @@ function PlainTextLines({
 }
 
 // Markdown reflows source lines, so we can't pin to "line 42" with
-// per-line wrappers like the plain-text viewer does. Instead we approximate:
-// scroll the container by the fraction (start / total) of its scrollHeight
-// after the markdown renders. Inaccurate, but more useful than no jump,
-// and we flag the range in a banner so the reader knows where to look.
-function useLineJumpForPlainBlock(
+// per-line wrappers like the plain-text viewer does. Approximate via
+// scrollHeight ratio. Kept for legacy `?line=` deep-links; quote jump
+// is preferred (and stable_context no longer asks the LLM for line=).
+function useLineRatioJump(
+  ref: RefObject<HTMLDivElement>,
   text: string | null,
   lineRange: { start: number; end: number } | null,
   onScrolled?: () => void,
 ) {
-  const ref = useRef<HTMLDivElement>(null);
   const [flashKey, setFlashKey] = useState<number | null>(null);
   useEffect(() => {
     if (!text || !lineRange || !ref.current) return;
     const total = text.split("\n").length || 1;
     const ratio = Math.max(0, (lineRange.start - 1) / total);
-    // Wait one rAF so KaTeX / syntax highlighting finishes layout, then
-    // scroll. Without this, scrollHeight is the pre-render height.
     const handle = window.requestAnimationFrame(() => {
       const el = ref.current;
       if (!el) return;
@@ -333,24 +368,132 @@ function useLineJumpForPlainBlock(
       window.cancelAnimationFrame(handle);
       window.clearTimeout(t);
     };
-  }, [text, lineRange, onScrolled]);
-  return { ref, flashKey };
+  }, [text, lineRange, onScrolled, ref]);
+  return { flashKey };
 }
 
-function LocatorBanner({ range }: { range: { start: number; end: number } }) {
-  const span = range.start === range.end
-    ? `line ${range.start}`
-    : `lines ${range.start}–${range.end}`;
+// Quote-based jump: walk the rendered text DOM, surround the first text
+// node containing the quote with a <mark>, scroll it into view, then
+// unwrap after a 1.6 s flash. First-version heuristic — only matches
+// against a single text node, so quotes that get split by inline
+// formatting (e.g. <strong> mid-sentence in DOCX) won't match.
+// `content` is the source string we render — used as the dep so the
+// effect re-runs once the DOM has the new content.
+function useQuoteJump(
+  ref: RefObject<HTMLElement>,
+  content: string | null,
+  quote: string | null,
+  onScrolled?: () => void,
+) {
+  const [hit, setHit] = useState<"found" | "missing" | null>(null);
+  useEffect(() => {
+    if (!quote || !content || !ref.current) {
+      setHit(null);
+      return;
+    }
+    const root = ref.current;
+    let mark: HTMLElement | null = null;
+    let cleanup: number | null = null;
+    // rAF to wait for layout to settle (mammoth-rendered HTML, syntax
+    // highlighting, KaTeX). Two frames is enough for prism + react-markdown.
+    const handle1 = window.requestAnimationFrame(() => {
+      const handle2 = window.requestAnimationFrame(() => {
+        mark = highlightQuoteInDom(root, quote);
+        if (mark) {
+          mark.scrollIntoView({ block: "center", behavior: "smooth" });
+          setHit("found");
+          cleanup = window.setTimeout(() => {
+            unwrapMark(mark);
+          }, 1600);
+        } else {
+          setHit("missing");
+        }
+        onScrolled?.();
+      });
+      // Cancel inner rAF on unmount
+      return () => window.cancelAnimationFrame(handle2);
+    });
+    return () => {
+      window.cancelAnimationFrame(handle1);
+      if (cleanup != null) window.clearTimeout(cleanup);
+      if (mark) unwrapMark(mark);
+    };
+  }, [content, quote, onScrolled, ref]);
+  const banner = quote && hit === "found"
+    ? <LocatorBanner kind="quote" quote={quote} />
+    : quote && hit === "missing"
+      ? <LocatorBanner kind="quote-missing" quote={quote} />
+      : null;
+  return { banner };
+}
+
+function highlightQuoteInDom(root: HTMLElement, quote: string): HTMLElement | null {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    const tn = node as Text;
+    const text = tn.data;
+    const idx = text.indexOf(quote);
+    if (idx === -1) continue;
+    const range = document.createRange();
+    range.setStart(tn, idx);
+    range.setEnd(tn, idx + quote.length);
+    const mark = document.createElement("mark");
+    mark.className = "rounded bg-accent/30 px-0.5";
+    range.surroundContents(mark);
+    return mark;
+  }
+  return null;
+}
+
+function unwrapMark(mark: HTMLElement | null) {
+  if (!mark || !mark.parentNode) return;
+  const parent = mark.parentNode;
+  while (mark.firstChild) parent.insertBefore(mark.firstChild, mark);
+  parent.removeChild(mark);
+  // Re-merge adjacent text nodes to keep the DOM tidy.
+  parent.normalize?.();
+}
+
+function LocatorBanner(
+  props:
+    | { kind: "line"; range: { start: number; end: number } }
+    | { kind: "quote"; quote: string }
+    | { kind: "quote-missing"; quote: string },
+) {
+  if (props.kind === "line") {
+    const span = props.range.start === props.range.end
+      ? `line ${props.range.start}`
+      : `lines ${props.range.start}–${props.range.end}`;
+    return (
+      <div className="sticky top-0 z-10 border-b border-accent/30 bg-accent/10 px-3 py-1 text-[11px] font-mono text-accent">
+        jumped to {span}
+      </div>
+    );
+  }
+  const head = props.quote.length > 30 ? props.quote.slice(0, 30) + "…" : props.quote;
+  if (props.kind === "quote-missing") {
+    return (
+      <div className="sticky top-0 z-10 border-b border-warning/30 bg-warning/10 px-3 py-1 text-[11px] text-warning">
+        未在原文中定位到引文 “{head}” — 请用浏览器搜索 (Ctrl/Cmd-F)
+      </div>
+    );
+  }
   return (
-    <div className="sticky top-0 z-10 border-b border-accent/30 bg-accent/10 px-3 py-1 text-[11px] font-mono text-accent">
-      jumped to {span}
+    <div className="sticky top-0 z-10 border-b border-accent/30 bg-accent/10 px-3 py-1 text-[11px] text-accent">
+      jumped to “{head}”
     </div>
   );
 }
 
-function DocxView({ url }: { url: string }) {
+function DocxView({ url, quote, onScrolled }: {
+  url: string;
+  quote: string | null;
+  onScrolled?: () => void;
+}) {
   const [html, setHtml] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const quoteState = useQuoteJump(containerRef, html, quote, onScrolled);
   useEffect(() => {
     let cancelled = false;
     setHtml(null); setErr(null);
@@ -369,7 +512,8 @@ function DocxView({ url }: { url: string }) {
   if (err) return <ViewerError msg={err} />;
   if (html === null) return <ViewerLoading />;
   return (
-    <div className="h-full overflow-auto px-6 py-4">
+    <div className="h-full overflow-auto px-6 py-4" ref={containerRef}>
+      {quoteState.banner}
       <div className="prose-marginalia mx-auto max-w-3xl"
            dangerouslySetInnerHTML={{ __html: html }} />
     </div>
