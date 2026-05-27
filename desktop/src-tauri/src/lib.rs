@@ -370,6 +370,17 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // Singleton: a second `Marginalia.exe` double-click hands its
+        // argv to this callback and exits. Without it each launch spins
+        // up a fresh Rust process, fresh webview, and fresh Python
+        // sidecar on a different ephemeral port — multiple task runners
+        // race over the same SQLite file. Hide-on-close (below) makes
+        // this especially easy to trigger: the user "closes" the window
+        // (just hidden), double-clicks the exe again to come back, and
+        // gets a duplicate stack instead of the existing one.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            show_main_window(app);
+        }))
         .manage(BackendState::default())
         .invoke_handler(tauri::generate_handler![backend_port])
         .setup(|app| {
