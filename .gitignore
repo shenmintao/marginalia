@@ -29,3 +29,11 @@ conversation-*.zip
 tests/_*_e2e_data/
 tests/_e2e_data/
 
+# Bundled python-build-standalone runtime, staged by
+# scripts/prepare-backend.mjs before tauri build. The directory itself
+# has to stay tracked (bundle.resources globs into it), so we keep a
+# .gitkeep and ignore the staged runtime payload.
+desktop/src-tauri/resources/backend/*
+!desktop/src-tauri/resources/backend/.gitkeep
+runtime/
+
