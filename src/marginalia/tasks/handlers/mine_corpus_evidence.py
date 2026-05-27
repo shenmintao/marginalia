@@ -342,17 +342,23 @@ async def _ask_llm_for_decisions(
             for c in candidates
         ],
     }
-    user_text = (
+    stable_prefix = (
         "Review these structurally-co-located entry pairs. Decide which "
         "are genuinely related vs. mere neighbors.\n\n"
+    )
+    file_content = (
         f"<pairs>\n{json.dumps(user_payload, ensure_ascii=False)}\n</pairs>"
     )
     client = get_chat_client("ingest")
     resp = await client.complete(ChatRequest(
         system=CORPUS_MINE_SYSTEM,
-        messages=[ChatMessage(role="user", content=[TextBlock(text=user_text)])],
+        messages=[ChatMessage(role="user", content=[
+            TextBlock(text=stable_prefix),
+            TextBlock(text=file_content),
+        ])],
         max_tokens=4096,
         temperature=0.1,
+        cache_breakpoints=[0],
     ))
     tagged = parse_tagged(resp.text or "")
     block = tagged.get("decisions", "")

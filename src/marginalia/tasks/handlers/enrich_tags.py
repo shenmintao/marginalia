@@ -239,17 +239,23 @@ async def _ask_llm_for_batch(
         ],
         "vocabulary": vocabulary,
     }
-    user_text = (
+    stable_prefix = (
         "For each entry, pick additional tag IDs from the vocabulary that "
         "should be attached. Empty list is preferred over noise.\n\n"
+    )
+    file_content = (
         f"<context>\n{json.dumps(user_payload, ensure_ascii=False)}\n</context>"
     )
     client = get_chat_client("ingest")
     resp = await client.complete(ChatRequest(
         system=ENRICH_SYSTEM,
-        messages=[ChatMessage(role="user", content=[TextBlock(text=user_text)])],
+        messages=[ChatMessage(role="user", content=[
+            TextBlock(text=stable_prefix),
+            TextBlock(text=file_content),
+        ])],
         max_tokens=4096,
         temperature=0.1,
+        cache_breakpoints=[0],
     ))
     out: dict[str, list[str]] = {}
     tagged = parse_tagged(resp.text or "")

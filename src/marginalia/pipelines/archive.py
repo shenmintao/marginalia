@@ -200,17 +200,25 @@ class ArchivePipeline(Pipeline):
                 "tag_vocabulary": ctx.tag_vocabulary,
             }
 
-        client = get_chat_client("ingest")
-        resp = await client.complete(ChatRequest(
-            system=ARCHIVE_PIPELINE_SYSTEM,
-            messages=[ChatMessage(role="user", content=[TextBlock(text=(
+            stable_prefix = (
                 "Index the archive described below. The peeks are the only "
                 "ground truth for member content.\n\n"
+                + render_format_hint(kinds=("container",))
+            )
+            file_content = (
                 f"<context>\n{json.dumps(payload, ensure_ascii=False)}\n</context>"
-            ))])],
-            max_tokens=4096,
-            temperature=0.2,
-        ))
+            )
+            client = get_chat_client("ingest")
+            resp = await client.complete(ChatRequest(
+                system=ARCHIVE_PIPELINE_SYSTEM,
+                messages=[ChatMessage(role="user", content=[
+                    TextBlock(text=stable_prefix),
+                    TextBlock(text=file_content),
+                ])],
+                max_tokens=4096,
+                temperature=0.2,
+                cache_breakpoints=[0],
+            ))
 
         tagged = parse_tagged(resp.text or "")
         summary = tagged.get("summary", "").strip()

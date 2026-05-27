@@ -312,18 +312,24 @@ async def _ask_llm(cand: dict[str, Any]) -> str | None:
         },
         "journals": cand["journals"],
     }
-    user_text = (
+    stable_prefix = (
         "Synthesize this entry's `extra` from the journal mentions and "
         "current metadata. If nothing has changed meaningfully, return "
         "the `current_extra` unchanged.\n\n"
+    )
+    file_content = (
         f"<context>\n{json.dumps(user_payload, ensure_ascii=False)}\n</context>"
     )
     client = get_chat_client("ingest")
     resp = await client.complete(ChatRequest(
         system=REFRESH_SYSTEM,
-        messages=[ChatMessage(role="user", content=[TextBlock(text=user_text)])],
+        messages=[ChatMessage(role="user", content=[
+            TextBlock(text=stable_prefix),
+            TextBlock(text=file_content),
+        ])],
         max_tokens=2048,
         temperature=0.2,
+        cache_breakpoints=[0],
     ))
     tagged = parse_tagged(resp.text or "")
     extra = tagged.get("extra", "").strip()

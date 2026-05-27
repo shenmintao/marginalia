@@ -148,9 +148,12 @@ class ImagePipeline(Pipeline):
         scaled, media_type = downscale_for_vlm(body)
         b64 = base64.b64encode(scaled).decode("ascii")
 
-        user_text = (
+        stable_prefix = (
             "Index the image below. Hints are advisory; the image's actual "
             "content takes precedence.\n\n"
+            + render_format_hint(kinds=("image",))
+        )
+        file_context = (
             f"<context>\n{json.dumps({k: v for k, v in {'folder_path': ctx.folder_path, 'sibling_names': ctx.sibling_names, 'catalog_sketch': ctx.catalog_sketch, 'tag_vocabulary': ctx.tag_vocabulary}.items()}, ensure_ascii=False)}\n</context>"
         )
 
@@ -158,11 +161,13 @@ class ImagePipeline(Pipeline):
         resp = await client.complete(ChatRequest(
             system=IMAGE_PIPELINE_SYSTEM,
             messages=[ChatMessage(role="user", content=[
-                TextBlock(text=user_text),
+                TextBlock(text=stable_prefix),
+                TextBlock(text=file_context),
                 ImageBlock(media_type=media_type, data_b64=b64),
             ])],
             max_tokens=4096,
             temperature=0.2,
+            cache_breakpoints=[0],
         ))
 
         tagged = parse_tagged(resp.text or "")

@@ -324,17 +324,23 @@ async def _ask_llm(
             for c in chunk
         ],
     }
-    user_text = (
+    stable_prefix = (
         "Decide for each candidate whether the two entries are "
         "genuinely related.\n\n"
+    )
+    file_content = (
         f"<candidates>\n{json.dumps(payload, ensure_ascii=False)}\n</candidates>"
     )
     try:
         resp = await client.complete(ChatRequest(
             system=VET_RELATIONS_SYSTEM,
-            messages=[ChatMessage(role="user", content=[TextBlock(text=user_text)])],
+            messages=[ChatMessage(role="user", content=[
+                TextBlock(text=stable_prefix),
+                TextBlock(text=file_content),
+            ])],
             max_tokens=4096,
             temperature=0.1,
+            cache_breakpoints=[0],
         ))
     except Exception as exc:  # noqa: BLE001
         log.warning("vet_relations: LLM call failed: %s", exc)

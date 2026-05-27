@@ -133,17 +133,23 @@ async def _normalize_one_facet(facet: str) -> dict[str, int] | None:
         {"id": r[0], "name": r[1], "doc_count": r[3] or 0}
         for r in batch
     ]
-    user_text = (
+    stable_prefix = (
+        "Identify synonym groups and emit a <merges> block per the format hint.\n\n"
+    )
+    file_content = (
         f"Facet: {facet}\n\nTags ({len(payload_for_llm)} total):\n"
         f"{json.dumps(payload_for_llm, ensure_ascii=False)}\n\n"
-        "Identify synonym groups and emit a <merges> block per the format hint."
     )
     client = get_chat_client("ingest")
     resp = await client.complete(ChatRequest(
         system=NORMALIZE_SYSTEM,
-        messages=[ChatMessage(role="user", content=[TextBlock(text=user_text)])],
+        messages=[ChatMessage(role="user", content=[
+            TextBlock(text=stable_prefix),
+            TextBlock(text=file_content),
+        ])],
         max_tokens=4096,
         temperature=0.1,
+        cache_breakpoints=[0],
     ))
     tagged = parse_tagged(resp.text or "")
     block = tagged.get("merges", "")

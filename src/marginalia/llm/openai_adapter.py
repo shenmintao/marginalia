@@ -167,6 +167,13 @@ class OpenAIChatClient(ChatClient):
                 })
             return [{"role": msg.role, "content": content}]
 
+        # Send each TextBlock as a separate content item so prefix-caching
+        # providers (DeepSeek, OpenAI) can cache the stable-prefix block
+        # independently from the variable payload block.
+        if len(text_parts) > 1:
+            content = [{"type": "text", "text": p.text} for p in text_parts]
+            return [{"role": msg.role, "content": content}]
+
         return [{"role": msg.role, "content": "".join(p.text for p in text_parts)}]
 
     @staticmethod
