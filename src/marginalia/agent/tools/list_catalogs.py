@@ -1,6 +1,8 @@
 """list_catalogs — DESIGN.md §10.1.
 
 Walks the AI-internal catalog tree by parent. Soft-deleted nodes hidden.
+Paginates via `limit` + `offset`; output carries `total` / `has_more` /
+`next_offset` per the unified pagination contract.
 """
 from __future__ import annotations
 
@@ -21,6 +23,14 @@ SCHEMA: dict[str, Any] = {
             "type": ["string", "null"],
             "description": "Catalog id whose direct children to list. Null = root.",
         },
+        "limit": {
+            "type": "integer", "minimum": 1, "maximum": 500,
+            "description": "Cap on returned children. Default 100.",
+        },
+        "offset": {
+            "type": "integer", "minimum": 0,
+            "description": "Skip first N children. Default 0.",
+        },
     },
 }
 
@@ -30,7 +40,8 @@ SCHEMA: dict[str, Any] = {
     description=(
         "List a catalog's direct child catalogs (or root catalogs when "
         "parent_id is null). Each entry includes summary + doc_count "
-        "(live entries linked at any depth below)."
+        "(live entries linked at any depth below). Paginates via "
+        "`limit`/`offset`; response carries `total` and `next_offset`."
     ),
     schema=SCHEMA,
 )
@@ -40,10 +51,17 @@ async def list_catalogs(
     args: Mapping[str, Any],
 ) -> dict[str, Any]:
     parent_id = args.get("parent_id")
-    cats = await catalogs_repo.list_live_children(db, parent_id)
+    limit = min(int(args.get("limit") or 100), 500)
+    offset = max(0, int(args.get("offset") or 0))
+
+    total = await catalogs_repo.count_live_children(db, parent_id)
+    cats = await catalogs_repo.list_live_children(
+        db, parent_id, limit=limit, offset=offset,
+    )
     direct_counts = await catalogs_repo.direct_entry_counts(db)
 
-    return {
+    has_more = (offset + len(cats)) < total
+    out: dict[str, Any] = {
         "catalogs": [
             {
                 "id": c.id,
@@ -56,4 +74,9 @@ async def list_catalogs(
             for c in cats
         ],
         "count": len(cats),
+        "total": total,
+        "has_more": has_more,
     }
+    if has_more:
+        out["next_offset"] = offset + len(cats)
+    return out

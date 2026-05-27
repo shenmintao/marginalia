@@ -99,10 +99,24 @@ class SpreadsheetPipeline(Pipeline):
 
         pattern = (args.get("pattern") or "").strip()
         if pattern:
+            scope_body = body
+            heading_scope = (args.get("heading") or "").strip()
+            if heading_scope:
+                slab = _slice_by_heading(body, heading_scope)
+                if slab is None:
+                    sheet_names = _list_sheet_headings(body)
+                    return SegmentResult(
+                        error=f"sheet/heading not found: {heading_scope!r}",
+                        extras={"available_sheets": sheet_names},
+                    )
+                scope_body = slab
             return _ss_pattern_search(
-                body=body, pattern=pattern,
+                body=scope_body, pattern=pattern,
                 context_lines=int(args.get("context_lines") or 2),
                 max_matches=int(args.get("max_matches") or 20),
+                match_offset=max(0, int(args.get("match_offset") or 0)),
+                heading_scope=heading_scope or None,
+                full_body=body,
             )
 
         heading = (args.get("heading") or "").strip()
@@ -244,53 +258,62 @@ def _clamp_ss(
 
 def _ss_pattern_search(
     *, body: str, pattern: str, context_lines: int, max_matches: int,
+    match_offset: int = 0,
+    heading_scope: str | None = None,
+    full_body: str | None = None,
 ) -> SegmentResult:
     try:
         rx = re.compile(pattern, re.IGNORECASE | re.MULTILINE)
     except re.error as exc:
         return SegmentResult(error=f"invalid regex: {exc}")
 
+    sheets_source = full_body if full_body is not None else body
+
     lines = body.splitlines()
-    hits: list[dict[str, Any]] = []
-    current_sheet = ""
+    all_hits: list[dict[str, Any]] = []
+    current_sheet = heading_scope or ""
     for i, line in enumerate(lines, start=1):
         m_sheet = _SHEET_HEADING_RX.match(line)
         if m_sheet:
             current_sheet = m_sheet.group(1).strip()
             continue
         for m in rx.finditer(line):
-            if len(hits) >= max_matches:
-                break
             s = max(0, i - 1 - context_lines)
             e = min(len(lines), i + context_lines)
-            hits.append({
+            all_hits.append({
                 "sheet": current_sheet,
                 "line": i,
                 "match": m.group(0)[:200],
                 "context": "\n".join(lines[s:e]),
             })
-        if len(hits) >= max_matches:
-            break
+
+    total = len(all_hits)
+    hits = all_hits[match_offset: match_offset + max_matches]
+    has_more = (match_offset + len(hits)) < total
+
+    extras: dict[str, Any] = {
+        "pattern": pattern,
+        "match_count": len(hits),
+        "total_matches": total,
+        "match_offset": match_offset,
+        "has_more": has_more,
+        "hits": hits,
+        "available_sheets": _list_sheet_headings(sheets_source),
+    }
+    if heading_scope:
+        extras["scope_heading"] = heading_scope
+    if has_more:
+        extras["next_match_offset"] = match_offset + len(hits)
 
     if not hits:
-        return SegmentResult(
-            text="", error="no matches",
-            extras={
-                "pattern": pattern,
-                "available_sheets": _list_sheet_headings(body),
-            },
-        )
+        if match_offset and total:
+            err = f"match_offset {match_offset} exceeds total_matches {total}"
+        else:
+            err = "no matches"
+        return SegmentResult(text="", error=err, extras=extras)
 
     rendered = "\n\n".join(
         f"[{h['sheet']} L{h['line']}] {h['match']}\n  ┊ {h['context']}"
         for h in hits
     )
-    return SegmentResult(
-        text=rendered,
-        extras={
-            "pattern": pattern,
-            "match_count": len(hits),
-            "hits": hits,
-            "available_sheets": _list_sheet_headings(body),
-        },
-    )
+    return SegmentResult(text=rendered, extras=extras)

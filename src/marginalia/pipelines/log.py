@@ -141,10 +141,29 @@ class LogPipeline(Pipeline):
 
         pattern = (args.get("pattern") or "").strip()
         if pattern:
+            scope_lines = lines
+            line_offset = 0
+            ls_raw = args.get("line_start")
+            le_raw = args.get("line_end")
+            if ls_raw or le_raw:
+                try:
+                    ls = max(1, int(ls_raw)) if ls_raw else 1
+                    le = int(le_raw) if le_raw else len(lines)
+                except (TypeError, ValueError):
+                    return SegmentResult(error="line_start/line_end must be integers")
+                if le < ls:
+                    return SegmentResult(error="line_end must be >= line_start")
+                ls = min(ls, max(1, len(lines)))
+                le = max(ls, min(le, len(lines)))
+                scope_lines = lines[ls - 1: le]
+                line_offset = ls - 1
             return _log_pattern_search(
-                lines=lines, pattern=pattern,
+                lines=scope_lines, pattern=pattern,
                 context_lines=int(args.get("context_lines") or 2),
                 max_matches=int(args.get("max_matches") or 20),
+                match_offset=max(0, int(args.get("match_offset") or 0)),
+                line_offset=line_offset,
+                total_lines_full=len(lines),
             )
 
         level_filter = (args.get("level") or "").strip().upper()
@@ -314,48 +333,57 @@ def _clamp_log(
 def _log_pattern_search(
     *, lines: list[str], pattern: str,
     context_lines: int, max_matches: int,
+    match_offset: int = 0, line_offset: int = 0,
+    total_lines_full: int | None = None,
 ) -> SegmentResult:
     try:
         rx = re.compile(pattern, re.IGNORECASE | re.MULTILINE)
     except re.error as exc:
         return SegmentResult(error=f"invalid regex: {exc}")
 
-    hits: list[dict[str, Any]] = []
+    full_total = total_lines_full if total_lines_full is not None else len(lines)
+
+    all_hits: list[dict[str, Any]] = []
     for i, ln in enumerate(lines, start=1):
         for m in rx.finditer(ln):
-            if len(hits) >= max_matches:
-                break
             s = max(0, i - 1 - context_lines)
             e = min(len(lines), i + context_lines)
-            hits.append({
-                "line": i,
+            all_hits.append({
+                "line": i + line_offset,
                 "match": m.group(0)[:200],
                 "level": _detect_level(ln),
                 "context": "\n".join(lines[s:e]),
             })
-        if len(hits) >= max_matches:
-            break
+
+    total = len(all_hits)
+    hits = all_hits[match_offset: match_offset + max_matches]
+    has_more = (match_offset + len(hits)) < total
+
+    extras: dict[str, Any] = {
+        "pattern": pattern,
+        "match_count": len(hits),
+        "total_matches": total,
+        "match_offset": match_offset,
+        "has_more": has_more,
+        "hits": hits,
+        "total_lines": full_total,
+    }
+    if has_more:
+        extras["next_match_offset"] = match_offset + len(hits)
 
     if not hits:
-        return SegmentResult(
-            text="", error="no matches",
-            extras={"pattern": pattern, "total_lines": len(lines)},
-        )
+        if match_offset and total:
+            err = f"match_offset {match_offset} exceeds total_matches {total}"
+        else:
+            err = "no matches"
+        return SegmentResult(text="", error=err, extras=extras)
 
     rendered = "\n\n".join(
         f"[L{h['line']}{(' ' + h['level']) if h['level'] else ''}] "
         f"{h['match']}\n  ┊ {h['context']}"
         for h in hits
     )
-    return SegmentResult(
-        text=rendered,
-        extras={
-            "pattern": pattern,
-            "match_count": len(hits),
-            "hits": hits,
-            "total_lines": len(lines),
-        },
-    )
+    return SegmentResult(text=rendered, extras=extras)
 
 
 def _decode_log_bytes(buf: bytes) -> str:

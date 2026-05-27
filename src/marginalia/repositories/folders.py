@@ -8,7 +8,7 @@ Caller owns the transaction.
 """
 from __future__ import annotations
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from marginalia.db.models import FileEntry, Folder
@@ -24,6 +24,32 @@ async def get_live(db: AsyncSession, folder_id: str) -> Folder | None:
             )
         )
     ).scalar_one_or_none()
+
+
+async def expand_subtree(db: AsyncSession, root_id: str) -> list[str]:
+    """BFS-collect ids of `root_id` plus every live folder beneath it.
+
+    Mirror of catalogs_repo.expand_subtree. Used by search_metadata when
+    the agent passes folder_subtree to scope candidate entries to a
+    folder branch.
+    """
+    seen: set[str] = {root_id}
+    frontier: list[str] = [root_id]
+    while frontier:
+        children = (
+            await db.execute(
+                select(Folder.id).where(
+                    Folder.parent_id.in_(frontier),
+                    Folder.deleted_at.is_(None),
+                )
+            )
+        ).scalars().all()
+        new = [c for c in children if c not in seen]
+        if not new:
+            break
+        seen.update(new)
+        frontier = new
+    return list(seen)
 
 
 async def find_by_name(
@@ -60,8 +86,13 @@ async def find_child_by_name(
 
 async def list_children(
     db: AsyncSession, parent_id: str | None,
+    *, limit: int | None = None, offset: int = 0,
 ) -> list[Folder]:
-    """Live children of `parent_id` (None = root), ordered by name."""
+    """Live children of `parent_id` (None = root), ordered by name.
+
+    `limit` and `offset` are optional — omit for the legacy "all rows"
+    behavior used by service-layer code that needs a complete list (e.g.
+    cycle-detection, ambiguity hints). Agent tools should pass both."""
     stmt = (
         select(Folder)
         .where(
@@ -70,7 +101,22 @@ async def list_children(
         )
         .order_by(Folder.name)
     )
+    if offset:
+        stmt = stmt.offset(offset)
+    if limit is not None:
+        stmt = stmt.limit(limit)
     return list((await db.execute(stmt)).scalars().all())
+
+
+async def count_children(
+    db: AsyncSession, parent_id: str | None,
+) -> int:
+    """Total live children of `parent_id`. Pair with paginated list_children."""
+    stmt = select(func.count()).select_from(Folder).where(
+        Folder.parent_id.is_(None) if parent_id is None else Folder.parent_id == parent_id,
+        Folder.deleted_at.is_(None),
+    )
+    return int((await db.execute(stmt)).scalar_one())
 
 
 async def find_sibling_id_by_name(

@@ -30,7 +30,15 @@ SCHEMA: dict[str, Any] = {
         "entry_ids": {
             "type": "array",
             "items": {"type": "string"},
-            "description": "List of entry ids to fetch.",
+            "minItems": 1,
+            "maxItems": 50,
+            "description": (
+                "List of entry UUIDs (or short hex prefixes, ≥ 8 chars) "
+                "to fetch (max 50). NOT file names — resolve via "
+                "search_metadata / list_folder first. For more candidates, "
+                "page via search_metadata.next_offset and call this tool "
+                "again with the next batch."
+            ),
         },
         "related_limit": {
             "type": "integer",
@@ -45,11 +53,12 @@ SCHEMA: dict[str, Any] = {
 @tool(
     name="read_entries_metadata",
     description=(
-        "Batch-fetch full metadata for one or more entries: file summary + "
-        "description + extra + tags + catalog path + per-entry extra, plus "
-        "automatically-attached `related_entries` ranked by observation_count "
-        "from entry_relations. Use to triage candidates before reading file "
-        "bodies."
+        "Batch-fetch full metadata for up to 50 entries in one call: file "
+        "summary + description + extra + tags + catalog path + per-entry "
+        "extra, plus automatically-attached `related_entries` ranked by "
+        "observation_count from entry_relations. Use to triage candidates "
+        "before reading file bodies. If you have more than 50 candidates, "
+        "page through search_metadata first."
     ),
     schema=SCHEMA,
 )

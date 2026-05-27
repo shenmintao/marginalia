@@ -41,7 +41,14 @@ SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
     "required": ["container_entry_id"],
     "properties": {
-        "container_entry_id": {"type": "string"},
+        "container_entry_id": {
+            "type": "string",
+            "description": (
+                "Entry UUID (or short hex prefix, ≥ 8 chars) of the "
+                "container. NOT a file name — resolve via search_metadata "
+                "or list_folder first."
+            ),
+        },
         "list_files": {
             "type": "object",
             "additionalProperties": False,
@@ -51,6 +58,10 @@ SCHEMA: dict[str, Any] = {
                     "description": "Glob pattern, e.g. 'src/**/*.py'.",
                 },
                 "limit": {"type": "integer", "minimum": 1, "maximum": 1000},
+                "offset": {
+                    "type": "integer", "minimum": 0,
+                    "description": "Skip first N matching members. Default 0.",
+                },
             },
         },
         "read_files": {
@@ -85,6 +96,10 @@ SCHEMA: dict[str, Any] = {
                 "regex": {"type": "boolean"},
                 "max_hits": {"type": "integer", "minimum": 1, "maximum": 200},
                 "context_lines": {"type": "integer", "minimum": 0, "maximum": 10},
+                "offset": {
+                    "type": "integer", "minimum": 0,
+                    "description": "Skip first N hits. Default 0.",
+                },
             },
         },
     },
@@ -151,18 +166,28 @@ async def analyze_container(
 def _do_list(members, params: Mapping[str, Any]) -> dict[str, Any]:
     glob_pat = params.get("glob")
     limit = min(int(params.get("limit") or 200), 1000)
+    offset = max(0, int(params.get("offset") or 0))
+    matched_total = 0
     matches = []
     for m in members:
         if glob_pat and not _glob_match(m.path, glob_pat):
             continue
-        matches.append({"path": m.path, "size": m.size})
-        if len(matches) >= limit:
-            break
-    return {
+        matched_total += 1
+        if matched_total <= offset:
+            continue
+        if len(matches) < limit:
+            matches.append({"path": m.path, "size": m.size})
+    has_more = matched_total > offset + len(matches)
+    out = {
         "matches": matches,
         "count": len(matches),
+        "total": matched_total,
         "glob": glob_pat,
+        "has_more": has_more,
     }
+    if has_more:
+        out["next_offset"] = offset + len(matches)
+    return out
 
 
 def _glob_match(path: str, pattern: str) -> bool:
@@ -235,6 +260,7 @@ def _do_search(
     regex_mode = bool(params.get("regex"))
     max_hits = min(int(params.get("max_hits") or 50), 200)
     ctx_lines = min(int(params.get("context_lines") or 1), 10)
+    offset = max(0, int(params.get("offset") or 0))
     if regex_mode:
         try:
             pat = re.compile(pattern)
@@ -244,8 +270,11 @@ def _do_search(
         pat = re.compile(re.escape(pattern), re.IGNORECASE)
 
     hits: list[dict[str, Any]] = []
+    match_index = 0
+    has_more = False
+    done = False
     for m in visible:
-        if len(hits) >= max_hits:
+        if done:
             break
         try:
             body = session.read_bytes(m.path)
@@ -254,18 +283,32 @@ def _do_search(
         text = _decode(body)
         lines = text.splitlines()
         for i, line in enumerate(lines):
-            if pat.search(line):
-                lo = max(0, i - ctx_lines)
-                hi = min(len(lines), i + ctx_lines + 1)
-                hits.append({
-                    "path": m.path,
-                    "line": i + 1,
-                    "match": line,
-                    "context": "\n".join(lines[lo:hi]),
-                })
-                if len(hits) >= max_hits:
-                    break
-    return {"hits": hits, "count": len(hits), "truncated": len(hits) >= max_hits}
+            if not pat.search(line):
+                continue
+            match_index += 1
+            if match_index <= offset:
+                continue
+            if len(hits) >= max_hits:
+                has_more = True
+                done = True
+                break
+            lo = max(0, i - ctx_lines)
+            hi = min(len(lines), i + ctx_lines + 1)
+            hits.append({
+                "path": m.path,
+                "line": i + 1,
+                "match": line,
+                "context": "\n".join(lines[lo:hi]),
+            })
+    out = {
+        "hits": hits,
+        "count": len(hits),
+        "truncated": len(hits) >= max_hits,
+        "has_more": has_more,
+    }
+    if has_more:
+        out["next_offset"] = offset + len(hits)
+    return out
 
 
 def _decode(b: bytes) -> str:

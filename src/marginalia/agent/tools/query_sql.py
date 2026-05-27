@@ -69,8 +69,11 @@ SCHEMA: dict[str, Any] = {
             "type": "array",
             "items": {"type": "string"},
             "minItems": 1,
+            "maxItems": 50,
             "description": (
-                "Entry ids of tabular files to load. They become tables "
+                "Entry UUIDs (or short hex prefixes, ≥ 8 chars) of tabular "
+                "files to load. NOT file names — resolve via "
+                "search_metadata / list_folder first. They become tables "
                 "t1, t2, t3 ... in the same order as listed."
             ),
         },
@@ -80,6 +83,13 @@ SCHEMA: dict[str, Any] = {
                 "One SELECT statement against tables t1, t2, ... Joins, "
                 "aggregates, window functions allowed. XLSX entries gain a "
                 "`__sheet_name` column for sheet filtering."
+            ),
+        },
+        "offset": {
+            "type": "integer", "minimum": 0,
+            "description": (
+                "Skip first N rows of the result. Default 0. Combine with "
+                "the row cap (500) to page through large result sets."
             ),
         },
     },
@@ -94,7 +104,8 @@ SCHEMA: dict[str, Any] = {
         "t1, t2, ... in order so you can JOIN across them. XLSX sheets "
         "are merged with a `__sheet_name` column. Use read_files first "
         "to inspect column names; the result also auto-corrects "
-        "case/whitespace mismatches."
+        "case/whitespace mismatches. Results cap at 500 rows; pass "
+        "`offset` (with the same SQL) to page through more."
     ),
     schema=SCHEMA,
 )
@@ -105,6 +116,7 @@ async def query_sql(
 ) -> dict[str, Any]:
     entry_ids: list[str] = list(args.get("entry_ids") or [])
     sql: str = (args.get("sql") or "").strip()
+    offset = max(0, int(args.get("offset") or 0))
 
     if not entry_ids:
         return {"ok": False, "error": "entry_ids must be a non-empty list"}
@@ -146,7 +158,7 @@ async def query_sql(
             }
         records.append((entry, f, ext))
 
-    return await _run_in_tempdir(records, sql, storage)
+    return await _run_in_tempdir(records, sql, storage, offset)
 
 
 # -- helpers ---------------------------------------------------------------
@@ -191,6 +203,7 @@ async def _run_in_tempdir(
     records: list[tuple[FileEntry, File, str]],
     sql: str,
     storage,
+    offset: int,
 ) -> dict[str, Any]:
     """Stream files to a tempdir, run DuckDB sync in a thread."""
     import asyncio
@@ -203,7 +216,7 @@ async def _run_in_tempdir(
             await _stream_to_disk(storage, f, local)
             on_disk.append((str(local), entry, f))
 
-        return await asyncio.to_thread(_run_duckdb, on_disk, sql, records)
+        return await asyncio.to_thread(_run_duckdb, on_disk, sql, records, offset)
     finally:
         for p in tmpdir.glob("*"):
             try:
@@ -226,6 +239,7 @@ def _run_duckdb(
     on_disk: list[tuple[str, FileEntry, File]],
     sql: str,
     records: list[tuple[FileEntry, File, str]],
+    offset: int,
 ) -> dict[str, Any]:
     import duckdb
 
@@ -279,6 +293,15 @@ def _run_duckdb(
                 "rewritten_sql": rewritten if rewritten != sql else None,
             }
         col_names = [d[0] for d in cur.description] if cur.description else []
+        if offset:
+            # Discard the first `offset` rows. Fetch in modest chunks to keep
+            # memory bounded for very wide result sets.
+            remaining = offset
+            while remaining > 0:
+                chunk = cur.fetchmany(min(remaining, 1000))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
         rows = cur.fetchmany(MAX_RESULT_ROWS + 1)
         truncated = len(rows) > MAX_RESULT_ROWS
         rows = rows[:MAX_RESULT_ROWS]
@@ -292,9 +315,12 @@ def _run_duckdb(
             "rows": flat_rows,
             "row_count": len(flat_rows),
             "truncated": truncated,
+            "has_more": truncated,
             "column_fixes": fixes,
             "rewritten_sql": rewritten if rewritten != sql else None,
         }
+        if truncated:
+            result["next_offset"] = offset + len(flat_rows)
         # Cap output size — model context cost
         approx = sum(len(str(c)) for r in flat_rows for c in r)
         if approx > MAX_RESULT_CHARS:
@@ -302,6 +328,8 @@ def _run_duckdb(
             result["rows"] = flat_rows[:keep]
             result["row_count"] = keep
             result["truncated"] = True
+            result["has_more"] = True
+            result["next_offset"] = offset + keep
             result["truncation_reason"] = (
                 f"result body exceeded {MAX_RESULT_CHARS} chars; "
                 f"kept first {keep} rows"

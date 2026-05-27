@@ -33,6 +33,10 @@ SCHEMA: dict[str, Any] = {
             "type": "integer", "minimum": 1, "maximum": 500,
             "description": "Max entries returned. Default 50.",
         },
+        "offset": {
+            "type": "integer", "minimum": 0,
+            "description": "Skip first N matches. Use with `next_offset` to page.",
+        },
     },
 }
 
@@ -42,7 +46,8 @@ SCHEMA: dict[str, Any] = {
     description=(
         "Run a view's filter_spec to produce its current entry list. Use to "
         "check which entries currently match a saved view (e.g. a topic-aggregating "
-        "view). Returns minimal metadata; pair with read_entries_metadata for detail."
+        "view). Returns minimal metadata + `total` / `has_more` for pagination; "
+        "pair with read_entries_metadata for detail."
     ),
     schema=SCHEMA,
 )
@@ -53,6 +58,7 @@ async def materialize_view(
 ) -> dict[str, Any]:
     view_id = args["id"]
     limit = min(int(args.get("limit") or 50), 500)
+    offset = max(0, int(args.get("offset") or 0))
 
     v = await db.get(View, view_id)
     if v is None:
@@ -68,21 +74,27 @@ async def materialize_view(
         for r in subtree:
             ids.extend(await catalogs_repo.expand_subtree(db, r))
         if not ids:
-            return {"view_id": view_id, "name": v.name, "entries": [], "count": 0}
+            return {
+                "view_id": view_id, "name": v.name,
+                "entries": [], "count": 0, "total": 0, "has_more": False,
+            }
         catalog_in = ids
 
-    rows = await entries_repo.search_filtered(
-        db,
+    common_filters = dict(
         lifecycle=lifecycle,
         kind=spec.get("kind"),
         catalog_in=catalog_in,
         tags_all=spec.get("tags_all") or [],
         tags_any=spec.get("tags_any") or [],
         tags_none=spec.get("tags_none") or [],
-        limit=limit,
+    )
+    total = await entries_repo.count_filtered(db, **common_filters)
+    rows = await entries_repo.search_filtered(
+        db, **common_filters, limit=limit, offset=offset,
     )
 
-    return {
+    has_more = (offset + len(rows)) < total
+    out: dict[str, Any] = {
         "view_id": view_id,
         "name": v.name,
         "summary": v.summary,
@@ -97,4 +109,9 @@ async def materialize_view(
             for e, f in rows
         ],
         "count": len(rows),
+        "total": total,
+        "has_more": has_more,
     }
+    if has_more:
+        out["next_offset"] = offset + len(rows)
+    return out

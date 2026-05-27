@@ -450,7 +450,9 @@ class PdfPipeline(Pipeline):
             max_chars = self.READ_DEFAULT_MAX_CHARS
 
         # Pattern search: if entire PDF has no text layer, give actionable
-        # guidance instead of the generic "no matches".
+        # guidance instead of the generic "no matches". When page_start /
+        # page_end are also provided, the search is restricted to that
+        # window so the LLM can drill into a known region.
         pattern = (args.get("pattern") or "").strip()
         if pattern:
             if non_empty_pages == 0:
@@ -458,10 +460,29 @@ class PdfPipeline(Pipeline):
                     error=_NO_TEXT_LAYER_ERROR,
                     extras={"pattern": pattern, "total_pages": total_pages},
                 )
+            scope_pages = pages
+            page_offset = 0
+            ps_raw = args.get("page_start")
+            pe_raw = args.get("page_end")
+            if ps_raw or pe_raw:
+                try:
+                    ps = max(1, int(ps_raw)) if ps_raw else 1
+                    pe = int(pe_raw) if pe_raw else total_pages
+                except (TypeError, ValueError):
+                    return SegmentResult(error="page_start/page_end must be integers")
+                if total_pages == 0:
+                    return SegmentResult(error="PDF has no pages")
+                ps = max(1, min(ps, total_pages))
+                pe = max(ps, min(pe, total_pages))
+                scope_pages = pages[ps - 1: pe]
+                page_offset = ps - 1
             return _pdf_pattern_search(
-                pages=pages, pattern=pattern,
+                pages=scope_pages, pattern=pattern,
                 context_lines=int(args.get("context_lines") or 2),
                 max_matches=int(args.get("max_matches") or 20),
+                match_offset=max(0, int(args.get("match_offset") or 0)),
+                page_offset=page_offset,
+                total_pages_full=total_pages,
             )
 
         page_start = args.get("page_start")
@@ -919,48 +940,61 @@ def _clamp_pdf(
 def _pdf_pattern_search(
     *, pages: list[str], pattern: str,
     context_lines: int, max_matches: int,
+    match_offset: int = 0, page_offset: int = 0,
+    total_pages_full: int | None = None,
 ) -> SegmentResult:
     try:
         rx = re.compile(pattern, re.IGNORECASE | re.MULTILINE)
     except re.error as exc:
         return SegmentResult(error=f"invalid regex: {exc}")
 
-    hits: list[dict[str, Any]] = []
-    for page_no, page_text in enumerate(pages, start=1):
+    full_total_pages = total_pages_full if total_pages_full is not None else len(pages)
+
+    all_hits: list[dict[str, Any]] = []
+    for idx, page_text in enumerate(pages):
         if not page_text:
             continue
+        page_no = idx + 1 + page_offset
         page_lines = page_text.splitlines()
         for m in rx.finditer(page_text):
-            if len(hits) >= max_matches:
-                break
             line_no = page_text.count("\n", 0, m.start()) + 1
             s = max(0, line_no - 1 - context_lines)
             e = min(len(page_lines), line_no + context_lines)
-            hits.append({
+            all_hits.append({
                 "page": page_no,
                 "line": line_no,
                 "match": m.group(0)[:200],
                 "context": "\n".join(page_lines[s:e]),
             })
-        if len(hits) >= max_matches:
-            break
+
+    total = len(all_hits)
+    hits = all_hits[match_offset: match_offset + max_matches]
+    has_more = (match_offset + len(hits)) < total
+
+    extras: dict[str, Any] = {
+        "pattern": pattern,
+        "match_count": len(hits),
+        "total_matches": total,
+        "match_offset": match_offset,
+        "has_more": has_more,
+        "hits": hits,
+        "total_pages": full_total_pages,
+    }
+    if page_offset:
+        extras["scope_page_start"] = page_offset + 1
+        extras["scope_page_end"] = page_offset + len(pages)
+    if has_more:
+        extras["next_match_offset"] = match_offset + len(hits)
 
     if not hits:
-        return SegmentResult(
-            text="", error="no matches",
-            extras={"pattern": pattern, "total_pages": len(pages)},
-        )
+        if match_offset and total:
+            err = f"match_offset {match_offset} exceeds total_matches {total}"
+        else:
+            err = "no matches"
+        return SegmentResult(text="", error=err, extras=extras)
 
     rendered = "\n\n".join(
         f"[Page {h['page']} L{h['line']}] {h['match']}\n  ┊ {h['context']}"
         for h in hits
     )
-    return SegmentResult(
-        text=rendered,
-        extras={
-            "pattern": pattern,
-            "match_count": len(hits),
-            "hits": hits,
-            "total_pages": len(pages),
-        },
-    )
+    return SegmentResult(text=rendered, extras=extras)

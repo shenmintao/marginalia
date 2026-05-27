@@ -106,10 +106,29 @@ class DocxPipeline(Pipeline):
 
         pattern = (args.get("pattern") or "").strip()
         if pattern:
+            scope_paragraphs = paragraphs
+            paragraph_offset = 0
+            ps_raw = args.get("paragraph_start")
+            pe_raw = args.get("paragraph_end")
+            if ps_raw or pe_raw:
+                try:
+                    ps = max(1, int(ps_raw)) if ps_raw else 1
+                    pe = int(pe_raw) if pe_raw else len(paragraphs)
+                except (TypeError, ValueError):
+                    return SegmentResult(error="paragraph_start/end must be integers")
+                if pe < ps:
+                    return SegmentResult(error="paragraph_end must be >= paragraph_start")
+                ps = max(1, min(ps, max(1, len(paragraphs))))
+                pe = max(ps, min(pe, len(paragraphs)))
+                scope_paragraphs = paragraphs[ps - 1: pe]
+                paragraph_offset = ps - 1
             return _docx_pattern_search(
-                paragraphs=paragraphs, pattern=pattern,
+                paragraphs=scope_paragraphs, pattern=pattern,
                 context_lines=int(args.get("context_lines") or 2),
                 max_matches=int(args.get("max_matches") or 20),
+                match_offset=max(0, int(args.get("match_offset") or 0)),
+                paragraph_offset=paragraph_offset,
+                total_paragraphs_full=len(paragraphs),
             )
 
         para_start = args.get("paragraph_start")
@@ -261,45 +280,57 @@ def _clamp(
 def _docx_pattern_search(
     *, paragraphs: list[str], pattern: str,
     context_lines: int, max_matches: int,
+    match_offset: int = 0, paragraph_offset: int = 0,
+    total_paragraphs_full: int | None = None,
 ) -> SegmentResult:
     try:
         rx = re.compile(pattern, re.IGNORECASE | re.MULTILINE)
     except re.error as exc:
         return SegmentResult(error=f"invalid regex: {exc}")
 
-    hits: list[dict[str, Any]] = []
+    full_total = (
+        total_paragraphs_full if total_paragraphs_full is not None
+        else len(paragraphs)
+    )
+
+    all_hits: list[dict[str, Any]] = []
     for i, para in enumerate(paragraphs, start=1):
         if not para:
             continue
         for m in rx.finditer(para):
-            if len(hits) >= max_matches:
-                break
             s = max(0, i - 1 - context_lines)
             e = min(len(paragraphs), i + context_lines)
-            hits.append({
-                "paragraph": i,
+            all_hits.append({
+                "paragraph": i + paragraph_offset,
                 "match": m.group(0)[:200],
                 "context": "\n".join(paragraphs[s:e]),
             })
-        if len(hits) >= max_matches:
-            break
+
+    total = len(all_hits)
+    hits = all_hits[match_offset: match_offset + max_matches]
+    has_more = (match_offset + len(hits)) < total
+
+    extras: dict[str, Any] = {
+        "pattern": pattern,
+        "match_count": len(hits),
+        "total_matches": total,
+        "match_offset": match_offset,
+        "has_more": has_more,
+        "hits": hits,
+        "total_paragraphs": full_total,
+    }
+    if has_more:
+        extras["next_match_offset"] = match_offset + len(hits)
 
     if not hits:
-        return SegmentResult(
-            text="", error="no matches",
-            extras={"pattern": pattern, "total_paragraphs": len(paragraphs)},
-        )
+        if match_offset and total:
+            err = f"match_offset {match_offset} exceeds total_matches {total}"
+        else:
+            err = "no matches"
+        return SegmentResult(text="", error=err, extras=extras)
 
     rendered = "\n\n".join(
         f"[¶{h['paragraph']}] {h['match']}\n  ┊ {h['context']}"
         for h in hits
     )
-    return SegmentResult(
-        text=rendered,
-        extras={
-            "pattern": pattern,
-            "match_count": len(hits),
-            "hits": hits,
-            "total_paragraphs": len(paragraphs),
-        },
-    )
+    return SegmentResult(text=rendered, extras=extras)

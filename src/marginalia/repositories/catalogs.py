@@ -65,7 +65,11 @@ async def name_by_ids(
 
 async def list_live_children(
     db: AsyncSession, parent_id: str | None,
+    *, limit: int | None = None, offset: int = 0,
 ) -> list[Catalog]:
+    """Live children of `parent_id` (None = root). When `limit` is None,
+    returns the entire list (legacy behavior). Agent tools pass both
+    `limit` and `offset` to honor the pagination contract."""
     stmt = (
         select(Catalog)
         .where(
@@ -74,7 +78,22 @@ async def list_live_children(
         )
         .order_by(Catalog.name)
     )
+    if offset:
+        stmt = stmt.offset(offset)
+    if limit is not None:
+        stmt = stmt.limit(limit)
     return list((await db.execute(stmt)).scalars().all())
+
+
+async def count_live_children(
+    db: AsyncSession, parent_id: str | None,
+) -> int:
+    """Total live children of `parent_id`. Pair with paginated list_live_children."""
+    stmt = select(func.count()).select_from(Catalog).where(
+        Catalog.parent_id.is_(None) if parent_id is None else Catalog.parent_id == parent_id,
+        Catalog.deleted_at.is_(None),
+    )
+    return int((await db.execute(stmt)).scalar_one())
 
 
 async def list_live_top_level(
@@ -123,22 +142,35 @@ async def direct_entry_counts(db: AsyncSession) -> dict[str, int]:
 
 
 async def list_live_direct_entries(
-    db: AsyncSession, catalog_id: str, *, limit: int,
+    db: AsyncSession, catalog_id: str,
+    *, limit: int, offset: int = 0,
 ) -> list[FileEntry]:
     """Live entries attached directly (not transitively) to a catalog node,
     most-recently-updated first. Used by read_catalog."""
-    rows = (
-        await db.execute(
-            select(FileEntry)
-            .where(
-                FileEntry.catalog_id == catalog_id,
-                FileEntry.deleted_at.is_(None),
-            )
-            .order_by(FileEntry.updated_at.desc())
-            .limit(limit)
+    stmt = (
+        select(FileEntry)
+        .where(
+            FileEntry.catalog_id == catalog_id,
+            FileEntry.deleted_at.is_(None),
         )
-    ).scalars().all()
+        .order_by(FileEntry.updated_at.desc())
+    )
+    if offset:
+        stmt = stmt.offset(offset)
+    stmt = stmt.limit(limit)
+    rows = (await db.execute(stmt)).scalars().all()
     return list(rows)
+
+
+async def count_live_direct_entries(
+    db: AsyncSession, catalog_id: str,
+) -> int:
+    """Total live entries directly attached to `catalog_id`."""
+    stmt = select(func.count()).select_from(FileEntry).where(
+        FileEntry.catalog_id == catalog_id,
+        FileEntry.deleted_at.is_(None),
+    )
+    return int((await db.execute(stmt)).scalar_one())
 
 
 async def find_live_child_by_name(

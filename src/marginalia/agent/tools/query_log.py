@@ -42,7 +42,14 @@ SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
     "required": ["entry_id"],
     "properties": {
-        "entry_id": {"type": "string"},
+        "entry_id": {
+            "type": "string",
+            "description": (
+                "Entry UUID (or short hex prefix, ≥ 8 chars). NOT a file "
+                "name or display_name — get it from search_metadata / "
+                "list_folder first."
+            ),
+        },
         "pattern": {"type": "string"},
         "regex": {"type": "boolean", "description": "Treat pattern as regex."},
         "level": {
@@ -52,7 +59,22 @@ SCHEMA: dict[str, Any] = {
         },
         "since": {"type": "string", "description": "ISO-8601 lower bound."},
         "until": {"type": "string", "description": "ISO-8601 upper bound."},
+        "line_start": {
+            "type": "integer", "minimum": 1,
+            "description": "1-indexed first line to scan. Restricts the scope.",
+        },
+        "line_end": {
+            "type": "integer", "minimum": 1,
+            "description": "1-indexed last line to scan (inclusive).",
+        },
         "limit": {"type": "integer", "minimum": 1, "maximum": 1000},
+        "offset": {
+            "type": "integer", "minimum": 0,
+            "description": (
+                "Skip the first N matching lines. Use with `next_offset` "
+                "to page through more than `limit` matches."
+            ),
+        },
     },
 }
 
@@ -61,8 +83,9 @@ SCHEMA: dict[str, Any] = {
     name="query_log",
     description=(
         "Filter a log / jsonl / plain-text entry line-by-line. Supports "
-        "substring or regex pattern, common log levels, and ISO-8601 "
-        "since/until time bounds. Returns matching lines with line numbers."
+        "substring or regex pattern, common log levels, ISO-8601 since/until "
+        "time bounds, and a `line_start`/`line_end` window to narrow the scan. "
+        "Use `offset` + `next_offset` to page through matches beyond `limit`."
     ),
     schema=SCHEMA,
 )
@@ -77,7 +100,12 @@ async def query_log(
     level = (args.get("level") or "").upper() or None
     since_str = args.get("since")
     until_str = args.get("until")
+    line_start = args.get("line_start")
+    line_end = args.get("line_end")
+    line_start_i = max(1, int(line_start)) if line_start else 1
+    line_end_i = int(line_end) if line_end else None
     limit = min(int(args.get("limit") or DEFAULT_LIMIT), MAX_LIMIT)
+    offset = max(0, int(args.get("offset") or 0))
 
     pat = _compile_pattern(pattern, is_regex)
     since_ts = _parse_iso(since_str)
@@ -96,9 +124,15 @@ async def query_log(
 
     hits: list[dict[str, Any]] = []
     line_no = 0
+    match_index = 0
+    has_more = False
     for line in text.splitlines():
         line_no += 1
         if line_no > MAX_LINES_TO_SCAN:
+            break
+        if line_no < line_start_i:
+            continue
+        if line_end_i is not None and line_no > line_end_i:
             break
         if pat is not None and not pat.search(line):
             continue
@@ -119,17 +153,70 @@ async def query_log(
                 continue
             if until_ts is not None and ts > until_ts:
                 continue
+        # passes all filters → counts as a match
+        if match_index < offset:
+            match_index += 1
+            continue
         hits.append({"line": line_no, "text": line})
+        match_index += 1
         if len(hits) >= limit:
+            # Peek one more match to know whether more exist.
+            has_more = _has_more_match(
+                text, line_no, line_end_i,
+                pat, level, since_ts, until_ts,
+            )
             break
 
-    return {
+    out: dict[str, Any] = {
         "display_name": entry.display_name,
         "matches": hits,
         "match_count": len(hits),
         "scanned_lines": line_no,
         "truncated": len(hits) >= limit,
+        "has_more": has_more,
     }
+    if has_more:
+        out["next_offset"] = offset + len(hits)
+    return out
+
+
+def _has_more_match(
+    text: str,
+    after_line: int,
+    line_end_i: int | None,
+    pat: re.Pattern | None,
+    level: str | None,
+    since_ts: datetime | None,
+    until_ts: datetime | None,
+) -> bool:
+    line_no = 0
+    for line in text.splitlines():
+        line_no += 1
+        if line_no <= after_line:
+            continue
+        if line_no > MAX_LINES_TO_SCAN:
+            break
+        if line_end_i is not None and line_no > line_end_i:
+            break
+        if pat is not None and not pat.search(line):
+            continue
+        if level is not None:
+            m = _LEVEL_RE.search(line)
+            if m is None:
+                continue
+            seen = m.group(1).upper()
+            if not (seen.startswith("WARN") and level.startswith("WARN")) and seen != level:
+                continue
+        if since_ts is not None or until_ts is not None:
+            ts = _extract_ts(line)
+            if ts is None:
+                continue
+            if since_ts is not None and ts < since_ts:
+                continue
+            if until_ts is not None and ts > until_ts:
+                continue
+        return True
+    return False
 
 
 def _compile_pattern(p: str | None, regex: bool) -> re.Pattern | None:

@@ -37,7 +37,11 @@ SCHEMA: dict[str, Any] = {
         },
         "entry_id": {
             "type": "string",
-            "description": "Only return notes whose entry_ids list includes this id.",
+            "description": (
+                "Only return notes whose entry_ids list includes this id. "
+                "Must be a UUID or short hex prefix (≥ 8 chars), NOT a "
+                "file name."
+            ),
         },
         "tags": {
             "type": "array",
@@ -77,6 +81,15 @@ SCHEMA: dict[str, Any] = {
             "maximum": 50,
             "description": "Max notes returned. Default 10.",
         },
+        "offset": {
+            "type": "integer",
+            "minimum": 0,
+            "description": (
+                "Skip first N matches that satisfy ALL filters (text + "
+                "entry_id + tags + kinds + conversation + since/super). "
+                "Default 0. Use with `next_offset` to page."
+            ),
+        },
         "order": {
             "type": "string",
             "enum": ["recent_first", "oldest_first"],
@@ -109,35 +122,53 @@ async def search_journal(
     include_superseded = bool(args.get("include_superseded") or False)
     since_days = int(args.get("since_days") or 90)
     limit = min(int(args.get("limit") or 10), 50)
+    offset = max(0, int(args.get("offset") or 0))
     order = args.get("order") or "recent_first"
 
     cutoff = datetime.now(timezone.utc) - timedelta(days=since_days)
-    rows = await journal_repo.search(
-        db,
-        cutoff=cutoff,
-        kinds=kinds,
-        conversation_id=conversation_id,
-        include_superseded=include_superseded,
-        text=text_q,
-        order=order,
-        limit=limit * 4,
-    )
 
-    # entry_id and tags filters: SQLite JSON cannot be cleanly filtered
-    # server-side, so we post-filter in Python (results capped above).
-    filtered: list[Journal] = []
-    for j in rows:
-        if entry_id and entry_id not in (j.entry_ids or []):
-            continue
-        if tags:
-            note_tags = set(j.tags or [])
-            if not all(t in note_tags for t in tags):
+    # The journal's JSON filters (entry_id + tags) cannot be expressed in
+    # SQLite cleanly, so we post-filter in Python. To honor a true offset
+    # we walk the SQL window forward (chunks of `limit*4`) until we have
+    # collected `offset + limit` post-filtered hits or exhausted rows.
+    needed = offset + limit
+    collected: list[Journal] = []
+    cursor = 0
+    chunk = max(limit * 4, 20)
+    exhausted = False
+    while len(collected) < needed:
+        rows = await journal_repo.search(
+            db,
+            cutoff=cutoff,
+            kinds=kinds,
+            conversation_id=conversation_id,
+            include_superseded=include_superseded,
+            text=text_q,
+            order=order,
+            limit=chunk,
+            offset=cursor,
+        )
+        if not rows:
+            exhausted = True
+            break
+        for j in rows:
+            if entry_id and entry_id not in (j.entry_ids or []):
                 continue
-        filtered.append(j)
-        if len(filtered) >= limit:
+            if tags:
+                note_tags = set(j.tags or [])
+                if not all(t in note_tags for t in tags):
+                    continue
+            collected.append(j)
+            if len(collected) >= needed:
+                break
+        cursor += len(rows)
+        if len(rows) < chunk:
+            exhausted = True
             break
 
-    return {
+    page = collected[offset: offset + limit]
+    has_more = (not exhausted) or (len(collected) > offset + len(page))
+    out: dict[str, Any] = {
         "notes": [
             {
                 "id": j.id,
@@ -149,7 +180,11 @@ async def search_journal(
                 "superseded_by_id": j.superseded_by_id,
                 "created_at": j.created_at.isoformat() if j.created_at else None,
             }
-            for j in filtered
+            for j in page
         ],
-        "count": len(filtered),
+        "count": len(page),
+        "has_more": has_more,
     }
+    if has_more:
+        out["next_offset"] = offset + len(page)
+    return out

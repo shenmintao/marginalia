@@ -1,9 +1,11 @@
 """search_metadata — DESIGN.md §10.1.
 
 Filters entries by combinations of text (ILIKE on summary + extras), tags,
-catalog scope, view, kind, lifecycle. The two catalog filters are mutually
-exclusive: `catalog_id` (single node, exact match) XOR `catalog_subtree`
-(recursive). Returns minimal entry rows.
+catalog scope, folder scope, view, kind, lifecycle. Catalog filters
+(`catalog_id` / `catalog_subtree`) are mutually exclusive; folder filters
+(`folder_id` / `folder_subtree`) are mutually exclusive. Catalog and folder
+filters can be combined (AND). Returns minimal entry rows + pagination
+metadata (`total`, `has_more`, `next_offset`).
 """
 from __future__ import annotations
 
@@ -15,6 +17,7 @@ from marginalia.agent.tools import ToolContext, tool
 from marginalia.db.models import View
 from marginalia.repositories import catalogs as catalogs_repo
 from marginalia.repositories import entries as entries_repo
+from marginalia.repositories import folders as folders_repo
 
 
 SCHEMA: dict[str, Any] = {
@@ -37,6 +40,14 @@ SCHEMA: dict[str, Any] = {
             "type": "string",
             "description": "Catalog id whose subtree (incl. self) the entry must fall in. Mutually exclusive with catalog_id.",
         },
+        "folder_id": {
+            "type": "string",
+            "description": "Single folder match. Mutually exclusive with folder_subtree.",
+        },
+        "folder_subtree": {
+            "type": "string",
+            "description": "Folder id whose subtree (incl. self) the entry must fall in. Mutually exclusive with folder_id.",
+        },
         "view_id": {
             "type": "string",
             "description": "Restrict to entries already inside this view's filter_spec.",
@@ -50,6 +61,11 @@ SCHEMA: dict[str, Any] = {
             },
         },
         "limit": {"type": "integer", "minimum": 1, "maximum": 500},
+        "offset": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Skip first N matches (default 0). Use with `next_offset` to page.",
+        },
     },
 }
 
@@ -60,7 +76,11 @@ SCHEMA: dict[str, Any] = {
         "Narrow down candidate entries via filters. Tag ids must be already "
         "resolved (use resolve_tag). Catalog filters: catalog_id picks one "
         "node only; catalog_subtree picks the node and all descendants — "
-        "they are mutually exclusive."
+        "mutually exclusive. Folder filters work the same way "
+        "(folder_id / folder_subtree, mutually exclusive). Catalog and "
+        "folder filters AND together. Pass `offset` (with the previous "
+        "call's `next_offset`) to page beyond `limit`; the response carries "
+        "`total` and `has_more`."
     ),
     schema=SCHEMA,
 )
@@ -75,19 +95,30 @@ async def search_metadata(
     tags_none = args.get("tags_none") or []
     cat_one = args.get("catalog_id")
     cat_subtree = args.get("catalog_subtree")
+    fld_one = args.get("folder_id")
+    fld_subtree = args.get("folder_subtree")
     view_id = args.get("view_id")
     kind = args.get("kind")
     lifecycle = args.get("lifecycle") or ["active", "manual_active"]
     limit = min(int(args.get("limit") or 50), 500)
+    offset = max(0, int(args.get("offset") or 0))
 
     if cat_one and cat_subtree:
         return {"error": "catalog_id and catalog_subtree are mutually exclusive"}
+    if fld_one and fld_subtree:
+        return {"error": "folder_id and folder_subtree are mutually exclusive"}
 
     catalog_in: list[str] | None = None
     if cat_subtree:
         catalog_in = await catalogs_repo.expand_subtree(db, cat_subtree)
         if not catalog_in:
-            return {"entries": [], "count": 0}
+            return _empty_page(limit, offset)
+
+    folder_in: list[str] | None = None
+    if fld_subtree:
+        folder_in = await folders_repo.expand_subtree(db, fld_subtree)
+        if not folder_in:
+            return _empty_page(limit, offset)
 
     extra_ids: list[str] | None = None
     if view_id:
@@ -101,23 +132,29 @@ async def search_metadata(
             catalog_subtree_expander=lambda rid: catalogs_repo.expand_subtree(db, rid),
         )
         if not extra_ids:
-            return {"entries": [], "count": 0}
+            return _empty_page(limit, offset)
 
-    rows = await entries_repo.search_filtered(
-        db,
+    common_filters = dict(
         text=text_q,
         lifecycle=lifecycle,
         kind=kind,
         catalog_one=cat_one,
         catalog_in=catalog_in,
+        folder_one=fld_one,
+        folder_in=folder_in,
         tags_all=tags_all,
         tags_any=tags_any,
         tags_none=tags_none,
         extra_entry_ids=extra_ids,
-        limit=limit,
     )
 
-    return {
+    total = await entries_repo.count_filtered(db, **common_filters)
+    rows = await entries_repo.search_filtered(
+        db, **common_filters, limit=limit, offset=offset,
+    )
+
+    has_more = (offset + len(rows)) < total
+    out: dict[str, Any] = {
         "entries": [
             {
                 "entry_id": e.id,
@@ -126,8 +163,23 @@ async def search_metadata(
                 "kind": f.kind,
                 "summary": f.summary,
                 "catalog_id": e.catalog_id,
+                "folder_id": e.folder_id,
             }
             for e, f in rows
         ],
         "count": len(rows),
+        "total": total,
+        "has_more": has_more,
+    }
+    if has_more:
+        out["next_offset"] = offset + len(rows)
+    return out
+
+
+def _empty_page(limit: int, offset: int) -> dict[str, Any]:
+    return {
+        "entries": [],
+        "count": 0,
+        "total": 0,
+        "has_more": False,
     }

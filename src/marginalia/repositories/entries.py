@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import delete, not_, or_, select, update
+from sqlalchemy import delete, func, not_, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from marginalia.db.models import EntryTag, File, FileEntry, TaskOutcome
@@ -56,23 +56,45 @@ def _apply_tag_filters(
 
 async def list_live_in_folder(
     db: AsyncSession, folder_id: str | None,
+    *, limit: int | None = None, offset: int = 0,
 ) -> list[tuple[FileEntry, str | None]]:
     """Live entries directly under one folder + their `File.ingest_status`,
     ordered by display_name. Used by routes_folders for the GUI's folder
     listing — surfacing ingest_status lets the row paint a "failed" badge
-    without a second round-trip. folder_id=None returns root entries."""
-    rows = (
-        await db.execute(
-            select(FileEntry, File.ingest_status)
-            .join(File, File.id == FileEntry.file_id)
-            .where(
-                _folder_clause(folder_id),
-                _live_entry(),
-            )
-            .order_by(FileEntry.display_name)
+    without a second round-trip. folder_id=None returns root entries.
+
+    `limit` and `offset` are optional. The GUI route still calls this
+    without them (it streams the whole list to the browser); the agent
+    tool passes both to honor the pagination contract."""
+    stmt = (
+        select(FileEntry, File.ingest_status)
+        .join(File, File.id == FileEntry.file_id)
+        .where(
+            _folder_clause(folder_id),
+            _live_entry(),
         )
-    ).all()
+        .order_by(FileEntry.display_name)
+    )
+    if offset:
+        stmt = stmt.offset(offset)
+    if limit is not None:
+        stmt = stmt.limit(limit)
+    rows = (await db.execute(stmt)).all()
     return [(e, status) for e, status in rows]
+
+
+async def count_live_in_folder(
+    db: AsyncSession, folder_id: str | None,
+) -> int:
+    """Total live entries directly under `folder_id`. Pair with the
+    paginated list_live_in_folder for the agent's `total` field."""
+    stmt = (
+        select(func.count())
+        .select_from(FileEntry)
+        .join(File, File.id == FileEntry.file_id)
+        .where(_folder_clause(folder_id), _live_entry())
+    )
+    return int((await db.execute(stmt)).scalar_one())
 
 
 async def find_live_by_folder_and_name(
@@ -189,31 +211,29 @@ async def list_live_with_file_in_folders(
     return [(e, f) for e, f in rows]
 
 
-async def search_filtered(
-    db: AsyncSession,
+def _build_filtered_stmt(
     *,
-    text: str | None = None,
-    lifecycle: list[str] | None = None,
-    kind: str | None = None,
-    catalog_one: str | None = None,
-    catalog_in: list[str] | None = None,
-    tags_all: list[str] | None = None,
-    tags_any: list[str] | None = None,
-    tags_none: list[str] | None = None,
-    extra_entry_ids: list[str] | None = None,
-    limit: int | None = None,
-) -> list[tuple[FileEntry, File]]:
-    """The unified entry search used by `search_metadata` (agent tool) and
-    `materialize_view`. All filters are conjunctive; an unset filter is a
-    no-op. tag filters resolve through EntryTag subqueries."""
-    stmt = (
-        select(FileEntry, File)
-        .join(File, File.id == FileEntry.file_id)
-        .where(
-            _live_entry(),
-            _live_file(),
-        )
-    )
+    text: str | None,
+    lifecycle: list[str] | None,
+    kind: str | None,
+    catalog_one: str | None,
+    catalog_in: list[str] | None,
+    folder_one: str | None,
+    folder_in: list[str] | None,
+    tags_all: list[str] | None,
+    tags_any: list[str] | None,
+    tags_none: list[str] | None,
+    extra_entry_ids: list[str] | None,
+    base,
+):
+    """Shared WHERE-clause builder for search_filtered + count_filtered.
+
+    Returns (stmt, empty_short_circuit). When `empty_short_circuit` is
+    True the caller should skip executing and return zero results — this
+    happens when an `..._in` filter is an empty list (semantically: 'no
+    matches possible').
+    """
+    stmt = base.where(_live_entry(), _live_file())
     if lifecycle:
         stmt = stmt.where(FileEntry.lifecycle.in_(lifecycle))
     if kind:
@@ -230,20 +250,95 @@ async def search_filtered(
         stmt = stmt.where(FileEntry.catalog_id == catalog_one)
     elif catalog_in is not None:
         if not catalog_in:
-            return []
+            return stmt, True
         stmt = stmt.where(FileEntry.catalog_id.in_(catalog_in))
+    if folder_one is not None:
+        stmt = stmt.where(FileEntry.folder_id == folder_one)
+    elif folder_in is not None:
+        if not folder_in:
+            return stmt, True
+        stmt = stmt.where(FileEntry.folder_id.in_(folder_in))
     stmt = _apply_tag_filters(
         stmt, tags_all=tags_all, tags_any=tags_any, tags_none=tags_none,
     )
     if extra_entry_ids is not None:
         if not extra_entry_ids:
-            return []
+            return stmt, True
         stmt = stmt.where(FileEntry.id.in_(extra_entry_ids))
+    return stmt, False
+
+
+async def search_filtered(
+    db: AsyncSession,
+    *,
+    text: str | None = None,
+    lifecycle: list[str] | None = None,
+    kind: str | None = None,
+    catalog_one: str | None = None,
+    catalog_in: list[str] | None = None,
+    folder_one: str | None = None,
+    folder_in: list[str] | None = None,
+    tags_all: list[str] | None = None,
+    tags_any: list[str] | None = None,
+    tags_none: list[str] | None = None,
+    extra_entry_ids: list[str] | None = None,
+    limit: int | None = None,
+    offset: int = 0,
+) -> list[tuple[FileEntry, File]]:
+    """The unified entry search used by `search_metadata` (agent tool) and
+    `materialize_view`. All filters are conjunctive; an unset filter is a
+    no-op. tag filters resolve through EntryTag subqueries. Pair with
+    `count_filtered` for total-count pagination."""
+    base = select(FileEntry, File).join(File, File.id == FileEntry.file_id)
+    stmt, empty = _build_filtered_stmt(
+        text=text, lifecycle=lifecycle, kind=kind,
+        catalog_one=catalog_one, catalog_in=catalog_in,
+        folder_one=folder_one, folder_in=folder_in,
+        tags_all=tags_all, tags_any=tags_any, tags_none=tags_none,
+        extra_entry_ids=extra_entry_ids, base=base,
+    )
+    if empty:
+        return []
     stmt = stmt.order_by(FileEntry.updated_at.desc())
+    if offset:
+        stmt = stmt.offset(offset)
     if limit is not None:
         stmt = stmt.limit(limit)
     rows = (await db.execute(stmt)).all()
     return [(e, f) for e, f in rows]
+
+
+async def count_filtered(
+    db: AsyncSession,
+    *,
+    text: str | None = None,
+    lifecycle: list[str] | None = None,
+    kind: str | None = None,
+    catalog_one: str | None = None,
+    catalog_in: list[str] | None = None,
+    folder_one: str | None = None,
+    folder_in: list[str] | None = None,
+    tags_all: list[str] | None = None,
+    tags_any: list[str] | None = None,
+    tags_none: list[str] | None = None,
+    extra_entry_ids: list[str] | None = None,
+) -> int:
+    """Total rows that would match `search_filtered` with the same filters,
+    ignoring limit/offset. Used to populate `total` / `has_more` in the
+    pagination contract."""
+    base = select(func.count()).select_from(
+        FileEntry.__table__.join(File.__table__, File.id == FileEntry.file_id)
+    )
+    stmt, empty = _build_filtered_stmt(
+        text=text, lifecycle=lifecycle, kind=kind,
+        catalog_one=catalog_one, catalog_in=catalog_in,
+        folder_one=folder_one, folder_in=folder_in,
+        tags_all=tags_all, tags_any=tags_any, tags_none=tags_none,
+        extra_entry_ids=extra_entry_ids, base=base,
+    )
+    if empty:
+        return 0
+    return int((await db.execute(stmt)).scalar_one())
 
 
 async def list_ids_under_filter_spec(
@@ -334,10 +429,29 @@ async def resolve_entry_id_prefix(
     if len(cleaned) < _MIN_PREFIX or not all(
         c in "0123456789abcdef" for c in cleaned
     ):
+        # Looks like a file name. Probe display_name to give the agent
+        # back the actual id(s) so it can self-correct in one round-trip.
+        candidates = (
+            await db.execute(
+                select(FileEntry.id, FileEntry.display_name)
+                .where(FileEntry.display_name.ilike(f"%{s}%"))
+                .where(FileEntry.lifecycle != "deleted")
+                .limit(5)
+            )
+        ).all()
+        if candidates:
+            hint = "; ".join(
+                f"{cid[:8]}={name!r}" for cid, name in candidates
+            )
+            return s, (
+                f"entry_id={s!r} looks like a file name, not an id. "
+                f"Likely matches (use the 8-char prefix or full id): "
+                f"{hint}"
+            )
         return s, (
             f"entry_id={s!r} is not a valid uuid or short prefix "
             f"(need >= {_MIN_PREFIX} hex chars). "
-            "Use the id from a search/list tool result."
+            "Use search_metadata or list_folder to get the id first."
         )
 
     # SQL LIKE on the de-dashed prefix. Entry ids are stored as 36-char

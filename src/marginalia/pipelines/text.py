@@ -209,7 +209,9 @@ class TextPipeline(Pipeline):
         """Resolve the args dict against this file's text body.
 
         Priority (first matching field wins):
-          1. pattern    → regex search with context_lines / max_matches
+          1. pattern    → regex search with context_lines / max_matches /
+                          match_offset; restricted to the line_start..
+                          line_end window when those are also passed
           2. section_id → look up in description.sections, return its body
           3. heading    → find by section title, return its body
           4. line_start → return the line range
@@ -224,10 +226,29 @@ class TextPipeline(Pipeline):
 
         pattern = (args.get("pattern") or "").strip()
         if pattern:
+            scope_body = body
+            scope_line_offset = 0
+            ls_raw = args.get("line_start")
+            le_raw = args.get("line_end")
+            if ls_raw or le_raw:
+                try:
+                    ls = max(1, int(ls_raw)) if ls_raw else 1
+                    le = int(le_raw) if le_raw else None
+                except (TypeError, ValueError):
+                    return SegmentResult(error="line_start/line_end must be integers")
+                lines_all = body.splitlines()
+                if le is None:
+                    le = len(lines_all)
+                if le < ls:
+                    return SegmentResult(error="line_end must be >= line_start")
+                scope_body = "\n".join(lines_all[ls - 1: le])
+                scope_line_offset = ls - 1
             return _pattern_search(
-                body=body, pattern=pattern,
+                body=scope_body, pattern=pattern,
                 context_lines=int(args.get("context_lines") or 2),
                 max_matches=int(args.get("max_matches") or 20),
+                match_offset=max(0, int(args.get("match_offset") or 0)),
+                line_offset=scope_line_offset,
             )
 
         section_id = (args.get("section_id") or "").strip()
@@ -396,6 +417,7 @@ def _clamp(
 
 def _pattern_search(
     *, body: str, pattern: str, context_lines: int, max_matches: int,
+    match_offset: int = 0, line_offset: int = 0,
 ) -> SegmentResult:
     try:
         rx = re.compile(pattern, re.IGNORECASE | re.MULTILINE)
@@ -408,44 +430,51 @@ def _pattern_search(
         line_starts.append(line_starts[-1] + len(ln) + 1)
 
     def line_of(pos: int) -> int:
-        # binary search would be tighter; simple linear is fine here
         for i, start in enumerate(line_starts):
             if start > pos:
                 return i  # 1-indexed
         return len(lines)
 
+    all_matches = list(rx.finditer(body))
+    total = len(all_matches)
+    sliced = all_matches[match_offset: match_offset + max_matches]
     hits: list[dict[str, Any]] = []
-    for m in rx.finditer(body):
-        if len(hits) >= max_matches:
-            break
+    for m in sliced:
         line_no = line_of(m.start())
         s = max(0, line_no - 1 - context_lines)
         e = min(len(lines), line_no + context_lines)
         hits.append({
-            "line": line_no,
+            "line": line_no + line_offset,
             "match": m.group(0)[:200],
             "context": "\n".join(lines[s:e]),
         })
 
+    has_more = (match_offset + len(hits)) < total
+    extras: dict[str, Any] = {
+        "pattern": pattern,
+        "match_count": len(hits),
+        "total_matches": total,
+        "match_offset": match_offset,
+        "has_more": has_more,
+        "hits": hits,
+    }
+    if has_more:
+        extras["next_match_offset"] = match_offset + len(hits)
+
     if not hits:
-        return SegmentResult(
-            text="",
-            error="no matches",
-            extras={"pattern": pattern},
-        )
+        if match_offset and total:
+            err = (
+                f"match_offset {match_offset} exceeds total_matches {total}"
+            )
+        else:
+            err = "no matches"
+        return SegmentResult(text="", error=err, extras=extras)
 
     rendered = "\n\n".join(
         f"[L{h['line']}] {h['match']}\n  ┊ {h['context']}"
         for h in hits
     )
-    return SegmentResult(
-        text=rendered,
-        extras={
-            "pattern": pattern,
-            "match_count": len(hits),
-            "hits": hits,
-        },
-    )
+    return SegmentResult(text=rendered, extras=extras)
 
 
 def _decode_text(buf: bytes) -> str:

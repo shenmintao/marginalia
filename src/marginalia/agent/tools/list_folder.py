@@ -41,6 +41,22 @@ SCHEMA: dict[str, Any] = {
                 "exclusive with parent_id."
             ),
         },
+        "folders_limit": {
+            "type": "integer", "minimum": 1, "maximum": 500,
+            "description": "Cap on child folders. Default 100.",
+        },
+        "folders_offset": {
+            "type": "integer", "minimum": 0,
+            "description": "Skip first N child folders. Default 0.",
+        },
+        "entries_limit": {
+            "type": "integer", "minimum": 1, "maximum": 500,
+            "description": "Cap on entries. Default 100.",
+        },
+        "entries_offset": {
+            "type": "integer", "minimum": 0,
+            "description": "Skip first N entries. Default 0.",
+        },
     },
 }
 
@@ -116,7 +132,10 @@ async def _resolve_path(
         "entries (files) inside it. Pass parent_id=null (or omit) for "
         "root level, parent_id=<id> for a specific folder, or "
         "path='Papers/2024' to resolve by name. parent_id and path are "
-        "mutually exclusive. Returns both folders and entries in one call."
+        "mutually exclusive. Both folders and entries paginate via "
+        "`folders_limit`/`folders_offset` and `entries_limit`/`entries_offset` "
+        "(defaults 100 each). Response carries `folder_total`/`entry_total` "
+        "and per-section `next_offset` when more remain."
     ),
     schema=SCHEMA,
 )
@@ -127,6 +146,10 @@ async def list_folder(
 ) -> dict[str, Any]:
     raw_parent = args.get("parent_id")
     raw_path = args.get("path")
+    folders_limit = min(int(args.get("folders_limit") or 100), 500)
+    folders_offset = max(0, int(args.get("folders_offset") or 0))
+    entries_limit = min(int(args.get("entries_limit") or 100), 500)
+    entries_offset = max(0, int(args.get("entries_offset") or 0))
 
     if raw_path and raw_parent:
         return {
@@ -147,9 +170,18 @@ async def list_folder(
             else str(raw_parent)
         )
 
-    folders = await folders_repo.list_children(db, parent_id)
-    entries = await entries_repo.list_live_in_folder(db, parent_id)
-    return {
+    folder_total = await folders_repo.count_children(db, parent_id)
+    entry_total = await entries_repo.count_live_in_folder(db, parent_id)
+    folders = await folders_repo.list_children(
+        db, parent_id, limit=folders_limit, offset=folders_offset,
+    )
+    entries = await entries_repo.list_live_in_folder(
+        db, parent_id, limit=entries_limit, offset=entries_offset,
+    )
+
+    folder_has_more = (folders_offset + len(folders)) < folder_total
+    entry_has_more = (entries_offset + len(entries)) < entry_total
+    out: dict[str, Any] = {
         "folders": [
             {
                 "id": f.id,
@@ -173,4 +205,13 @@ async def list_folder(
         ],
         "folder_count": len(folders),
         "entry_count": len(entries),
+        "folder_total": folder_total,
+        "entry_total": entry_total,
+        "folder_has_more": folder_has_more,
+        "entry_has_more": entry_has_more,
     }
+    if folder_has_more:
+        out["folders_next_offset"] = folders_offset + len(folders)
+    if entry_has_more:
+        out["entries_next_offset"] = entries_offset + len(entries)
+    return out

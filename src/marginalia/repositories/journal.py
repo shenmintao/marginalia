@@ -23,9 +23,11 @@ async def search(
     text: str | None,
     order: str,
     limit: int,
+    offset: int = 0,
 ) -> list[Journal]:
     """The shape used by search_journal. JSON-array filters (entry_id, tags)
-    are evaluated in Python by the caller — SQLite can't do them cleanly."""
+    are evaluated in Python by the caller — SQLite can't do them cleanly.
+    `offset` cooperates with the agent tool's loop-and-page strategy."""
     stmt = select(Journal).where(
         Journal.created_at >= cutoff,
         Journal.source_kind.in_(list(kinds)),
@@ -40,6 +42,8 @@ async def search(
         stmt = stmt.order_by(Journal.created_at.asc())
     else:
         stmt = stmt.order_by(Journal.created_at.desc())
+    if offset:
+        stmt = stmt.offset(offset)
     rows = (await db.execute(stmt.limit(limit))).scalars().all()
     return list(rows)
 

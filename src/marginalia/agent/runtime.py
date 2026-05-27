@@ -82,6 +82,10 @@ log = logging.getLogger(__name__)
 MAX_EXECUTE_TURNS = 15
 EXECUTE_NUDGE_FROM = 11
 MAX_TOOL_RESULT_LEN = 50_000
+# Structured-truncation safety net: how many trim passes before falling
+# back to string slicing. Practically each pass halves one large list, so
+# 3 passes can absorb three different oversize lists in one payload.
+STRUCTURED_TRUNCATE_PASSES = 3
 # Default token budgets — overridable per-deploy via AGENT_PLAN_MAX_TOKENS /
 # AGENT_EXECUTE_MAX_TOKENS in settings. Sized for gpt-4o-class models; bump
 # for long-context backends (DeepSeek-V3, Claude 3.5 Sonnet, etc.).
@@ -116,6 +120,119 @@ def _canonical_args(arguments: Any) -> str:
         return json.dumps(arguments, ensure_ascii=False, sort_keys=True)
     except (TypeError, ValueError):
         return repr(arguments)
+
+
+def _find_largest_list(payload: Any) -> tuple[list, str, int] | None:
+    """Walk `payload` and return the longest list with its dotted path and
+    serialized weight, or None if the payload contains no lists. We pick by
+    serialized character cost — a list of 5 huge dicts outranks a list of
+    500 ints — because that's what the budget actually constrains."""
+    best: tuple[list, str, int] | None = None
+
+    def visit(node: Any, path: str) -> None:
+        nonlocal best
+        if isinstance(node, list):
+            try:
+                weight = len(json.dumps(node, ensure_ascii=False))
+            except (TypeError, ValueError):
+                weight = sum(len(repr(x)) for x in node)
+            if best is None or weight > best[2]:
+                best = (node, path or "$", weight)
+            for i, item in enumerate(node):
+                visit(item, f"{path}[{i}]")
+        elif isinstance(node, dict):
+            for k, v in node.items():
+                visit(v, f"{path}.{k}" if path else k)
+
+    visit(payload, "")
+    return best
+
+
+def _trim_largest_list(payload: Any, budget: int) -> tuple[bool, str | None, int]:
+    """Find the largest list in `payload` and shrink it (in place) until the
+    re-serialized payload fits within `budget`. Returns
+    (changed, path, dropped_count). If no list is found or trimming cannot
+    bring the payload under budget, returns (False, None, 0)."""
+    target = _find_largest_list(payload)
+    if target is None:
+        return False, None, 0
+    lst, path, _ = target
+    original = list(lst)
+    n = len(original)
+    if n == 0:
+        return False, None, 0
+    # Binary-search the largest prefix that fits. lst is mutated in place,
+    # so we save `original` once and restore the prefix on each probe.
+    lo, hi = 0, n
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        lst.clear()
+        lst.extend(original[:mid])
+        try:
+            size = len(json.dumps(payload, ensure_ascii=False, default=str))
+        except (TypeError, ValueError):
+            size = budget + 1
+        if size <= budget:
+            lo = mid
+        else:
+            hi = mid - 1
+    lst.clear()
+    lst.extend(original[:lo])
+    dropped = n - lo
+    return dropped > 0, path, dropped
+
+
+def _structured_truncate(payload: Any, budget: int) -> tuple[str, dict | None]:
+    """Serialize `payload` to JSON ≤ `budget` chars by trimming its largest
+    lists. Returns (json_text, marker) where `marker` describes what was
+    dropped (or None when nothing was trimmed). Falls back to a string
+    slice on the serialized output if structured passes can't shrink it
+    enough — that branch should be rare and signals an oddly-shaped
+    payload (deeply nested scalars, no lists)."""
+    try:
+        text = json.dumps(payload, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        return repr(payload)[:budget], None
+    if len(text) <= budget:
+        return text, None
+    if not isinstance(payload, (dict, list)):
+        return text[:budget] + "...(truncated)", {
+            "_truncated_field": "$", "_truncated_dropped": -1,
+            "_truncated_reason": "non-container payload",
+        }
+    # Reserve headroom for the marker we'll inject after trimming, so the
+    # final post-marker payload still fits within `budget`.
+    MARKER_HEADROOM = 240
+    inner_budget = max(budget - MARKER_HEADROOM, budget // 2)
+    truncations: list[dict[str, Any]] = []
+    for _ in range(STRUCTURED_TRUNCATE_PASSES):
+        changed, path, dropped = _trim_largest_list(payload, inner_budget)
+        if not changed:
+            break
+        truncations.append({"path": path, "dropped": dropped})
+        try:
+            text = json.dumps(payload, ensure_ascii=False, default=str)
+        except (TypeError, ValueError):
+            break
+        if len(text) <= inner_budget:
+            break
+    marker: dict[str, Any] = {}
+    if truncations:
+        first = truncations[0]
+        marker["_truncated_field"] = first["path"]
+        marker["_truncated_dropped"] = first["dropped"]
+        if len(truncations) > 1:
+            marker["_truncated_path"] = truncations
+    if isinstance(payload, dict) and marker:
+        payload.update(marker)
+    try:
+        text = json.dumps(payload, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        pass
+    if len(text) > budget:
+        text = text[:budget] + "...(truncated)"
+        marker.setdefault("_truncated_reason", "fallback string slice")
+    return text, (marker or None)
 
 
 @dataclass(slots=True)
@@ -455,11 +572,17 @@ async def _rewrite_footnotes_for_display(answer: str) -> str:
         if name is None:
             head = f"(entry {short} unavailable)"
         else:
+            # Page wins over quote when both are present. The browser PDF
+            # iframe only honours `#page=N` — a `?q=` link on a PDF can't
+            # produce a jump (no DOM to text-search), so even if the LLM
+            # wrote both `page=N, quote="..."` we want the page form. For
+            # text/docx the LLM doesn't write `page=`, so this branch only
+            # fires on PDFs in practice.
             qs = ""
-            if quote is not None:
-                qs = f"?q={urllib.parse.quote_plus(_unescape_quote(quote))}"
-            elif page:
+            if page:
                 qs = f"?page={page}"
+            elif quote is not None:
+                qs = f"?q={urllib.parse.quote_plus(_unescape_quote(quote))}"
             head = f"[{name}](entry:{full_eid}{qs})"
         if reason:
             return f"[^{marker}]: {head} — {reason}"
@@ -900,9 +1023,14 @@ async def _dispatch_tool_calls(
                     }
                 else:
                     result_for_model = result
-                result_text = json.dumps(result_for_model, ensure_ascii=False)
-                if len(result_text) > MAX_TOOL_RESULT_LEN:
-                    result_text = result_text[:MAX_TOOL_RESULT_LEN] + "...(truncated)"
+                if isinstance(result_for_model, (dict, list)):
+                    result_text, _trim_marker = _structured_truncate(
+                        result_for_model, MAX_TOOL_RESULT_LEN,
+                    )
+                else:
+                    result_text = json.dumps(result_for_model, ensure_ascii=False)
+                    if len(result_text) > MAX_TOOL_RESULT_LEN:
+                        result_text = result_text[:MAX_TOOL_RESULT_LEN] + "...(truncated)"
                 await _persist_tool_call(
                     conversation_id=conversation_id,
                     name=tc.name, arguments=tc.arguments,

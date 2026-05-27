@@ -54,21 +54,34 @@ SCHEMA: dict[str, Any] = {
         "requests": {
             "type": "array",
             "minItems": 1,
+            "maxItems": 10,
             "items": {
                 "type": "object",
                 "additionalProperties": False,
                 "required": ["entry_id"],
                 "properties": {
-                    "entry_id": {"type": "string"},
+                    "entry_id": {
+                        "type": "string",
+                        "description": (
+                            "Entry UUID (or short hex prefix, ≥ 8 chars). "
+                            "NOT a file name or display_name — get it from "
+                            "search_metadata / list_folder first."
+                        ),
+                    },
                     "reads": {
                         "type": "array",
+                        "maxItems": 10,
                         "items": {
                             "type": "object",
                             "additionalProperties": False,
                             "properties": {
                                 # generic chunking
                                 "offset": {"type": "integer", "minimum": 0},
-                                "max_chars": {"type": "integer", "minimum": 1},
+                                "max_chars": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 16000,
+                                },
                                 # text-shaped
                                 "line_start": {"type": "integer", "minimum": 1},
                                 "line_end": {"type": "integer", "minimum": 1},
@@ -83,7 +96,20 @@ SCHEMA: dict[str, Any] = {
                                 # pattern search
                                 "pattern": {"type": "string"},
                                 "context_lines": {"type": "integer", "minimum": 0},
-                                "max_matches": {"type": "integer", "minimum": 1},
+                                "max_matches": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 100,
+                                },
+                                "match_offset": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "description": (
+                                        "Skip first N pattern hits — "
+                                        "page through matches with "
+                                        "next_match_offset from prior call."
+                                    ),
+                                },
                                 # container
                                 "member_path": {"type": "string"},
                                 # VLM-on-read: required when reading an
@@ -92,7 +118,22 @@ SCHEMA: dict[str, Any] = {
                                 # the original image / requested pages
                                 # to the vision model with this question
                                 # and returns the targeted answer.
-                                "question": {"type": "string", "minLength": 1},
+                                "question": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "description": (
+                                        "REQUIRED for image entries and "
+                                        "OCR-indexed PDFs (those have no "
+                                        "extractable text layer). The "
+                                        "pipeline sends rendered pages to "
+                                        "the vision model and returns a "
+                                        "targeted answer. Combine with "
+                                        "`page_start`/`page_end` to scope "
+                                        "the question to specific pages. "
+                                        "For text-layer files this field "
+                                        "is ignored."
+                                    ),
+                                },
                             },
                         },
                     },
@@ -111,11 +152,17 @@ SCHEMA: dict[str, Any] = {
         "pipeline understands (offset/max_chars for any file; "
         "page_start/page_end for PDF; line_start/line_end / section_id / "
         "heading for text; pattern for regex search; member_path for "
-        "container members). For image entries and PDFs that were "
-        "OCR-indexed at ingest, pass `question` — the pipeline sends the "
-        "image / rendered pages to the vision model and returns a "
-        "targeted answer instead of frozen ingest-time text. Use AFTER "
-        "read_entries_metadata identified relevant sections."
+        "container members). `pattern` can be combined with a range "
+        "(page_start/end, line_start/end, paragraph_start/end, or "
+        "spreadsheet heading) to restrict the search to that window — "
+        "useful for a long file where the same term appears many times. "
+        "Pattern hits are paginated via `match_offset` (use the "
+        "`next_match_offset` from a previous response). For image entries "
+        "and PDFs that were OCR-indexed at ingest, pass `question` — the "
+        "pipeline sends the image / rendered pages to the vision model "
+        "and returns a targeted answer instead of frozen ingest-time "
+        "text. Use AFTER read_entries_metadata identified relevant "
+        "sections."
     ),
     schema=SCHEMA,
 )
