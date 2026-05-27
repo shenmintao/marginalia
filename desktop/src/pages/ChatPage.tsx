@@ -25,26 +25,36 @@ import { SessionList } from "@/components/SessionList";
 import { useChatSession } from "@/lib/chatSession";
 import { cn } from "@/lib/utils";
 
+/** Module-level abort controller for the in-flight SSE stream.
+ *  Not tied to component lifecycle so the stream survives navigation. */
+let activeAbort: AbortController | null = null;
+
+/** Monotonic counter bumped by loadSession / newChat / stop so the
+ *  send() finally block can detect that a session switch happened
+ *  after it was dispatched — and avoid corrupting the new turns. */
+let streamGeneration = 0;
+
 export function ChatPage() {
   const sessionId = useChatSession((s) => s.sessionId);
   const setSessionId = useChatSession((s) => s.setSessionId);
-  const [turns, setTurns] = useState<Turn[]>([]);
+  const turns = useChatSession((s) => s.turns);
+  const streaming = useChatSession((s) => s.streaming);
+  const loading = useChatSession((s) => s.loading);
+  const { setTurns, setStreaming, setLoading, reset } = useChatSession();
   const [input, setInput] = useState("");
-  const [streaming, setStreaming] = useState(false);
-  const [loading, setLoading] = useState(false);
-  const abortRef = useRef<AbortController | null>(null);
-  const scrollRef = useRef<HTMLDivElement>(null);
   const [openErr, setOpenErr] = useState<string | null>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
   const [refreshSignal, setRefreshSignal] = useState(0);
 
   const ensureSession = useCallback(
     async (initiatingMessage?: string): Promise<string> => {
-      if (sessionId) return sessionId;
+      const sid = useChatSession.getState().sessionId;
+      if (sid) return sid;
       const s = await sessions.open(initiatingMessage);
       setSessionId(s.session_id);
       return s.session_id;
     },
-    [sessionId],
+    [setSessionId],
   );
 
   useEffect(() => {
@@ -52,25 +62,23 @@ export function ChatPage() {
     scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
   }, [turns]);
 
-  // Mount-only: restore the conversation when ChatPage remounts with a
-  // sessionId already pinned in the store (user clicked an `entry:`
-  // citation, landed on /library, then navigated back). turns aren't
-  // persisted — they're refetched from the server, which is the source
-  // of truth.
-  //
-  // Why mount-only and not `[sessionId]`: send() opens a fresh session
-  // by calling setSessionId(newId) before setTurns(optimisticTurn).
-  // With [sessionId] deps, this effect fires the moment sessionId flips
-  // truthy and the optimistic turn hasn't flushed yet — fetching the new
-  // session's transcript (empty) and overwriting the just-appended turn
-  // with []. The other paths that change sessionId (send, loadSession,
-  // newChat) manage `turns` directly, so they don't need this effect.
+  // Mount-only: fetch transcript from the server (source of truth).
+  // If streaming is active (SSE stream running in background), don't
+  // overwrite — the live stream is authoritative for the in-flight turn.
+  // Otherwise the server transcript is authoritative (e.g. stream
+  // completed while the user was on another page).
   useEffect(() => {
+    const { sessionId } = useChatSession.getState();
     if (!sessionId) return;
     let cancelled = false;
     setLoading(true);
     sessions.messages(sessionId)
-      .then((t) => { if (!cancelled) setTurns(t.turns.map(replayedToTurn)); })
+      .then((t) => {
+        if (cancelled) return;
+        if (!useChatSession.getState().streaming) {
+          setTurns(t.turns.map(replayedToTurn));
+        }
+      })
       .catch((e) => {
         if (cancelled) return;
         setOpenErr(e instanceof Error ? e.message : String(e));
@@ -82,12 +90,13 @@ export function ChatPage() {
 
   const send = useCallback(async () => {
     const q = input.trim();
-    if (!q || streaming) return;
+    const { streaming: curStreaming } = useChatSession.getState();
+    if (!q || curStreaming) return;
 
     let sid: string;
     let isFirstTurn = false;
     try {
-      isFirstTurn = sessionId === null;
+      isFirstTurn = useChatSession.getState().sessionId === null;
       sid = await ensureSession(q);
     } catch (e) {
       setOpenErr(e instanceof Error ? e.message : String(e));
@@ -96,41 +105,50 @@ export function ChatPage() {
 
     setOpenErr(null);
     setInput("");
-    const turnIdx = turns.length;
+    const turnIdx = useChatSession.getState().turns.length;
     setTurns((prev) => [...prev, { query: q, steps: [], answer: null, error: null, done: false }]);
     setStreaming(true);
 
     const ac = new AbortController();
-    abortRef.current = ac;
+    activeAbort = ac;
+    const gen = streamGeneration;
 
     try {
       await streamChat(sid, q, {
         signal: ac.signal,
-        onEvent: (ev) => applyEvent(setTurns, turnIdx, ev),
+        onEvent: (ev) => {
+          if (useChatSession.getState().sessionId !== sid || streamGeneration !== gen) return;
+          applyEvent(setTurns, turnIdx, ev);
+        },
       });
     } catch (e) {
       if (!ac.signal.aborted) {
-        setTurns((prev) => updateTurn(prev, turnIdx, (t) => ({
-          ...t, error: e instanceof Error ? e.message : String(e), done: true,
-        })));
+        if (useChatSession.getState().sessionId === sid && streamGeneration === gen) {
+          setTurns((prev) => updateTurn(prev, turnIdx, (t) => ({
+            ...t, error: e instanceof Error ? e.message : String(e), done: true,
+          })));
+        }
       }
     } finally {
-      abortRef.current = null;
+      activeAbort = null;
       setStreaming(false);
-      setTurns((prev) => updateTurn(prev, turnIdx, (t) => ({ ...t, done: true })));
-      // Refresh the sidebar so the just-created session shows up, or so
-      // its turn_count tick visibly.
-      if (isFirstTurn) setRefreshSignal((n) => n + 1);
+      if (useChatSession.getState().sessionId === sid && streamGeneration === gen) {
+        setTurns((prev) => updateTurn(prev, turnIdx, (t) => ({ ...t, done: true })));
+      }
+      if (isFirstTurn && streamGeneration === gen) setRefreshSignal((n) => n + 1);
     }
-  }, [input, streaming, ensureSession, turns.length, sessionId]);
+  }, [input, ensureSession, setTurns, setStreaming]);
 
   const stop = useCallback(() => {
-    abortRef.current?.abort();
-  }, []);
+    streamGeneration++;
+    activeAbort?.abort();
+    setStreaming(false);
+  }, [setStreaming]);
 
   const loadSession = useCallback(async (id: string) => {
-    if (streaming) return;
-    abortRef.current?.abort();
+    streamGeneration++;
+    activeAbort?.abort();
+    setStreaming(false);
     setLoading(true);
     setOpenErr(null);
     try {
@@ -142,15 +160,16 @@ export function ChatPage() {
     } finally {
       setLoading(false);
     }
-  }, [streaming]);
+  }, [setSessionId, setTurns, setLoading]);
 
   const newChat = useCallback(() => {
-    if (streaming) abortRef.current?.abort();
-    setSessionId(null);
-    setTurns([]);
+    streamGeneration++;
+    const { streaming: curStreaming } = useChatSession.getState();
+    if (curStreaming) activeAbort?.abort();
+    reset();
     setOpenErr(null);
     setInput("");
-  }, [streaming]);
+  }, [reset]);
 
   return (
     <div className="flex h-full overflow-hidden">
@@ -283,7 +302,7 @@ function replayedToTurn(rt: ReplayedTurn): Turn {
     answer: rt.agent_response,
     metrics: rt.metrics,
     error: null,
-    done: true,
+    done: rt.ended_at !== null,
   };
 }
 
@@ -307,7 +326,7 @@ function replayedToolCallStep(tc: ReplayedToolCall): Step {
 }
 
 function applyEvent(
-  setTurns: React.Dispatch<React.SetStateAction<Turn[]>>,
+  setTurns: (updater: Turn[] | ((prev: Turn[]) => Turn[])) => void,
   idx: number,
   ev: ChatEvent,
 ) {
