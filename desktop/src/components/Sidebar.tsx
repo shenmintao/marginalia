@@ -68,7 +68,7 @@ export function Sidebar() {
 
       {!compact && (
         <div className="mt-auto px-4 py-3 text-[11px] text-fg-subtle">
-          v0.2.1 — local-first
+          v0.1.0 — local-first
         </div>
       )}
     </aside>
