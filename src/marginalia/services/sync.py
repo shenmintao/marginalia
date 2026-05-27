@@ -18,6 +18,7 @@ failed mid-batch.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import mimetypes
@@ -47,6 +48,20 @@ from marginalia.utils.ids import new_id
 
 log = logging.getLogger(__name__)
 
+_PARALLEL_INGEST_LIMIT = 8
+
+
+def _sha256_and_size(path: Path) -> tuple[str, int]:
+    """Compute sha256 hex digest and file size (blocking — call via to_thread)."""
+    h = hashlib.sha256()
+    size = 0
+    with path.open("rb") as f:
+        while chunk := f.read(1024 * 256):
+            h.update(chunk)
+            size += len(chunk)
+    return h.hexdigest(), size
+
+
 @dataclass(slots=True)
 class SyncFailure:
     """One per-item failure during apply_*. Surfaced to CLI for display."""
@@ -54,10 +69,16 @@ class SyncFailure:
     target: str    # path string or entry display_name
     error: str
 
-async def adopt_disk_file(path: Path, vault_root: Path) -> str:
+async def adopt_disk_file(
+    path: Path, vault_root: Path, folder_id: str | None = None,
+) -> str:
     """Register a single disk-side file in the db without re-writing
     the bytes (file is already where mirror wants it). Returns the
     new entry_id.
+
+    When `folder_id` is supplied (pre-resolved by ingest_all_new), the
+    folder lookup/create step is skipped — avoids redundant DB queries
+    when many files share the same parent folder.
 
     Raises on failure — callers that batch (`ingest_all_new`) catch and
     accumulate; CLI single-file caller surfaces the message directly.
@@ -72,14 +93,9 @@ async def adopt_disk_file(path: Path, vault_root: Path) -> str:
         )
 
     rel = path.relative_to(vault_root).as_posix()
-    folder_segments = list(path.relative_to(vault_root).parts[:-1])
     display_name = path.relative_to(vault_root).parts[-1]
     size = path.stat().st_size
-    h = hashlib.sha256()
-    with path.open("rb") as f:
-        while chunk := f.read(1024 * 256):
-            h.update(chunk)
-    sha256 = h.hexdigest()
+    sha256, _ = await asyncio.to_thread(_sha256_and_size, path)
     ext_pos = display_name.rfind(".")
     original_ext = display_name[ext_pos:].lower() if ext_pos != -1 else None
     mime_type = mimetypes.guess_type(display_name)[0]
@@ -87,13 +103,15 @@ async def adopt_disk_file(path: Path, vault_root: Path) -> str:
     factory = get_session_factory()
     async with factory() as session:
         try:
-            folder = (
-                await resolve_or_create_folder(
-                    session, segments=folder_segments,
+            if folder_id is None:
+                folder_segments = list(path.relative_to(vault_root).parts[:-1])
+                folder = (
+                    await resolve_or_create_folder(
+                        session, segments=folder_segments,
+                    )
+                    if folder_segments else None
                 )
-                if folder_segments else None
-            )
-            folder_id = folder.id if folder else None
+                folder_id = folder.id if folder else None
             now = datetime.now(timezone.utc)
             file_id = new_id()
             file_row = File(
@@ -142,35 +160,59 @@ async def ingest_all_new(
     *,
     progress: "Callable[[int, int, Path], None] | None" = None,
 ) -> tuple[list[str], list[SyncFailure]]:
-    """Register each disk-side new file. We do NOT re-write the bytes —
-    the file is already where mirror wants it; rewriting would either
-    duplicate (collision rename) or shred the source.
+    """Register each disk-side new file in parallel.
 
-    `progress(done, total, current_path)` is called once per file (after
-    success or failure) so the CLI can render N/M for long batches.
-
-    Returns (created_entry_ids, failures). Failures are caught per-file
-    so one broken path doesn't abort the rest of the batch.
+    Pre-creates all folders upfront so files can be adopted without
+    redundant folder lookups or commit-visibility races. Files are then
+    adopted concurrently (bounded by _PARALLEL_INGEST_LIMIT).
     """
+    # --- phase 0: pre-create all folders -------------------------------
+    folder_map: dict[tuple[str, ...], str | None] = {}
+    for path in report.new:
+        segs = tuple(path.relative_to(report.vault_root).parts[:-1])
+        if segs and segs not in folder_map:
+            folder_map[segs] = None  # placeholder, resolved below
+
+    if folder_map:
+        factory = get_session_factory()
+        async with factory() as session:
+            for segs in folder_map:
+                folder = await resolve_or_create_folder(session, segments=list(segs))
+                folder_map[segs] = folder.id if folder else None
+            await session.commit()
+
+    # --- phase 1: adopt files in parallel ------------------------------
     created: list[str] = []
     failures: list[SyncFailure] = []
     total = len(report.new)
-    for idx, path in enumerate(report.new, start=1):
-        try:
-            eid = await adopt_disk_file(path, report.vault_root)
-            created.append(eid)
-        except Exception as exc:  # noqa: BLE001
-            log.error("ingest_all_new: failed for %s: %s", path, exc)
-            failures.append(SyncFailure(
-                category="new",
-                target=str(path.relative_to(report.vault_root)),
-                error=f"{type(exc).__name__}: {exc}",
-            ))
-        if progress is not None:
+    done = 0
+    sem = asyncio.Semaphore(_PARALLEL_INGEST_LIMIT)
+
+    async def _adopt_one(path: Path) -> None:
+        nonlocal done
+        segs = tuple(path.relative_to(report.vault_root).parts[:-1])
+        fid = folder_map.get(segs)
+        async with sem:
             try:
-                progress(idx, total, path)
-            except Exception:
-                pass  # never let UI break the batch
+                eid = await adopt_disk_file(
+                    path, report.vault_root, folder_id=fid,
+                )
+                created.append(eid)
+            except Exception as exc:  # noqa: BLE001
+                log.error("ingest_all_new: failed for %s: %s", path, exc)
+                failures.append(SyncFailure(
+                    category="new",
+                    target=str(path.relative_to(report.vault_root)),
+                    error=f"{type(exc).__name__}: {exc}",
+                ))
+            done += 1
+            if progress is not None:
+                try:
+                    progress(done, total, path)
+                except Exception:
+                    pass  # never let UI break the batch
+
+    await asyncio.gather(*[_adopt_one(p) for p in report.new])
     return created, failures
 
 async def apply_moved(
@@ -284,13 +326,7 @@ async def apply_modified(
     failures: list[SyncFailure] = []
     for entry, path in report.modified:
         try:
-            h = hashlib.sha256()
-            size = 0
-            with path.open("rb") as f:
-                while chunk := f.read(1024 * 256):
-                    h.update(chunk)
-                    size += len(chunk)
-            new_sha = h.hexdigest()
+            new_sha, size = await asyncio.to_thread(_sha256_and_size, path)
         except Exception as exc:  # noqa: BLE001
             log.error("apply_modified: hash failed for %s: %s", path, exc)
             failures.append(SyncFailure(
@@ -349,10 +385,12 @@ async def apply_all(
     Returns counts plus a `failures: list[SyncFailure]` so the caller
     can render per-item errors instead of silently reporting partial
     success."""
-    new_ids, new_failures = await ingest_all_new(report, progress=progress)
-    moved, moved_failures = await apply_moved(report)
-    modified, modified_failures = await apply_modified(report)
-    forgotten, missing_failures = await forget_all_missing(report)
+    (new_ids, new_failures), (moved, moved_failures), (modified, modified_failures), (forgotten, missing_failures) = await asyncio.gather(
+        ingest_all_new(report, progress=progress),
+        apply_moved(report),
+        apply_modified(report),
+        forget_all_missing(report),
+    )
     return {
         "ingested": len(new_ids),
         "moved": moved,
