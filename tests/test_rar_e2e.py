@@ -59,7 +59,14 @@ def _locate_rar_exe() -> str | None:
 
 RAR_EXE = _locate_rar_exe()
 if not RAR_EXE:
-    print("[skip] no Rar.exe / rar CLI found; cannot create .rar fixture")
+    msg = "no Rar.exe / rar CLI found; cannot create .rar fixture"
+    if "pytest" in sys.modules:
+        import pytest
+        pytest.skip(
+            f"{msg} (install WinRAR or run on a host with `rar` in PATH)",
+            allow_module_level=True,
+        )
+    print(f"[skip] {msg}")
     print("       (install WinRAR or run on a host with `rar` in PATH)")
     sys.exit(0)
 
