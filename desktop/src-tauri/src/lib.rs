@@ -1,28 +1,37 @@
 //! Marginalia desktop shell.
 //!
 //! Wraps the React frontend in a Tauri window and:
-//!   - Spawns the FastAPI backend on launch (if `MARGINALIA_AUTOSTART_BACKEND`
-//!     is unset or "1") and tears it down on quit.
+//!   - Spawns the bundled Python sidecar (a python-build-standalone
+//!     runtime carrying `marginalia` as an installed package) on launch.
+//!     Tears it down on quit.
 //!   - Hides the window to a system tray on close instead of exiting.
 //!   - Tray menu: Show / Hide / Quit.
 //!
-//! The backend command defaults to `python -m marginalia.main`. Override
-//! via `MARGINALIA_BACKEND_CMD` (the value is split on whitespace, first
-//! token is the binary, rest are args). Set `MARGINALIA_AUTOSTART_BACKEND=0`
-//! to skip the spawn entirely — useful when you're already running the
-//! backend in a separate terminal during development.
+//! Sidecar resolution order, per environment variable, then bundle:
+//!   1. MARGINALIA_AUTOSTART_BACKEND=0 -> skip spawn entirely. Use this
+//!      in dev when you're running `uvicorn marginalia.main:app` in
+//!      another terminal yourself.
+//!   2. MARGINALIA_BACKEND_CMD set -> split on whitespace; the first
+//!      token is the binary, the rest are args. Honored verbatim, no
+//!      bundle lookup. Useful for pointing a dev build at a checkout.
+//!   3. Otherwise: read `<resource_dir>/backend/runtime-manifest.json`
+//!      and run `<resource_dir>/backend/<manifest.python> -m marginalia`.
 //!
-//! The backend's working directory is set to `MARGINALIA_HOME` (defaults
-//! to `~/Marginalia`) before spawn. pydantic-settings resolves `.env`
-//! relative to CWD, so this is where the packaged app reads `.env` from
-//! — users get one directory to manage (db + library + .env all live
-//! under it). In dev, run the backend yourself in a separate terminal
-//! (`MARGINALIA_AUTOSTART_BACKEND=0`) so it picks up the project-root
-//! `.env` instead.
+//! Working directory is `MARGINALIA_HOME` (defaults to ~/Marginalia)
+//! before spawn. pydantic-settings reads `.env` relative to CWD, so
+//! that's also where the packaged app picks up `.env` — users get one
+//! directory to manage (db + library + .env).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
+
+use serde::Deserialize;
+use tauri::{
+    menu::{Menu, MenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    AppHandle, Manager, RunEvent, WindowEvent,
+};
 
 fn home_dir() -> PathBuf {
     std::env::var_os("USERPROFILE")
@@ -37,11 +46,30 @@ fn marginalia_home() -> PathBuf {
         .unwrap_or_else(|| home_dir().join("Marginalia"))
 }
 
-use tauri::{
-    menu::{Menu, MenuItem},
-    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Manager, RunEvent, WindowEvent,
-};
+#[derive(Debug, Deserialize)]
+struct RuntimeManifest {
+    /// Path to the python interpreter relative to the backend dir.
+    python: String,
+}
+
+/// Locate the bundled Python interpreter under the resource dir.
+fn resolve_bundled_python(app: &AppHandle) -> Option<(PathBuf, PathBuf)> {
+    let resource_dir = app.path().resource_dir().ok()?;
+    let backend_dir = resource_dir.join("backend");
+    let manifest_path = backend_dir.join("runtime-manifest.json");
+    let manifest_bytes = std::fs::read(&manifest_path)
+        .map_err(|e| log::error!("missing runtime-manifest.json at {}: {}", manifest_path.display(), e))
+        .ok()?;
+    let manifest: RuntimeManifest = serde_json::from_slice(&manifest_bytes)
+        .map_err(|e| log::error!("invalid runtime-manifest.json: {}", e))
+        .ok()?;
+    let python = backend_dir.join(&manifest.python);
+    if !python.is_file() {
+        log::error!("manifest python not found at {}", python.display());
+        return None;
+    }
+    Some((backend_dir, python))
+}
 
 #[derive(Default)]
 struct BackendState {
@@ -49,7 +77,7 @@ struct BackendState {
 }
 
 impl BackendState {
-    fn spawn(&self) {
+    fn spawn(&self, app: &AppHandle) {
         if std::env::var("MARGINALIA_AUTOSTART_BACKEND")
             .map(|v| v == "0" || v.eq_ignore_ascii_case("false"))
             .unwrap_or(false)
@@ -57,37 +85,61 @@ impl BackendState {
             log::info!("MARGINALIA_AUTOSTART_BACKEND=0, skipping backend spawn");
             return;
         }
-        let cmd_str = std::env::var("MARGINALIA_BACKEND_CMD")
-            .unwrap_or_else(|_| "python -m marginalia.main".to_string());
-        let mut parts = cmd_str.split_whitespace();
-        let Some(program) = parts.next() else {
-            log::error!("MARGINALIA_BACKEND_CMD is empty");
-            return;
-        };
-        let args: Vec<&str> = parts.collect();
+
         let home = marginalia_home();
         if let Err(e) = std::fs::create_dir_all(&home) {
             log::warn!("could not create MARGINALIA_HOME {}: {}", home.display(), e);
         }
-        match Command::new(program)
-            .args(&args)
+
+        let mut cmd = if let Ok(cmd_str) = std::env::var("MARGINALIA_BACKEND_CMD") {
+            let mut parts = cmd_str.split_whitespace();
+            let Some(program) = parts.next() else {
+                log::error!("MARGINALIA_BACKEND_CMD is empty");
+                return;
+            };
+            let args: Vec<String> = parts.map(|s| s.to_string()).collect();
+            log::info!("backend cmd from env: {}", cmd_str);
+            let mut c = Command::new(program);
+            c.args(&args);
+            c
+        } else {
+            let Some((backend_dir, python)) = resolve_bundled_python(app) else {
+                log::error!(
+                    "no bundled backend found and MARGINALIA_BACKEND_CMD not set; \
+                     the desktop build is missing its sidecar runtime"
+                );
+                return;
+            };
+            log::info!(
+                "spawning bundled sidecar: {} -m marginalia (backend dir: {})",
+                python.display(),
+                backend_dir.display()
+            );
+            let mut c = Command::new(&python);
+            c.arg("-m").arg("marginalia");
+            // Help the interpreter find its own stdlib regardless of CWD,
+            // and make sure the rest of the runtime tree (site-packages)
+            // resolves cleanly when the user double-clicks the bundle.
+            if let Some(home_dir) = python_home_for(&python) {
+                c.env("PYTHONHOME", home_dir);
+            }
+            c
+        };
+
+        match cmd
             .current_dir(&home)
             .env("MARGINALIA_HOME", &home)
+            .env("PYTHONUNBUFFERED", "1")
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
             .spawn()
         {
             Ok(child) => {
-                log::info!(
-                    "spawned backend pid={} cwd={}: {}",
-                    child.id(),
-                    home.display(),
-                    cmd_str
-                );
+                log::info!("spawned backend pid={} cwd={}", child.id(), home.display());
                 *self.child.lock().unwrap() = Some(child);
             }
             Err(e) => {
-                log::error!("failed to spawn backend ({}): {}", cmd_str, e);
+                log::error!("failed to spawn backend: {}", e);
             }
         }
     }
@@ -101,6 +153,18 @@ impl BackendState {
             }
             let _ = child.wait();
         }
+    }
+}
+
+/// PYTHONHOME for a python-build-standalone layout: on Windows the
+/// interpreter sits at `<root>/python.exe`, on POSIX at `<root>/bin/python3`.
+fn python_home_for(python: &Path) -> Option<PathBuf> {
+    let parent = python.parent()?;
+    if cfg!(target_os = "windows") {
+        Some(parent.to_path_buf())
+    } else {
+        // bin/python3 -> root is parent.parent
+        parent.parent().map(|p| p.to_path_buf())
     }
 }
 
@@ -141,8 +205,6 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
-            // Single left-click on the tray icon toggles the window —
-            // the standard Windows/macOS expectation for tray-resident apps.
             if let TrayIconEvent::Click {
                 button: MouseButton::Left,
                 button_state: MouseButtonState::Up,
@@ -176,7 +238,8 @@ pub fn run() {
                 )?;
             }
             build_tray(app.handle())?;
-            app.state::<BackendState>().spawn();
+            let handle = app.handle().clone();
+            app.state::<BackendState>().spawn(&handle);
             Ok(())
         })
         .on_window_event(|window, event| {
