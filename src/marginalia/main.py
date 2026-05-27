@@ -125,6 +125,13 @@ app.add_middleware(
         "http://127.0.0.1:5173",
         "http://localhost:1420",
         "tauri://localhost",
+        # Tauri 2's webview origin varies by platform: macOS uses
+        # `tauri://localhost`, Windows (WebView2) uses
+        # `http://tauri.localhost`, and the wry runtime occasionally
+        # serves over `https://tauri.localhost` as well. Whitelist all
+        # three so the production webview can read responses regardless
+        # of the host OS.
+        "http://tauri.localhost",
         "https://tauri.localhost",
     ],
     allow_credentials=False,

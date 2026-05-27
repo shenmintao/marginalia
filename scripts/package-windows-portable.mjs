@@ -12,7 +12,7 @@
 // The zip is then dropped next to the NSIS installer so the release
 // workflow's bundle glob picks it up.
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync, statSync, readdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, statSync, readdirSync, cpSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
@@ -91,9 +91,11 @@ const main = () => {
   const stagingDir = path.join(releaseDir, '..', 'portable-staging');
   const stagingApp = path.join(stagingDir, zipBase);
 
-  // Reset staging dir.
+  // Reset staging dir. Use fs.rmSync + fs.cpSync below so this works on
+  // a plain Windows shell (PowerShell, cmd) — not just CI runners that
+  // happen to ship Git Bash with `rm` / `cp` on PATH.
   if (existsSync(stagingDir)) {
-    spawnSync('rm', ['-rf', stagingDir], { stdio: 'inherit' });
+    rmSync(stagingDir, { recursive: true, force: true });
   }
   mkdirSync(stagingApp, { recursive: true });
 
@@ -101,8 +103,7 @@ const main = () => {
   //    skip the heavy build artifacts (.pdb, deps/, build/, .rlib) and
   //    only mirror what the NSIS installer would put on disk.
   const cp = (src, dst) => {
-    const r = spawnSync('cp', ['-r', src, dst], { stdio: 'inherit' });
-    if (r.status !== 0) throw new Error(`cp -r ${src} ${dst} failed`);
+    cpSync(src, dst, { recursive: true });
   };
   cp(exePath, path.join(stagingApp, friendlyExeName));
 
