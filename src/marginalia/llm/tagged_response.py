@@ -149,7 +149,7 @@ def parse_tags(block: str) -> list[dict[str, str]]:
         facet = facet.strip().lower()
         if facet not in _VALID_FACETS:
             continue
-        for name in names.split(","):
+        for name in re.split(r"[,，、;；]", names):
             name = name.strip().strip('"').strip("'")
             if not name:
                 continue
