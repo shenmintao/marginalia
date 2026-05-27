@@ -31,11 +31,14 @@ import { processLatexBrackets } from "@/lib/markdown";
 import { useTemporaryValue } from "@/hooks/useTemporaryValue";
 import { cn } from "@/lib/utils";
 
-/** Deep-link position on top of an `entry:<uuid>` citation. The agent
- *  emits `lines=<start>-<end>` for text/markdown and `page=<n>` for PDF;
- *  runtime.py rewrites those into the URL query string of the link. */
+/** Deep-link position on top of an `entry:<uuid>` citation. runtime.py
+ *  rewrites the agent's footnote definitions into one of three URL shapes:
+ *    text / md / docx:   ?q=<urlencoded verbatim excerpt>
+ *    PDF:                ?page=<n>
+ *    legacy / manual:    ?line=<start>-<end>  (still tolerated)
+ *  The receiving handler maps these onto FileViewer's matching jump modes. */
 export interface EntryLocator {
-  kind: "line" | "page";
+  kind: "quote" | "line" | "page";
   value: string;
 }
 
@@ -45,6 +48,8 @@ function parseEntryHref(href: string): { id: string; locator?: EntryLocator } {
   if (q === -1) return { id: tail };
   const id = tail.slice(0, q);
   const params = new URLSearchParams(tail.slice(q + 1));
+  const quote = params.get("q");
+  if (quote) return { id, locator: { kind: "quote", value: quote } };
   const line = params.get("line");
   if (line) return { id, locator: { kind: "line", value: line } };
   const page = params.get("page");
@@ -56,11 +61,12 @@ interface Props {
   content: string;
   /** Called when the user clicks an `entry:<uuid>` link (citation
    *  footnote in chat answers). `locator` carries the optional deep-link
-   *  position from the URL query string — e.g. `entry:<uuid>?line=10-40`
-   *  yields `{kind: "line", value: "10-40"}`, `?page=3` yields
-   *  `{kind: "page", value: "3"}`. Handlers route to /library?entry=...
-   *  with the locator forwarded so the file viewer can scroll to that
-   *  position. If absent, entry: links render as plain anchors. */
+   *  position from the URL query string — `?q=<text>` yields
+   *  `{kind: "quote", value}`, `?line=10-40` yields `{kind: "line", value}`,
+   *  `?page=3` yields `{kind: "page", value}`. Handlers route to
+   *  /library?entry=... with the locator forwarded so the file viewer
+   *  can scroll to that position. If absent, entry: links render as
+   *  plain anchors. */
   onEntryLink?: (entryId: string, locator?: EntryLocator) => void;
   /** Tailwind class for the wrapping div. Defaults to `prose-marginalia`. */
   className?: string;

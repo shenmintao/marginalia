@@ -131,11 +131,14 @@ jobs:
       # Debian / PyPI for public release builds. The Dockerfile keeps the
       # Tsinghua defaults so local `docker build` from a CN dev machine
       # stays fast.
+      # arm64 is intentionally omitted — py7zz publishes wheels only for
+      # x86_64 / win_amd64 / macOS universal2, so `pip install py7zz` fails
+      # under linux/arm64. Re-add once a fork wheel for aarch64 is available.
       - name: Build & push
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
