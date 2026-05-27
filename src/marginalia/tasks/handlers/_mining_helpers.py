@@ -57,6 +57,8 @@ async def upsert_relation_pair(
             relation_id=existing.id,
             new_count=(existing.observation_count or 0) + observation_add,
             last_observed_at=now,
+            source_kind=source_kind,
+            note=note,
         )
         rid = existing.id
         action: UpsertAction = "incremented"

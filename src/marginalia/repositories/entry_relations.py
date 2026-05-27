@@ -79,15 +79,25 @@ async def bump_observation(
     relation_id: str,
     new_count: int,
     last_observed_at: datetime,
+    source_kind: str,
+    note: str,
 ) -> None:
     """Step 2 of upsert_relation_pair when a row already exists. Bumps the
-    observation_count and refreshes last_observed_at."""
+    observation_count, refreshes last_observed_at, and overwrites
+    source_kind/note to reflect the most recent miner's attribution.
+
+    Provenance history (which miner observed this pair when, with what
+    payload) lives in audit_events.relation_mined — the entry_relations
+    row only needs the latest writer's metadata.
+    """
     await db.execute(
         update(EntryRelation)
         .where(EntryRelation.id == relation_id)
         .values(
             observation_count=new_count,
             last_observed_at=last_observed_at,
+            source_kind=source_kind,
+            note=note,
         )
     )
 

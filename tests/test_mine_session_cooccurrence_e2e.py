@@ -92,12 +92,14 @@ async def _seed():
         e_e.deleted_at = _now()
         e_e.purge_after = _now() + timedelta(days=7)
 
-        # Pre-existing entry_relation between A and C (e.g. written by reflect)
+        # Pre-existing entry_relation between A and C, written by a different
+        # miner (mine_tag_overlap) earlier. The bumper should overwrite
+        # source_kind/note to mine_session_cooccurrence on increment.
         a_id, c_id = sorted((e_a.id, e_c.id))
         existing_rel = EntryRelation(
             id=new_id(),
             entry_a_id=a_id, entry_b_id=c_id,
-            note="seeded by reflect previously",
+            note="seeded by mine_tag_overlap previously",
             source_kind="mine_tag_overlap",
             last_observed_at=now - timedelta(days=10),
             observation_count=1,
@@ -197,11 +199,14 @@ async def main():
         assert rel_ac is not None
         assert rel_ac.id == seeded["existing_rel_id"], \
             "(A,C) was duplicated instead of incremented"
-        assert rel_ac.source_kind == "reflect", \
-            "source_kind unexpectedly mutated by incrementer"
+        assert rel_ac.source_kind == "mine_session_cooccurrence", \
+            "source_kind should be overwritten to the most recent miner"
+        assert rel_ac.note != "seeded by reflect previously", \
+            "note should also be overwritten on bump"
         assert rel_ac.observation_count == 1 + 2, \
             f"observation_count = {rel_ac.observation_count}"
-        print(f"[2] existing (A,C) incremented to {rel_ac.observation_count}")
+        print(f"[2] existing (A,C) incremented & re-attributed: "
+              f"source={rel_ac.source_kind} obs={rel_ac.observation_count}")
 
         # 3. (B,C) and (A,D) and (B,D) — all below threshold, NOT written
         b_id_c, c_id_b = sorted((seeded["e_b"], seeded["e_c"]))
