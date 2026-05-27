@@ -20,7 +20,8 @@ ENV PIP_NO_CACHE_DIR=1 \
 
 # Swap Debian's default repo for a domestic mirror, then install build
 # deps. Most Python packages publish manylinux wheels — build-essential
-# is here only as a fallback for any sdist that slips through.
+# is here only as a fallback for any sdist that slips through. `git` is
+# required because pyproject.toml pulls glowpy from a git+https URL.
 RUN if [ -n "$APT_MIRROR" ]; then \
         sed -i "s|http://deb.debian.org|${APT_MIRROR}|g; s|http://security.debian.org|${APT_MIRROR}|g" \
             /etc/apt/sources.list.d/debian.sources 2>/dev/null \
@@ -28,7 +29,7 @@ RUN if [ -n "$APT_MIRROR" ]; then \
             /etc/apt/sources.list ; \
     fi \
  && apt-get update \
- && apt-get install -y --no-install-recommends build-essential \
+ && apt-get install -y --no-install-recommends build-essential git \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
