@@ -77,7 +77,9 @@ EXECUTE_PHASE_PROMPT = """你是 Marginalia 的在线调查员（🔍 Investigat
   文件类型决定使用哪种定位字段：
   - **文本类**（`.md` `.txt` `.docx` `.html` 源码等）—— 必填 `quote=`。
   - **PDF（`.pdf`）**—— 必填 `page=<n>`：`[^a]: entry_id=<id>, page=3 - reason`。
-    浏览器 PDF 阅读器无法接受文字搜索，所以 PDF 一律用 page。
+    浏览器 PDF 阅读器无法接受文字搜索，所以 PDF 一律用 page。`page=` 后面**只
+    写阿拉伯数字**，不要附加任何中文/英文括号注释（`page=54（第54页）` 是错
+    的，会让 footnote 渲染失败）。
   - **二进制不可搜文件**（图片 `.jpg`/`.png`/扫描件、音频、表格 `.xlsx` 等
     GUI 没做内容渲染的类型）—— 省略定位字段：`[^a]: entry_id=<id> - reason`。
     这是唯一允许"裸 entry_id"的场景，GUI 会打开文件不跳位置。
@@ -99,6 +101,7 @@ EXECUTE_PHASE_PROMPT = """你是 Marginalia 的在线调查员（🔍 Investigat
     `[^c]: entry_id=<id>, quote="A", quote="B" - r`              # 多个 quote 禁止
     `[^d]: entry_id=<id>.docx, quote="..." - r`                  # entry_id 是 uuid 不是文件名
     `[^e]: entry_id=<id> - r`                                    # 文本/docx 必填 quote=
+    `[^f]: entry_id=<id>, page=54（第54页） - r`                  # page= 后面禁止加注释
 - **同一个 entry 的不同段落必须拆成独立的角标**——引用某文件里两段不同
   内容时，写两条独立 footnote，正文用 `[^a]` `[^b]` 两个角标分别指。
   **不要**把多段证据塞进一条 footnote——GUI 只能跳到一处，其余用户找不到。
