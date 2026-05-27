@@ -67,9 +67,16 @@ async def index_extracted_text(
         "catalog_sketch": ctx.catalog_sketch,
         "tag_vocabulary": ctx.tag_vocabulary,
     }
-    user_text = (
+    stable_prefix = (
         f"Index the {kind} document below. Hints are advisory — the "
         "document's actual content takes precedence.\n\n"
+        + render_format_hint() + "\n"
+        + render_sections_hint(
+            anchor_unit="heading or lines",
+            anchor_example="1.2.3 or lines 100-160",
+        )
+    )
+    file_content = (
         f"<context>\n{json.dumps(user_payload, ensure_ascii=False)}\n"
         "</context>\n\n"
         f"<document>\n{body}\n</document>"
@@ -86,10 +93,14 @@ async def index_extracted_text(
     resp = await client.complete(ChatRequest(
         system=INDEXER_SYSTEM,
         messages=[ChatMessage(
-            role="user", content=[TextBlock(text=user_text)],
+            role="user", content=[
+                TextBlock(text=stable_prefix),
+                TextBlock(text=file_content),
+            ],
         )],
         max_tokens=max_out,
         temperature=0.2,
+        cache_breakpoints=[0],
     ))
 
     tagged = parse_tagged(resp.text or "")

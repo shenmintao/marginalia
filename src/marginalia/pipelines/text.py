@@ -109,9 +109,16 @@ class TextPipeline(Pipeline):
             "tag_vocabulary": ctx.tag_vocabulary,
             "document": body,
         }
-        user_text = (
+        stable_prefix = (
             "Index the document below. Hints are advisory — the document's "
             "actual content takes precedence.\n\n"
+            + render_format_hint() + "\n"
+            + render_sections_hint(
+                anchor_unit="heading or lines",
+                anchor_example="1.2.3 or lines 100-160",
+            )
+        )
+        file_content = (
             f"<context>\n{json.dumps({k: v for k, v in user_payload.items() if k != 'document'}, ensure_ascii=False)}\n</context>\n\n"
             f"<document>\n{body}\n</document>"
         )
@@ -123,9 +130,13 @@ class TextPipeline(Pipeline):
 
         resp = await client.complete(ChatRequest(
             system=TEXT_PIPELINE_SYSTEM,
-            messages=[ChatMessage(role="user", content=[TextBlock(text=user_text)])],
+            messages=[ChatMessage(role="user", content=[
+                TextBlock(text=stable_prefix),
+                TextBlock(text=file_content),
+            ])],
             max_tokens=max_out,
             temperature=0.2,
+            cache_breakpoints=[0],
         ))
 
         tagged = parse_tagged(resp.text or "")
@@ -263,16 +274,20 @@ class TextPipeline(Pipeline):
         total = len(body)
         chunk = body[offset: offset + max_chars]
         truncated = (offset + len(chunk)) < total
-        return SegmentResult(
-            text=chunk,
-            extras={
-                "offset": offset,
-                "char_count": len(chunk),
-                "total_chars": total,
-                "truncated": truncated,
-                "next_offset": offset + len(chunk) if truncated else None,
-            },
-        )
+        # Compute line range from char offset so footnotes can deep-link
+        # even when the LLM reads by offset rather than line_start/line_end.
+        line_start = body[:offset].count("\n") + 1
+        line_end = line_start + chunk.count("\n")
+        extras = {
+            "offset": offset,
+            "char_count": len(chunk),
+            "total_chars": total,
+            "truncated": truncated,
+            "next_offset": offset + len(chunk) if truncated else None,
+            "line_start": line_start,
+            "line_end": line_end,
+        }
+        return SegmentResult(text=chunk, extras=extras)
 
     @staticmethod
     async def _read_text(

@@ -119,6 +119,12 @@ class PdfNeedsOcrError(Exception):
         self.total_chars = total_chars
 
 
+_NO_TEXT_LAYER_ERROR = (
+    "PDF 无文本层——页面可能是扫描图片。"
+    "传 `question` 参数使用视觉模型读取。"
+)
+
+
 @register_pipeline(
     mimes=("application/pdf",),
     exts=(".pdf",),
@@ -189,9 +195,13 @@ class PdfPipeline(Pipeline):
             "ocr_used": ocr_used,
             "ocr_pages_done": ocr_pages_done if ocr_used else 0,
         }
-        user_text = (
+        stable_prefix = (
             "Index the PDF below. Hints are advisory; the document's text "
             "and figure captions take precedence.\n\n"
+            + render_format_hint() + "\n"
+            + render_sections_hint(anchor_unit="pages", anchor_example="pages 4-7")
+        )
+        file_content = (
             f"<context>\n{json.dumps(user_payload, ensure_ascii=False)}\n</context>\n\n"
             f"<document>\n{body_text}\n</document>"
         )
@@ -200,9 +210,13 @@ class PdfPipeline(Pipeline):
         max_out = min(8192, max(2048, len(body_text) // 8))
         resp = await client.complete(ChatRequest(
             system=PDF_PIPELINE_SYSTEM,
-            messages=[ChatMessage(role="user", content=[TextBlock(text=user_text)])],
+            messages=[ChatMessage(role="user", content=[
+                TextBlock(text=stable_prefix),
+                TextBlock(text=file_content),
+            ])],
             max_tokens=max_out,
             temperature=0.2,
+            cache_breakpoints=[0],
         ))
 
         tagged = parse_tagged(resp.text or "")
@@ -415,12 +429,17 @@ class PdfPipeline(Pipeline):
                                     full concatenated body
 
         offset/max_chars further clamp the result of (2).
+
+        When pypdf extracts no text from any page (scanned/image PDF),
+        returns an actionable error suggesting `question` for VLM-based
+        reading instead of the opaque "empty result".
         """
         try:
             pages = self._extract_text(pdf_bytes)
         except Exception as exc:  # noqa: BLE001
             return SegmentResult(error=f"PDF parse failed: {exc}")
         total_pages = len(pages)
+        non_empty_pages = sum(1 for t in pages if t.strip())
         body = "\n\n".join(
             f"[Page {i+1}]\n{txt}" for i, txt in enumerate(pages) if txt
         )
@@ -430,8 +449,15 @@ class PdfPipeline(Pipeline):
         if max_chars <= 0:
             max_chars = self.READ_DEFAULT_MAX_CHARS
 
+        # Pattern search: if entire PDF has no text layer, give actionable
+        # guidance instead of the generic "no matches".
         pattern = (args.get("pattern") or "").strip()
         if pattern:
+            if non_empty_pages == 0:
+                return SegmentResult(
+                    error=_NO_TEXT_LAYER_ERROR,
+                    extras={"pattern": pattern, "total_pages": total_pages},
+                )
             return _pdf_pattern_search(
                 pages=pages, pattern=pattern,
                 context_lines=int(args.get("context_lines") or 2),
@@ -453,6 +479,18 @@ class PdfPipeline(Pipeline):
                 return SegmentResult(error="PDF has no pages")
             ps = max(1, min(ps, total_pages))
             pe = max(ps, min(pe, total_pages))
+            # If all pages in the requested range are empty, give actionable
+            # guidance instead of the opaque "empty result".
+            range_empty = all(not pages[i - 1].strip() for i in range(ps, pe + 1))
+            if range_empty:
+                return SegmentResult(
+                    error=_NO_TEXT_LAYER_ERROR,
+                    extras={
+                        "page_start": ps, "page_end": pe,
+                        "total_pages": total_pages,
+                        "empty_pages_in_range": pe - ps + 1,
+                    },
+                )
             slab = "\n\n".join(
                 f"[Page {i}]\n{pages[i-1]}" for i in range(ps, pe + 1)
                 if pages[i-1]
@@ -465,9 +503,18 @@ class PdfPipeline(Pipeline):
                 },
             )
 
+        # Full-body default: if no text at all, give actionable guidance.
+        if non_empty_pages == 0:
+            return SegmentResult(
+                error=_NO_TEXT_LAYER_ERROR,
+                extras={"total_pages": total_pages},
+            )
+        # Compute page range from char offset so footnotes can deep-link
+        # even when the LLM reads by offset rather than page_start/page_end.
+        ps, pe = _page_range_from_offset(body, offset, max_chars, total_pages)
         return _clamp_pdf(
             body, offset, max_chars,
-            extras={"total_pages": total_pages},
+            extras={"total_pages": total_pages, "page_start": ps, "page_end": pe},
         )
 
     @staticmethod
@@ -816,6 +863,37 @@ def render_pages_with_figures(
 # ---------------------------------------------------------------------------
 # read_segment helpers
 # ---------------------------------------------------------------------------
+
+_PAGE_MARKER_RE = re.compile(r"\[Page (\d+)\]")
+
+
+def _page_range_from_offset(
+    body: str, offset: int, max_chars: int, total_pages: int,
+) -> tuple[int, int]:
+    """Given a char offset in the concatenated PDF body (with [Page N]
+    markers), find the page_start and page_end for the chunk that would
+    be read at that offset."""
+    # Find all [Page N] marker positions.
+    markers = [(m.start(), int(m.group(1))) for m in _PAGE_MARKER_RE.finditer(body)]
+    if not markers:
+        return 1, total_pages
+    # page_start: the last marker whose position <= offset.
+    ps = 1
+    for pos, pn in markers:
+        if pos <= offset:
+            ps = pn
+        else:
+            break
+    # page_end: find the last marker whose position < offset + max_chars.
+    end = offset + max_chars
+    pe = ps
+    for pos, pn in markers:
+        if pos < end:
+            pe = pn
+        else:
+            break
+    return ps, pe
+
 
 def _clamp_pdf(
     text: str, offset: int, max_chars: int,

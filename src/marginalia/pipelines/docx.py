@@ -137,9 +137,19 @@ class DocxPipeline(Pipeline):
                 },
             )
 
+        # Compute paragraph range from char offset so footnotes can
+        # deep-link even when the LLM reads by offset rather than
+        # paragraph_start/paragraph_end.
+        para_start = body[:offset].count("\n") + 1
+        chunk_for_range = body[offset: offset + max_chars]
+        para_end = para_start + chunk_for_range.count("\n")
         return _clamp(
             body, offset, max_chars,
-            extras={"total_paragraphs": total_paragraphs},
+            extras={
+                "total_paragraphs": total_paragraphs,
+                "paragraph_start": para_start,
+                "paragraph_end": para_end,
+            },
         )
 
     @classmethod

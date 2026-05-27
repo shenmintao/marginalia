@@ -215,17 +215,23 @@ async def _take_snapshot(*, now: datetime) -> dict[str, Any]:
 # ----- LLM -------------------------------------------------------------------
 
 async def _ask_llm_for_operations(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
-    user_text = (
+    stable_prefix = (
         "Decide what to change. Be conservative — most runs should output "
         "an empty operations block.\n\n"
+    )
+    file_content = (
         f"<snapshot>\n{json.dumps(snapshot, ensure_ascii=False)}\n</snapshot>"
     )
     client = get_chat_client("ingest")
     resp = await client.complete(ChatRequest(
         system=RESTRUCTURE_SYSTEM,
-        messages=[ChatMessage(role="user", content=[TextBlock(text=user_text)])],
+        messages=[ChatMessage(role="user", content=[
+            TextBlock(text=stable_prefix),
+            TextBlock(text=file_content),
+        ])],
         max_tokens=4096,
         temperature=0.2,
+        cache_breakpoints=[0],
     ))
     tagged = parse_tagged(resp.text or "")
     block = tagged.get("operations", "")

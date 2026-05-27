@@ -234,19 +234,25 @@ async def handle_summarize_session(payload: Mapping[str, Any]) -> None:
         "involved_entries": entry_metadata,
         "prior_insights": prior_insights,
     }
-    user_text = (
+    stable_prefix = (
         "Distill the session below into durable cross-session insights "
         f"(0..{MAX_INSIGHTS} items). The reflect_journal is the per-turn "
         "bullets the investigator wrote during the session.\n\n"
+    )
+    file_content = (
         f"<session>\n{json.dumps(payload_for_llm, ensure_ascii=False)}\n</session>"
     )
 
     client = get_chat_client("reflect")
     resp = await client.complete(ChatRequest(
         system=SUMMARIZE_SYSTEM,
-        messages=[ChatMessage(role="user", content=[TextBlock(text=user_text)])],
+        messages=[ChatMessage(role="user", content=[
+            TextBlock(text=stable_prefix),
+            TextBlock(text=file_content),
+        ])],
         max_tokens=4096,
         temperature=0.3,
+        cache_breakpoints=[0],
     ))
     tagged = parse_tagged(resp.text or "")
     raw_insights = _parse_insights_block(tagged.get("insights", ""))[:MAX_INSIGHTS]
