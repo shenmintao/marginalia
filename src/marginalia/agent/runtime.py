@@ -506,16 +506,29 @@ async def _run_plan_phase(
 # `<id>` accepts a full uuid or a hex-only short prefix (>= 8 chars).
 # Backticks around the id / page / quote are tolerated. Quote bodies use
 # `\"` and `\\` for embedded `"` and `\`.
+#
+# Defence in depth against LLM-emitted variants the prompt forbids but
+# can still slip through: the field separator accepts `，` (中文逗号) as
+# well as `,`; a quote may be followed by extra `+ "..."` segments
+# (consumed but ignored — the URL can only carry one quote, so the GUI
+# jumps to the first); and a value may be trailed by a parenthetical
+# annotation in either ASCII or full-width brackets, e.g.
+# `page=54（第54页）` (also consumed and ignored). We could not parse
+# these in `runtime.py` and the entire footnote definition would leak
+# unrendered to the user.
 _LIVE_FOOTNOTE_RE = re.compile(
     r"^\[\^([^\]]+)\]:\s*entry_id\s*=\s*`?"
     r"([0-9a-fA-F][0-9a-fA-F\-]{6,35})`?"
-    r"(?:\s*,\s*(?:"
+    r"(?:\s*[,，]\s*(?:"
     r'quote\s*=\s*"((?:[^"\\]|\\.)*)"'                  # group 3: quote
+    r'(?:\s*\+\s*"(?:[^"\\]|\\.)*")*'                   # extra `+ "..."` segments: tolerated, ignored
     r"|page\s*=\s*`?([0-9]+(?:-[0-9]+)?)`?"             # group 4: page
     r"|lines?\s*=\s*`?\S+`?"                             # legacy lines: tolerated
     r"|section_id\s*=\s*`?[^\s,`]+`?"                   # legacy section_id: tolerated
-    r"))*"
-    r"(?:\s+\([^)]*\))?"
+    r")"
+    r"(?:\s*[(（][^)）]*[)）])?"             # optional trailing (...) / （...） annotation
+    r")*"
+    r"(?:\s+[(（][^)）]*[)）])?"
     r"(?:\s*[-—–]\s*(.+?))?"
     r"\s*$",
     re.MULTILINE,

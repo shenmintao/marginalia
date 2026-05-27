@@ -85,6 +85,32 @@ def _check_regex():
             f"[^i]: entry_id={eid}, lines=合同第4.6条 - r",
             ("i", eid, None, None, "r"),
         ),
+        # `+` cancatenated quotes: extra `+ "..."` segments tolerated
+        # but ignored — only the first quote is captured. The agent is
+        # instructed not to write this, but if it slips through we still
+        # render a working link to the first quote rather than leaking
+        # the raw footnote definition to the user.
+        (
+            f'[^j]: entry_id={eid}, quote="第一段证据" + "第二段证据" - 拼接示例',
+            ("j", eid, "第一段证据", None, "拼接示例"),
+        ),
+        # full-width parenthetical annotation after a page= value:
+        # `page=54（第54页）`. Tolerated, the annotation is consumed,
+        # group 4 still captures the digits.
+        (
+            f"[^k]: entry_id={eid}, page=54（第54页） - 注释示例",
+            ("k", eid, None, "54", "注释示例"),
+        ),
+        # ASCII parenthetical after page=:
+        (
+            f"[^l]: entry_id={eid}, page=3 (table 2) - r",
+            ("l", eid, None, "3", "r"),
+        ),
+        # full-width comma as field separator (LLM occasionally writes 中文 comma).
+        (
+            f"[^m]: entry_id={eid}，page=7 - r",
+            ("m", eid, None, "7", "r"),
+        ),
     ]
     for line, expected in cases:
         m = rt._LIVE_FOOTNOTE_RE.search(line)
@@ -192,6 +218,23 @@ async def _check_rewrite():
         )
         assert f"[my-doc.md](entry:{eid}?page=4)" in out, out
         assert "?q=" not in out
+
+        # 11. `+`-concatenated quotes: the URL still gets the first
+        # quote, the second segment is silently dropped. The whole
+        # footnote must rewrite — this is the regression we hit live.
+        out = await rt._rewrite_footnotes_for_display(
+            f'body[^a]\n\n[^a]: entry_id={eid}, quote="A段" + "B段" - r',
+        )
+        expected_q = urllib.parse.quote_plus("A段")
+        assert f"[my-doc.md](entry:{eid}?q={expected_q})" in out, out
+        assert "B段" not in out  # the second quote isn't surfaced anywhere
+
+        # 12. page= with a full-width parenthetical annotation. The
+        # annotation is dropped; the link uses the digits.
+        out = await rt._rewrite_footnotes_for_display(
+            f"body[^a]\n\n[^a]: entry_id={eid}, page=54（第54页） - r",
+        )
+        assert f"[my-doc.md](entry:{eid}?page=54)" in out, out
 
     print("[2] _rewrite_footnotes_for_display: quote/page/legacy/prefix all wire correctly")
 
