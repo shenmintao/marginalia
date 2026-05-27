@@ -7,7 +7,7 @@ Produces strings like:
     read_files paper.pdf section s15
     search_metadata "raft", "consensus" + tags 'machine-learning'
     search_journal "leader election"
-    list_files_in_folder Papers/2024
+    list_folders Papers/2024
     list_folders Papers
     read_entries_metadata paper.pdf, slides.pdf
     query_sql 'select count(*) from entry where ...'
@@ -30,7 +30,22 @@ _UUID_LIKE = 32  # any string of this length or longer is treated as an id
 
 
 def _looks_like_id(s: Any) -> bool:
-    return isinstance(s, str) and len(s) >= _UUID_LIKE
+    """True if `s` could plausibly be an entry/tag/folder/catalog id.
+
+    Accepts both full uuids (36 chars with dashes, 32 without) and short
+    hex prefixes (>= 8 chars, hex-only after stripping dashes). The
+    short-prefix case is what the agent occasionally parrots from the
+    activity bar back into a tool call — we want the resolver to label
+    it instead of falling through to the raw string branch.
+    """
+    if not isinstance(s, str):
+        return False
+    if len(s) >= _UUID_LIKE:
+        return True
+    cleaned = s.replace("-", "").lower()
+    if len(cleaned) < 8:
+        return False
+    return all(c in "0123456789abcdef" for c in cleaned)
 
 
 def _name(eid: str | None, resolver: NameResolver | None) -> str:
@@ -74,16 +89,11 @@ def _entry_ids_from_args(args: Mapping[str, Any]) -> list[str]:
 
 
 def _folder_ids_from_args(name: str, args: Mapping[str, Any]) -> list[str]:
-    """Pull folder ids out of folder-aware tools. The tool schemas use
-    different keys: list_folders → parent_id, list_files_in_folder →
-    folder_id. parent_id can also be null (root) — skip those."""
+    """Pull folder ids out of folder-aware tools. list_folders uses
+    parent_id; parent_id can also be null (root) — skip those."""
     out: list[str] = []
     if name == "list_folders":
         v = args.get("parent_id")
-        if _looks_like_id(v):
-            out.append(str(v))
-    elif name == "list_files_in_folder":
-        v = args.get("folder_id") or args.get("folder_path")
         if _looks_like_id(v):
             out.append(str(v))
     return out
@@ -252,22 +262,20 @@ def format_tool_call(
         return " ".join(parts)
 
     if name == "search_journal":
-        q = args.get("query") or args.get("q")
+        q = args.get("text") or args.get("query") or args.get("q")
         if q:
             parts.append(f'"{q}"')
+        kinds = args.get("kinds") or []
+        if kinds and kinds != ["insight"]:
+            parts.append(f"kinds={kinds}")
+        if args.get("entry_id"):
+            parts.append(_name(args["entry_id"], resolver))
         if args.get("limit"):
             parts.append(f"(limit {args['limit']})")
         return " ".join(parts)
 
-    if name == "list_files_in_folder":
-        v = args.get("folder_id") or args.get("folder_path") or args.get("path")
-        if v:
-            label = _name(str(v), folder_resolver) if _looks_like_id(v) else str(v)
-            parts.append(label)
-        return " ".join(parts)
-
     if name == "list_folders":
-        v = args.get("parent_id") or args.get("parent_path")
+        v = args.get("parent_id") or args.get("path")
         if v:
             label = _name(str(v), folder_resolver) if _looks_like_id(v) else str(v)
             parts.append(label)
@@ -389,15 +397,6 @@ def format_tool_result_preview(name: str, result: Any) -> str:
         more = "" if len(rows) <= 5 else f" +{len(rows) - 5} more"
         return f"{_ru(rows, 'folder')}: {head}{more}"
 
-    if name == "list_files_in_folder":
-        rows = result.get("entries") or []
-        if not rows:
-            return "no files"
-        names = [r.get("display_name") or "" for r in rows[:5] if isinstance(r, dict)]
-        head = ", ".join(n for n in names if n)
-        more = "" if len(rows) <= 5 else f" +{len(rows) - 5} more"
-        return f"{_ru(rows, 'file')}: {head}{more}"
-
     if name == "list_catalogs":
         rows = result.get("catalogs") or []
         if not rows:
@@ -430,7 +429,21 @@ def format_tool_result_preview(name: str, result: Any) -> str:
                 continue
             disp = r.get("display_name") or (r.get("entry_id", "")[:8])
             if r.get("ok") is False:
-                chunks.append(f"{disp} failed")
+                # Surface either the entry-level error (e.g. "entry not
+                # found", "ingest_status=pending") or the first read's
+                # error if the entry resolved but a slice failed. Without
+                # this the agent's repeated retries against a bad id
+                # looked like a silent loop in the activity bar.
+                err = r.get("error")
+                if not err:
+                    for rd in (r.get("reads") or []):
+                        if isinstance(rd, dict) and rd.get("error"):
+                            err = rd["error"]
+                            break
+                if err:
+                    chunks.append(f"{disp} failed: {_truncate(str(err), 80)}")
+                else:
+                    chunks.append(f"{disp} failed")
                 continue
             reads = r.get("reads") or []
             chunks.append(f"{disp} · {_ru(reads, 'read')}" if reads else disp)
@@ -439,12 +452,17 @@ def format_tool_result_preview(name: str, result: Any) -> str:
 
     if name == "read_entries_metadata":
         rows = result.get("entries") or []
+        errors = result.get("errors") or []
+        if not rows and errors:
+            err = errors[0].get("error") if isinstance(errors[0], dict) else None
+            return f"error: {_truncate(str(err or 'invalid entry_id'), 160)}"
         if not rows:
             return "no entries"
         names = [r.get("display_name") or "" for r in rows[:5] if isinstance(r, dict)]
         head = ", ".join(n for n in names if n)
         more = "" if len(rows) <= 5 else f" +{len(rows) - 5} more"
-        return f"{_ru(rows, 'entry', 'entries')}: {head}{more}"
+        tail = f" · {len(errors)} invalid id{'s' if len(errors) != 1 else ''}" if errors else ""
+        return f"{_ru(rows, 'entry', 'entries')}: {head}{more}{tail}"
 
     if name == "search_metadata":
         rows = result.get("entries") or []

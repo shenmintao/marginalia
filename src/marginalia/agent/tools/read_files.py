@@ -25,6 +25,12 @@ read item has fields the pipeline doesn't support, it returns
 Same-entry requests share one DB lookup but each `reads` item triggers
 a fresh storage round-trip — pipelines are responsible for their own
 caching if desired.
+
+`entry_id` may be a full uuid OR an unambiguous short prefix (>= 8 hex
+chars). The model often sees 8-char prefixes in the activity bar and
+parrots them back; resolve_entry_prefix promotes them to a full uuid
+when there's exactly one match, and surfaces an ambiguity error when
+multiple entries share the prefix.
 """
 from __future__ import annotations
 
@@ -122,17 +128,35 @@ async def read_files(
     if not requests:
         return {"ok": True, "results": [], "count": 0}
 
-    entry_ids = [r["entry_id"] for r in requests if r.get("entry_id")]
+    # Resolve each entry_id to a full uuid. Accept full ids and short
+    # hex prefixes (>= 8 chars). Ambiguous or unknown prefixes get a
+    # per-entry error result so the agent stops looping on a fabricated
+    # / parroted short id.
+    resolved: list[tuple[Mapping[str, Any], str]] = []
+    early_results: list[dict[str, Any]] = []
+    for req in requests:
+        raw = (req.get("entry_id") or "").strip() if isinstance(req, dict) else ""
+        if not raw:
+            early_results.append({
+                "ok": False, "entry_id": "", "error": "missing entry_id",
+            })
+            continue
+        full, err = await entries_repo.resolve_entry_id_prefix(db, raw)
+        if err:
+            early_results.append({"ok": False, "entry_id": raw, "error": err})
+            continue
+        resolved.append((req, full))
+
+    entry_ids = [eid for _, eid in resolved]
     rows = await entries_repo.list_with_file_by_ids_any(db, entry_ids)
     by_entry: dict[str, tuple[FileEntry, File]] = {
         e.id: (e, f) for e, f in rows
     }
 
     storage = get_storage()
-    results: list[dict[str, Any]] = []
+    results: list[dict[str, Any]] = list(early_results)
 
-    for req in requests:
-        eid = req["entry_id"]
+    for req, eid in resolved:
         pair = by_entry.get(eid)
         if pair is None:
             results.append({

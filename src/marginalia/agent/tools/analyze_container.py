@@ -107,7 +107,10 @@ async def analyze_container(
     ctx: ToolContext,
     args: Mapping[str, Any],
 ) -> dict[str, Any]:
-    container_id = args["container_entry_id"]
+    raw_id = args["container_entry_id"]
+    container_id, err = await entries_repo.resolve_entry_id_prefix(db, raw_id)
+    if err is not None:
+        return {"error": err, "entry_id": raw_id}
     pair = await entries_repo.get_live_with_file(db, container_id)
     if pair is None:
         return {"error": "container entry not found", "entry_id": container_id}

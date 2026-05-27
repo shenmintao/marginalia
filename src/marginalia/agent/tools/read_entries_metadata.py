@@ -5,6 +5,9 @@ Batch-fetches full metadata for a set of entry_ids and automatically attaches
 
 This is the canonical "agent has a list of candidates, now needs detail"
 endpoint. Pair with read_files when the agent decides to crack one open.
+
+`entry_ids` may include short hex prefixes (>= 8 chars); see
+`entries_repo.resolve_entry_id_prefix`.
 """
 from __future__ import annotations
 
@@ -60,7 +63,22 @@ async def read_entries_metadata(
     if not entry_ids:
         return {"entries": [], "count": 0}
 
-    rows = await entries_repo.list_with_file_by_ids_any(db, entry_ids)
+    # Resolve short prefixes to full uuids; collect ambiguous / unknown
+    # ones in `errors` so the agent gets feedback rather than silently
+    # dropping them.
+    resolved_ids: list[str] = []
+    errors: list[dict[str, str]] = []
+    for raw in entry_ids:
+        s = (raw or "").strip() if isinstance(raw, str) else ""
+        if not s:
+            continue
+        full, err = await entries_repo.resolve_entry_id_prefix(db, s)
+        if err:
+            errors.append({"entry_id": s, "error": err})
+            continue
+        resolved_ids.append(full)
+
+    rows = await entries_repo.list_with_file_by_ids_any(db, resolved_ids)
 
     out: list[dict[str, Any]] = []
     for entry, file_row in rows:
@@ -132,4 +150,7 @@ async def read_entries_metadata(
             "related_entries": related,
         })
 
-    return {"entries": out, "count": len(out)}
+    result: dict[str, Any] = {"entries": out, "count": len(out)}
+    if errors:
+        result["errors"] = errors
+    return result

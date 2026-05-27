@@ -54,27 +54,6 @@ def _apply_tag_filters(
     return stmt
 
 
-async def list_live_with_file_in_folder(
-    db: AsyncSession, folder_id: str, *, limit: int,
-) -> list[tuple[FileEntry, File]]:
-    """Live entries (joined with file) inside one folder, ordered by
-    display_name, capped at `limit`. Used by the list_files_in_folder
-    agent tool."""
-    rows = (
-        await db.execute(
-            select(FileEntry, File)
-            .join(File, File.id == FileEntry.file_id)
-            .where(
-                FileEntry.folder_id == folder_id,
-                _live_entry(),
-            )
-            .order_by(FileEntry.display_name)
-            .limit(limit)
-        )
-    ).all()
-    return [(e, f) for e, f in rows]
-
-
 async def list_live_in_folder(
     db: AsyncSession, folder_id: str | None,
 ) -> list[tuple[FileEntry, str | None]]:
@@ -315,6 +294,82 @@ async def list_with_file_by_ids_any(
         )
     ).all()
     return [(e, f) for e, f in rows]
+
+
+# uuid4 form: 8-4-4-4-12 hex with dashes
+_UUID_LEN = 36
+# Minimum prefix length we'll accept for short-id resolution. 8 chars of
+# hex = 32 bits ≈ collision-free at any realistic library size, and it's
+# the same prefix we display in the activity bar so what the user sees
+# round-trips cleanly.
+_MIN_PREFIX = 8
+
+
+async def resolve_entry_id_prefix(
+    db: AsyncSession, raw: str,
+) -> tuple[str, str | None]:
+    """Resolve a user-supplied entry_id to a full uuid.
+
+    Accepts:
+      - a full uuid (returned unchanged)
+      - a short hex prefix (>= 8 chars, dashes optional) — promoted to the
+        full id when exactly one entry has that prefix.
+
+    Returns `(full_id, error)`. On success `error is None`. On failure
+    `full_id` is the original input and `error` names the failure mode
+    so the caller can surface it back to the agent.
+
+    Soft-deleted entries are NOT excluded — same scope as
+    `list_with_file_by_ids_any`, so the read_files / read_entries_metadata
+    tools can still report ingest_status / lifecycle on a soft-deleted row.
+    """
+    s = (raw or "").strip()
+    if not s:
+        return raw, "missing entry_id"
+
+    if len(s) == _UUID_LEN and s.count("-") == 4:
+        return s, None
+
+    cleaned = s.replace("-", "").lower()
+    if len(cleaned) < _MIN_PREFIX or not all(
+        c in "0123456789abcdef" for c in cleaned
+    ):
+        return s, (
+            f"entry_id={s!r} is not a valid uuid or short prefix "
+            f"(need >= {_MIN_PREFIX} hex chars). "
+            "Use the id from a search/list tool result."
+        )
+
+    # SQL LIKE on the de-dashed prefix. Entry ids are stored as 36-char
+    # uuids with dashes, so we strip dashes from both sides via REPLACE.
+    # Collation is fine because uuid hex is ASCII.
+    rows = (
+        await db.execute(
+            select(FileEntry.id).where(
+                FileEntry.id.ilike(f"{cleaned[:8]}%")
+            ).limit(5)
+        )
+    ).scalars().all()
+
+    # `cleaned[:8]` matches the leading hex of any uuid sharing that
+    # prefix because uuid4 dashes always sit at fixed positions
+    # (8/13/18/23). If the agent supplied more than 8 chars, narrow
+    # further by comparing the full cleaned prefix against the de-dashed
+    # row id in Python — saves us a second SQL function call.
+    if len(cleaned) > 8:
+        rows = [
+            rid for rid in rows if rid.replace("-", "").lower().startswith(cleaned)
+        ]
+
+    if not rows:
+        return s, f"no entry matches prefix {s!r}"
+    if len(rows) > 1:
+        sample = ", ".join(r[:8] for r in rows[:3])
+        return s, (
+            f"prefix {s!r} is ambiguous ({len(rows)} matches: {sample}); "
+            "supply more characters of the id."
+        )
+    return rows[0], None
 
 
 async def list_by_ids_any(

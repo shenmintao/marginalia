@@ -123,7 +123,20 @@ async def build_export_plan(
         citations=parse_citations(conv.agent_response or ""),
     )
 
-    # resolve live entry_ids referenced by citations
+    # resolve live entry_ids referenced by citations. Citations may carry
+    # short hex prefixes (the agent occasionally inlines them); promote
+    # each to a full uuid before the live-lookup so the export can still
+    # find the file.
+    raw_to_full: dict[str, str] = {}
+    for c in plan.citations:
+        full, err = await entries_repo.resolve_entry_id_prefix(
+            session, c.entry_id,
+        )
+        if err is None:
+            raw_to_full[c.entry_id] = full
+            # Canonicalise so the rest of the pipeline (manifest, zip
+            # naming) gets the full id.
+            c.entry_id = full
     entry_ids = list({c.entry_id for c in plan.citations})
     if entry_ids:
         rows = await entries_repo.list_live_with_file_by_ids(session, entry_ids)
