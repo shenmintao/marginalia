@@ -39,13 +39,18 @@ async def running_count(
     return await tasks_repo.count_running_and_pending(db)
 
 
-_PAYLOAD_KEYS_FOR_LABEL = ("entry_id", "file_id", "session_id", "conversation_id", "path")
+_PAYLOAD_KEYS_FOR_LABEL = ("display_name", "entry_id", "file_id", "session_id", "conversation_id", "path")
 
 
 def _payload_label(payload: Any) -> str:
     if not isinstance(payload, dict):
         return ""
+    name = payload.get("display_name")
+    if name:
+        return str(name)
     for key in _PAYLOAD_KEYS_FOR_LABEL:
+        if key == "display_name":
+            continue
         v = payload.get(key)
         if v:
             s = str(v)

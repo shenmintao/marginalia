@@ -52,7 +52,7 @@ class Settings(BaseSettings):
 
     worker_enabled: bool = True
     worker_poll_interval_seconds: float = 2.0
-    worker_batch_size: int = 4
+    worker_batch_size: int = 10
     worker_lease_seconds: int = 60
     worker_heartbeat_seconds: int = 20
 

@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from marginalia.db.models import File
 from marginalia.repositories import audit_events as audit_events_repo
+from marginalia.repositories import entries as entries_repo
 from marginalia.repositories import entry_tags as entry_tags_repo
 from marginalia.repositories import files as files_repo
 from marginalia.tasks.enqueue import enqueue
@@ -50,6 +51,9 @@ async def reprocess_file(
     for eid in entry_ids:
         await entry_tags_repo.delete_all_for_entry(session, eid)
 
+    seed = await entries_repo.find_seed_by_file_id(session, file_row.id)
+    display_name = seed.display_name if seed is not None else None
+
     file_row.ingested_at = None
     file_row.ingest_status = "pending"
     file_row.updated_at = now
@@ -67,7 +71,7 @@ async def reprocess_file(
     task = await enqueue(
         session,
         kind=KIND_INGEST_FILE,
-        payload={"file_id": file_row.id},
+        payload={"file_id": file_row.id, "display_name": display_name},
         dedup_key=f"ingest_file:{file_row.id}",
     )
     if task is None:

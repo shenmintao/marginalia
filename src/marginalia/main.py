@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -18,7 +19,7 @@ from marginalia.api.routes_tasks import router as tasks_router
 from marginalia.api.routes_tend import router as tend_router
 from marginalia.api.routes_upload import router as upload_router
 from marginalia.api.routes_user_files import router as user_files_router
-from marginalia.config import get_settings, validate_llm_config
+from marginalia.config import LlmConfigError, get_settings, validate_llm_config
 from marginalia.db.bootstrap import bootstrap_schema
 from marginalia.db.engine import dispose_engine
 from marginalia.tasks.runner import TaskRunner
@@ -29,7 +30,17 @@ log = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
-    validate_llm_config(settings)
+    # Desktop launch: server must come up even when the user hasn't entered
+    # an API key yet, so they can do it from the Settings page. Tasks that
+    # actually need an LLM call still fail at call time. Headless / CLI
+    # launches keep the historical hard-fail.
+    if os.environ.get("MARGINALIA_DESKTOP") == "1":
+        try:
+            validate_llm_config(settings)
+        except LlmConfigError as e:
+            log.warning("desktop launch with incomplete LLM config: %s", e)
+    else:
+        validate_llm_config(settings)
     await bootstrap_schema()
     await _check_storage_consistency(settings)
     runner: TaskRunner | None = None

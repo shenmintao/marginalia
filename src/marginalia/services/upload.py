@@ -314,7 +314,7 @@ async def _create_new_file_entry(
     task = await enqueue(
         session,
         kind=KIND_INGEST_FILE,
-        payload={"file_id": file_row.id},
+        payload={"file_id": file_row.id, "display_name": final_name},
         dedup_key=f"ingest_file:{file_row.id}",
     )
     if task is not None:
