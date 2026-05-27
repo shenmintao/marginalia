@@ -160,12 +160,12 @@ jobs:
 
       # tauri-action created a draft; flip it to published once Docker is
       # also available, so users never see a release whose Docker tag
-      # 404s.
+      # 404s. We can't use `gh api repos/.../releases/tags/<tag>` here:
+      # that endpoint 404s on drafts (drafts aren't bound to a tag yet),
+      # which is what tripped the v0.1.0 publish. `gh release edit`
+      # resolves drafts by name, so it works on both states.
       - name: Publish draft
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
-        run: |
-          set -euo pipefail
-          release_id=$(gh api "repos/${{ github.repository }}/releases/tags/$TAG" --jq .id)
-          gh api -X PATCH "repos/${{ github.repository }}/releases/$release_id" -f draft=false
+        run: gh release edit "$TAG" --draft=false --latest
