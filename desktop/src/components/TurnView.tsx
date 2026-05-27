@@ -23,6 +23,7 @@ export interface Step {
   kind: StepKind;
   label: string;
   toolName?: string;
+  toolCallId?: string;
   args?: Record<string, unknown>;
   entryNames?: Record<string, string>;
   tagNames?: Record<string, string>;

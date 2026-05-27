@@ -38,6 +38,7 @@ or risk duplicate-row IntegrityError on the second writer.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -693,31 +694,6 @@ async def _persist_tool_call(
         await db.commit()
 
 
-def _emit_failure(
-    *,
-    tc,
-    error: str,
-    result_blocks: list[ToolResultBlock],
-    guard: _CallGuard,
-    key: tuple[str, str],
-) -> AgentEvent:
-    """Build the failure ToolResultBlock + remember it for dedup, return the
-    AgentEvent the caller should yield. Centralizes the `unknown tool` and
-    `exception during handler` paths."""
-    result_blocks.append(ToolResultBlock(
-        tool_call_id=tc.id,
-        content=f"ERROR: {error}",
-        is_error=True,
-    ))
-    guard.remember(key, f"ERROR: {error}")
-    return AgentEvent(
-        event_type="tool_result",
-        data=json.dumps({
-            "name": tc.name, "ok": False, "error": error,
-        }, ensure_ascii=False),
-    )
-
-
 async def _dispatch_tool_calls(
     *,
     tool_calls,
@@ -726,23 +702,40 @@ async def _dispatch_tool_calls(
     result_blocks: list[ToolResultBlock],
     guard: _CallGuard,
 ) -> AsyncIterator[AgentEvent]:
-    """Run each tool inside its own session_scope; record on conversation.
+    """Preflight + parallel execution + completion-order drain.
 
-    Async generator yielding AgentEvent (`tool_call`, `tool_result`).
-    Per-call ToolResultBlocks are appended to `result_blocks` so the
-    caller can feed them back to the model in a single tool message —
-    avoids an interleaved `AgentEvent | ToolResultBlock` stream the
-    caller would have to isinstance-filter.
+    Async generator yielding AgentEvent (`tool_call`, `tool_result`,
+    sometimes `user_artifact`). Two invariants worth pinning:
+
+      - SSE events fire in *completion* order — users see fast tools
+        finish first regardless of where they were in the assistant
+        message. Each event carries `tool_call_id` so the frontend can
+        pair the result back to the right step.
+      - `result_blocks` is appended in *source* order so Anthropic's
+        tool_use_id ↔ tool_result_id pairing stays valid when this
+        message is fed back to the model.
 
     Guards (append-only — never edit prior history):
-      - dedup: if (name, args) already ran this turn, synthesize a
+      - dedup-prior: (name, args) seen earlier this turn → synthesize a
         ToolResultBlock with the prior result_text, skip handler.
+      - dedup-batch: (name, args) appears twice in *this* batch → only
+        the first runs; the duplicate waits for the leader's result and
+        reuses it. Saves real work when the model fans out the same
+        read twice in one assistant message.
       - doom-loop: if the same key crossed DOOM_LOOP_THRESHOLD in the
-        last DOOM_LOOP_WINDOW dispatched calls, append a STOP nudge
-        ToolResultBlock to *this* tool message.
+        last DOOM_LOOP_WINDOW dispatched calls, append a STOP nudge to
+        the last ToolResultBlock of *this* tool message.
     """
+    n = len(tool_calls)
+    placeholders: list[ToolResultBlock | None] = [None] * n
+    keys: list[str] = []
+    statuses: list[str] = []  # runnable | dup_prior | dup_batch | unknown
+    leader_followers: dict[int, list[int]] = {}
+    seen_in_batch: dict[str, int] = {}
     nudge_pending = False
-    for tc in tool_calls:
+
+    # ---- preflight: classify in source order, yield tool_call events ----
+    for idx, tc in enumerate(tool_calls):
         # Pre-resolve every id referenced in args so the display
         # one-liner can show names instead of raw uuids. One DB round
         # trip per tool call, skipped when no ids of that kind appear.
@@ -788,6 +781,7 @@ async def _dispatch_tool_calls(
         yield AgentEvent(
             event_type="tool_call",
             data=json.dumps({
+                "tool_call_id": tc.id,
                 "name": tc.name,
                 "arguments": tc.arguments,
                 "display": display,
@@ -799,109 +793,208 @@ async def _dispatch_tool_calls(
         )
 
         key = guard.key(tc.name, tc.arguments)
+        keys.append(key)
 
         if guard.should_nudge(key):
             nudge_pending = True
             guard.nudged = True
 
         if guard.is_duplicate(key):
+            statuses.append("dup_prior")
+            guard.recent.append(key)
+            continue
+        if key in seen_in_batch:
+            statuses.append("dup_batch")
+            leader_followers.setdefault(seen_in_batch[key], []).append(idx)
+            guard.recent.append(key)
+            continue
+        if get_tool(tc.name) is None:
+            statuses.append("unknown")
+            continue
+        seen_in_batch[key] = idx
+        statuses.append("runnable")
+
+    # ---- synchronous resolution: dup_prior + unknown ----
+    for idx, tc in enumerate(tool_calls):
+        s = statuses[idx]
+        key = keys[idx]
+        if s == "dup_prior":
             prior = guard.seen[key]
             prior_preview = guard.seen_previews.get(key) or "(see prior call)"
-            guard.recent.append(key)  # record the attempt for doom-loop
-            yield AgentEvent(
-                event_type="tool_result",
-                data=json.dumps({
-                    "name": tc.name, "ok": True, "deduped": True,
-                    "preview": prior_preview[:TOOL_RESULT_PREVIEW_LEN],
-                }, ensure_ascii=False),
-            )
-            result_blocks.append(ToolResultBlock(
+            placeholders[idx] = ToolResultBlock(
                 tool_call_id=tc.id,
                 content=(
                     "[runtime guard] duplicate call this turn — reusing "
                     f"prior result.\n{prior}"
                 ),
-            ))
-            continue
-
-        reg = get_tool(tc.name)
-        started = time.monotonic()
-        if reg is None:
+            )
+            yield AgentEvent(
+                event_type="tool_result",
+                data=json.dumps({
+                    "tool_call_id": tc.id,
+                    "name": tc.name, "ok": True, "deduped": True,
+                    "preview": prior_preview[:TOOL_RESULT_PREVIEW_LEN],
+                }, ensure_ascii=False),
+            )
+        elif s == "unknown":
             err = f"unknown tool: {tc.name}"
             await _persist_tool_call(
                 conversation_id=conversation_id,
                 name=tc.name, arguments=tc.arguments,
-                result=None, error=err,
-                duration_ms=int((time.monotonic() - started) * 1000),
+                result=None, error=err, duration_ms=0,
             )
-            yield _emit_failure(
-                tc=tc, error=err,
-                result_blocks=result_blocks, guard=guard, key=key,
+            placeholders[idx] = ToolResultBlock(
+                tool_call_id=tc.id,
+                content=f"ERROR: {err}",
+                is_error=True,
             )
-            continue
-
-        try:
-            async with session_scope() as db:
-                result = await reg.handler(db, ctx, tc.arguments)
-                await db.commit()
-        except Exception as exc:  # noqa: BLE001
-            log.exception("tool %s failed", tc.name)
-            await _persist_tool_call(
-                conversation_id=conversation_id,
-                name=tc.name, arguments=tc.arguments,
-                result=None, error=repr(exc),
-                duration_ms=int((time.monotonic() - started) * 1000),
-            )
-            yield _emit_failure(
-                tc=tc, error=repr(exc),
-                result_blocks=result_blocks, guard=guard, key=key,
-            )
-            continue
-
-        duration_ms = int((time.monotonic() - started) * 1000)
-        # Side-channel: tools may attach a `__user_only__` payload that is
-        # shown to the user (UI artifact, e.g. Vega-Lite spec) but kept
-        # OUT of the model's tool_result content — the model gets only
-        # the lightweight summary and the chart_id. We persist the full
-        # result (incl. side-channel) on the conversation row so /info
-        # and replays still show it.
-        user_only = None
-        if isinstance(result, dict) and "__user_only__" in result:
-            user_only = result.get("__user_only__")
-            result_for_model = {k: v for k, v in result.items() if k != "__user_only__"}
-        else:
-            result_for_model = result
-        result_text = json.dumps(result_for_model, ensure_ascii=False)
-        if len(result_text) > MAX_TOOL_RESULT_LEN:
-            result_text = result_text[:MAX_TOOL_RESULT_LEN] + "...(truncated)"
-        await _persist_tool_call(
-            conversation_id=conversation_id,
-            name=tc.name, arguments=tc.arguments,
-            result=result, error=None,
-            duration_ms=duration_ms,
-        )
-        if user_only is not None:
+            guard.remember(key, f"ERROR: {err}")
             yield AgentEvent(
-                event_type="user_artifact",
+                event_type="tool_result",
                 data=json.dumps({
-                    "tool": tc.name,
-                    "payload": user_only,
+                    "tool_call_id": tc.id,
+                    "name": tc.name, "ok": False, "error": err,
                 }, ensure_ascii=False),
             )
-        preview = tool_display.format_tool_result_preview(tc.name, result_for_model)
-        if len(preview) > TOOL_RESULT_PREVIEW_LEN:
-            preview = preview[:TOOL_RESULT_PREVIEW_LEN] + "..."
-        yield AgentEvent(
-            event_type="tool_result",
-            data=json.dumps({
-                "name": tc.name, "ok": True, "preview": preview,
-            }, ensure_ascii=False),
-        )
-        result_blocks.append(ToolResultBlock(
-            tool_call_id=tc.id,
-            content=result_text,
-        ))
-        guard.remember(key, result_text, preview=preview)
+
+    # ---- spawn runnables (each task owns its own DB session) ----
+    tasks: dict[asyncio.Task, int] = {}
+    for idx, tc in enumerate(tool_calls):
+        if statuses[idx] != "runnable":
+            continue
+        reg = get_tool(tc.name)
+        tasks[asyncio.create_task(_run_tool(reg, ctx, tc))] = idx
+
+    # ---- drain in completion order ----
+    try:
+        while tasks:
+            done, _pending = await asyncio.wait(
+                list(tasks.keys()),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in done:
+                idx = tasks.pop(task)
+                tc = tool_calls[idx]
+                key = keys[idx]
+                duration_ms, result, exc = task.result()
+                if exc is not None:
+                    log.exception("tool %s failed", tc.name, exc_info=exc)
+                    err = repr(exc)
+                    await _persist_tool_call(
+                        conversation_id=conversation_id,
+                        name=tc.name, arguments=tc.arguments,
+                        result=None, error=err, duration_ms=duration_ms,
+                    )
+                    placeholders[idx] = ToolResultBlock(
+                        tool_call_id=tc.id,
+                        content=f"ERROR: {err}",
+                        is_error=True,
+                    )
+                    guard.remember(key, f"ERROR: {err}")
+                    yield AgentEvent(
+                        event_type="tool_result",
+                        data=json.dumps({
+                            "tool_call_id": tc.id,
+                            "name": tc.name, "ok": False, "error": err,
+                            "duration_ms": duration_ms,
+                        }, ensure_ascii=False),
+                    )
+                    # Fan-out failures to batch followers too — they share
+                    # the leader's verdict.
+                    for fidx in leader_followers.get(idx, ()):
+                        ftc = tool_calls[fidx]
+                        placeholders[fidx] = ToolResultBlock(
+                            tool_call_id=ftc.id,
+                            content=(
+                                "[runtime guard] duplicate call this batch — "
+                                f"leader failed.\nERROR: {err}"
+                            ),
+                            is_error=True,
+                        )
+                        yield AgentEvent(
+                            event_type="tool_result",
+                            data=json.dumps({
+                                "tool_call_id": ftc.id,
+                                "name": ftc.name, "ok": False,
+                                "deduped": True, "error": err,
+                            }, ensure_ascii=False),
+                        )
+                    continue
+
+                # Side-channel: tools may attach `__user_only__` payload
+                # shown to the UI but kept OUT of the model's tool_result
+                # content. We persist the full result on the conversation
+                # row so /info and replays still show it.
+                user_only = None
+                if isinstance(result, dict) and "__user_only__" in result:
+                    user_only = result.get("__user_only__")
+                    result_for_model = {
+                        k: v for k, v in result.items() if k != "__user_only__"
+                    }
+                else:
+                    result_for_model = result
+                result_text = json.dumps(result_for_model, ensure_ascii=False)
+                if len(result_text) > MAX_TOOL_RESULT_LEN:
+                    result_text = result_text[:MAX_TOOL_RESULT_LEN] + "...(truncated)"
+                await _persist_tool_call(
+                    conversation_id=conversation_id,
+                    name=tc.name, arguments=tc.arguments,
+                    result=result, error=None,
+                    duration_ms=duration_ms,
+                )
+                if user_only is not None:
+                    yield AgentEvent(
+                        event_type="user_artifact",
+                        data=json.dumps({
+                            "tool_call_id": tc.id,
+                            "tool": tc.name,
+                            "payload": user_only,
+                        }, ensure_ascii=False),
+                    )
+                preview = tool_display.format_tool_result_preview(
+                    tc.name, result_for_model,
+                )
+                if len(preview) > TOOL_RESULT_PREVIEW_LEN:
+                    preview = preview[:TOOL_RESULT_PREVIEW_LEN] + "..."
+                placeholders[idx] = ToolResultBlock(
+                    tool_call_id=tc.id, content=result_text,
+                )
+                guard.remember(key, result_text, preview=preview)
+                yield AgentEvent(
+                    event_type="tool_result",
+                    data=json.dumps({
+                        "tool_call_id": tc.id,
+                        "name": tc.name, "ok": True, "preview": preview,
+                        "duration_ms": duration_ms,
+                    }, ensure_ascii=False),
+                )
+                # Fan-out the leader's result to its batch followers.
+                for fidx in leader_followers.get(idx, ()):
+                    ftc = tool_calls[fidx]
+                    placeholders[fidx] = ToolResultBlock(
+                        tool_call_id=ftc.id,
+                        content=(
+                            "[runtime guard] duplicate call this batch — "
+                            f"reusing leader's result.\n{result_text}"
+                        ),
+                    )
+                    yield AgentEvent(
+                        event_type="tool_result",
+                        data=json.dumps({
+                            "tool_call_id": ftc.id,
+                            "name": ftc.name, "ok": True,
+                            "deduped": True,
+                            "preview": preview[:TOOL_RESULT_PREVIEW_LEN],
+                        }, ensure_ascii=False),
+                    )
+    finally:
+        for t in tasks:
+            t.cancel()
+
+    # ---- finalize: source-order result_blocks + doom-loop nudge ----
+    for ph in placeholders:
+        if ph is not None:
+            result_blocks.append(ph)
 
     if nudge_pending and result_blocks:
         # Decorate the last real tool_result with the STOP nudge. We
@@ -917,3 +1010,18 @@ async def _dispatch_tool_calls(
             content=f"{last.content}\n\n{DOOM_LOOP_NUDGE}",
             is_error=last.is_error,
         )
+
+
+async def _run_tool(reg, ctx: ToolContext, tc) -> tuple[int, Any, Exception | None]:
+    """Execute one tool inside its own session_scope. Returns
+    (duration_ms, result, exception). Never raises — failures travel
+    back as the third tuple element so the dispatcher loop stays clean.
+    """
+    started = time.monotonic()
+    try:
+        async with session_scope() as db:
+            result = await reg.handler(db, ctx, tc.arguments)
+            await db.commit()
+        return int((time.monotonic() - started) * 1000), result, None
+    except Exception as exc:  # noqa: BLE001
+        return int((time.monotonic() - started) * 1000), None, exc

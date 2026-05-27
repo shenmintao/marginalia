@@ -324,6 +324,7 @@ function applyEvent(
         const d = (ev.data && typeof ev.data === "object")
           ? (ev.data as {
               name?: string;
+              tool_call_id?: string;
               arguments?: Record<string, unknown>;
               display?: string;
               entry_names?: Record<string, string>;
@@ -339,6 +340,7 @@ function applyEvent(
           {
             args,
             toolName: d.name,
+            toolCallId: d.tool_call_id,
             entryNames: d.entry_names,
             tagNames: d.tag_names,
           },
@@ -348,13 +350,15 @@ function applyEvent(
         const d = (ev.data && typeof ev.data === "object")
           ? (ev.data as {
               ok?: boolean;
+              tool_call_id?: string;
               duration_ms?: number;
               error?: string;
               preview?: string;
             })
           : {};
-        return markLastResult(
+        return markResult(
           t,
+          d.tool_call_id,
           d.ok === false ? "failed" : "ok",
           d.duration_ms,
           d.error,
@@ -406,6 +410,7 @@ function appendStep(
     args?: Record<string, unknown>;
     plan?: string[];
     toolName?: string;
+    toolCallId?: string;
     entryNames?: Record<string, string>;
     tagNames?: Record<string, string>;
   },
@@ -418,6 +423,7 @@ function appendStep(
       args: extra?.args,
       plan: extra?.plan,
       toolName: extra?.toolName,
+      toolCallId: extra?.toolCallId,
       entryNames: extra?.entryNames,
       tagNames: extra?.tagNames,
       result: undefined,
@@ -426,8 +432,9 @@ function appendStep(
   };
 }
 
-function markLastResult(
+function markResult(
   t: Turn,
+  toolCallId: string | undefined,
   result: "ok" | "failed",
   durationMs?: number,
   error?: string,
@@ -435,11 +442,27 @@ function markLastResult(
 ): Turn {
   if (t.steps.length === 0) return t;
   const steps = [...t.steps];
-  for (let i = steps.length - 1; i >= 0; i--) {
-    if (steps[i].kind === "tool_call" && !steps[i].result) {
-      steps[i] = { ...steps[i], result, durationMs, error, resultPreview };
-      break;
+  // Pair by tool_call_id when present (parallel-safe). Fall back to the
+  // last unfinished tool_call step for legacy/replay frames that don't
+  // carry an id.
+  let target = -1;
+  if (toolCallId) {
+    for (let i = steps.length - 1; i >= 0; i--) {
+      if (steps[i].kind === "tool_call" && steps[i].toolCallId === toolCallId) {
+        target = i;
+        break;
+      }
     }
   }
+  if (target === -1) {
+    for (let i = steps.length - 1; i >= 0; i--) {
+      if (steps[i].kind === "tool_call" && !steps[i].result) {
+        target = i;
+        break;
+      }
+    }
+  }
+  if (target === -1) return t;
+  steps[target] = { ...steps[target], result, durationMs, error, resultPreview };
   return { ...t, steps };
 }
