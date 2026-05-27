@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { Routes, Route, Navigate } from "react-router-dom";
 
+import { BackendGate } from "@/components/BackendGate";
 import { Sidebar } from "@/components/Sidebar";
 import { TopBar } from "@/components/TopBar";
 import { StatusBar } from "@/components/StatusBar";
@@ -18,23 +19,25 @@ export default function App() {
   }, [initTheme]);
 
   return (
-    <div className="flex h-full w-full flex-col bg-bg-base text-fg-base">
-      <div className="flex min-h-0 flex-1 overflow-hidden">
-        <Sidebar />
-        <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
-          <TopBar />
-          <main className="min-h-0 flex-1 overflow-hidden">
-            <Routes>
-              <Route path="/" element={<Navigate to="/chat" replace />} />
-              <Route path="/library/*" element={<LibraryPage />} />
-              <Route path="/chat" element={<ChatPage />} />
-              <Route path="/search" element={<SearchPage />} />
-              <Route path="/settings" element={<SettingsPage />} />
-            </Routes>
-          </main>
+    <BackendGate>
+      <div className="flex h-full w-full flex-col bg-bg-base text-fg-base">
+        <div className="flex min-h-0 flex-1 overflow-hidden">
+          <Sidebar />
+          <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+            <TopBar />
+            <main className="min-h-0 flex-1 overflow-hidden">
+              <Routes>
+                <Route path="/" element={<Navigate to="/chat" replace />} />
+                <Route path="/library/*" element={<LibraryPage />} />
+                <Route path="/chat" element={<ChatPage />} />
+                <Route path="/search" element={<SearchPage />} />
+                <Route path="/settings" element={<SettingsPage />} />
+              </Routes>
+            </main>
+          </div>
         </div>
+        <StatusBar />
       </div>
-      <StatusBar />
-    </div>
+    </BackendGate>
   );
 }
