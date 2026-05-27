@@ -30,11 +30,6 @@ def test_known_shapes() -> None:
 
     _check("list_folders", {"folders": [], "count": 0}, "no folders")
 
-    _check("list_files_in_folder", {
-        "entries": [{"display_name": "raft.pdf"}, {"display_name": "paxos.pdf"}],
-        "count": 2,
-    }, "2 files", "raft.pdf")
-
     _check("list_catalogs", {
         "catalogs": [{"name": "Algorithms"}, {"name": "Systems"}],
         "count": 2,

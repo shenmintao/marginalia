@@ -26,6 +26,26 @@ async def get_live(db: AsyncSession, folder_id: str) -> Folder | None:
     ).scalar_one_or_none()
 
 
+async def find_by_name(
+    db: AsyncSession, name: str,
+) -> list[Folder]:
+    """All live folders with exact name `name` (root-level or nested).
+
+    Returns a list because the same name can appear in different parents.
+    Most common case: one match, but the caller must decide how to handle
+    ambiguity.
+    """
+    stmt = (
+        select(Folder)
+        .where(
+            Folder.name == name,
+            Folder.deleted_at.is_(None),
+        )
+        .order_by(Folder.name)
+    )
+    return list((await db.execute(stmt)).scalars().all())
+
+
 async def find_child_by_name(
     db: AsyncSession, *, parent_id: str | None, name: str,
 ) -> Folder | None:
