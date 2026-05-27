@@ -13,7 +13,7 @@
  *  decide how to decode per type.
  */
 import type { ChatEvent, ChatEventType } from "@/types/api";
-import { getBaseUrl } from "@/api/client";
+import { getBaseUrl, resolveTauriBaseUrl } from "@/api/client";
 
 export interface ChatStreamOptions {
   signal?: AbortSignal;
@@ -26,6 +26,7 @@ export async function streamChat(
   query: string,
   opts: ChatStreamOptions,
 ): Promise<void> {
+  if (!getBaseUrl()) await resolveTauriBaseUrl();
   const url = `${getBaseUrl()}/v1/chat/${encodeURIComponent(sessionId)}`;
   const res = await fetch(url, {
     method: "POST",

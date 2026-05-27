@@ -1,4 +1,0 @@
-CI placeholder so tauri's `bundle.resources` glob (resources/backend/**/*)
-matches at least one file when prepare-backend.mjs hasn't run. The real
-build replaces this whole directory; this file only exists to keep the
-glob happy on plain `cargo check`.

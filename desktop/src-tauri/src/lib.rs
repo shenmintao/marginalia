@@ -30,7 +30,7 @@ use serde::Deserialize;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Manager, RunEvent, WindowEvent,
+    AppHandle, Manager, RunEvent, State, WindowEvent,
 };
 
 fn home_dir() -> PathBuf {
@@ -53,9 +53,14 @@ struct RuntimeManifest {
 }
 
 /// Locate the bundled Python interpreter under the resource dir.
+///
+/// The `bundle.resources` glob in `tauri.conf.json` is `resources/backend/**/*`
+/// — Tauri preserves the leading `resources/` path segment when staging files
+/// into the bundle, so at runtime the tree lives at
+/// `<resource_dir>/resources/backend/`. The portable-zip layout matches this.
 fn resolve_bundled_python(app: &AppHandle) -> Option<(PathBuf, PathBuf)> {
     let resource_dir = app.path().resource_dir().ok()?;
-    let backend_dir = resource_dir.join("backend");
+    let backend_dir = resource_dir.join("resources").join("backend");
     let manifest_path = backend_dir.join("runtime-manifest.json");
     let manifest_bytes = std::fs::read(&manifest_path)
         .map_err(|e| log::error!("missing runtime-manifest.json at {}: {}", manifest_path.display(), e))
@@ -74,6 +79,22 @@ fn resolve_bundled_python(app: &AppHandle) -> Option<(PathBuf, PathBuf)> {
 #[derive(Default)]
 struct BackendState {
     child: Mutex<Option<Child>>,
+    port: Mutex<Option<u16>>,
+}
+
+/// Pick an ephemeral port the OS marks as currently free. There's a small
+/// TOCTOU window between drop and the python sidecar's bind, but the OS is
+/// unlikely to hand the same port out twice in that window.
+fn pick_free_port() -> std::io::Result<u16> {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let port = listener.local_addr()?.port();
+    drop(listener);
+    Ok(port)
+}
+
+#[tauri::command]
+fn backend_port(state: State<'_, BackendState>) -> Option<u16> {
+    *state.port.lock().unwrap()
 }
 
 impl BackendState {
@@ -90,6 +111,28 @@ impl BackendState {
         if let Err(e) = std::fs::create_dir_all(&home) {
             log::warn!("could not create MARGINALIA_HOME {}: {}", home.display(), e);
         }
+        // First-launch: drop a starter .env so users have somewhere to put
+        // their LLM key. validate_llm_config still flags an empty key, but
+        // the desktop launch path soft-fails (MARGINALIA_DESKTOP=1) so the
+        // server still comes up and Settings → LLM Profile becomes reachable.
+        ensure_starter_env(&home);
+
+        // Pick a free port so we don't collide with any other service on
+        // 8000 (very common dev port). The port is then exposed to the
+        // webview via the `backend_port` Tauri command. Users can still
+        // pin a port with MARGINALIA_API_PORT if they really want to.
+        let port = match std::env::var("MARGINALIA_API_PORT").ok().and_then(|s| s.parse::<u16>().ok()) {
+            Some(p) => p,
+            None => match pick_free_port() {
+                Ok(p) => p,
+                Err(e) => {
+                    log::error!("failed to allocate ephemeral backend port: {}", e);
+                    return;
+                }
+            },
+        };
+        *self.port.lock().unwrap() = Some(port);
+        log::info!("backend port = {}", port);
 
         let mut cmd = if let Ok(cmd_str) = std::env::var("MARGINALIA_BACKEND_CMD") {
             let mut parts = cmd_str.split_whitespace();
@@ -129,6 +172,8 @@ impl BackendState {
         match cmd
             .current_dir(&home)
             .env("MARGINALIA_HOME", &home)
+            .env("MARGINALIA_API_PORT", port.to_string())
+            .env("MARGINALIA_DESKTOP", "1")
             .env("PYTHONUNBUFFERED", "1")
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
@@ -153,6 +198,48 @@ impl BackendState {
             }
             let _ = child.wait();
         }
+    }
+}
+
+/// Drop a starter `.env` into MARGINALIA_HOME on first launch so users
+/// have somewhere obvious to paste their LLM key. We never overwrite an
+/// existing file. If the write fails (read-only home, perms, etc.) we
+/// just log — the server still comes up under MARGINALIA_DESKTOP=1.
+fn ensure_starter_env(home: &Path) {
+    let env_path = home.join(".env");
+    if env_path.exists() {
+        return;
+    }
+    let template = "\
+# Marginalia configuration. Reload the desktop app after editing.
+#
+# Pick a provider for the chat / reflect / ingest profiles. The
+# Settings page in the app writes these same fields — editing here
+# or there is equivalent.
+#
+# OpenAI:
+#   LLM_DEFAULT_PROVIDER=openai
+#   LLM_DEFAULT_MODEL=gpt-4o-mini
+#   LLM_DEFAULT_API_KEY=sk-...
+#
+# OpenAI-compatible (DeepSeek / Together / Groq / vllm / ollama):
+#   LLM_DEFAULT_PROVIDER=openai-compatible
+#   LLM_DEFAULT_BASE_URL=https://api.deepseek.com/v1
+#   LLM_DEFAULT_MODEL=deepseek-chat
+#   LLM_DEFAULT_API_KEY=sk-...
+#
+# Anthropic:
+#   LLM_DEFAULT_PROVIDER=anthropic
+#   LLM_DEFAULT_MODEL=claude-sonnet-4-5
+#   LLM_DEFAULT_API_KEY=sk-ant-...
+
+LLM_DEFAULT_PROVIDER=openai
+LLM_DEFAULT_MODEL=gpt-4o-mini
+LLM_DEFAULT_API_KEY=
+";
+    match std::fs::write(&env_path, template) {
+        Ok(_) => log::info!("wrote starter .env at {}", env_path.display()),
+        Err(e) => log::warn!("could not write starter .env at {}: {}", env_path.display(), e),
     }
 }
 
@@ -229,6 +316,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
 pub fn run() {
     tauri::Builder::default()
         .manage(BackendState::default())
+        .invoke_handler(tauri::generate_handler![backend_port])
         .setup(|app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(
