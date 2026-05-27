@@ -36,6 +36,12 @@ export function LibraryPage() {
   // resolved into a FileEntrySummary (the tree fills that in once it
   // loads the leaf folder's contents).
   const [pendingEntryId, setPendingEntryId] = useState<string | null>(null);
+  // Optional position locator that travelled in on the same ?entry=
+  // deep-link (`?line=10-40` or `?page=3`). FileViewer reads this and
+  // scrolls/jumps to the right spot once it has rendered the file.
+  const [pendingLocator, setPendingLocator] = useState<
+    { kind: "line" | "page"; value: string } | null
+  >(null);
 
   const [newFolderUnder, setNewFolderUnder] = useState<{ id: string | null; name: string } | null>(null);
   const [uploadInto, setUploadInto] = useState<{ id: string | null; name: string } | null>(null);
@@ -64,25 +70,36 @@ export function LibraryPage() {
   // chain, hand the ids to FolderTree as expandPath so each parent
   // opens, and remember the entry id so the tree can complete the
   // selection once the leaf folder's contents come back.
+  // ?line= and ?page= ride along on the same URL — captured into
+  // pendingLocator and consumed by FileViewer once the file loads.
   useEffect(() => {
     const entryId = searchParams.get("entry");
     if (!entryId) return;
+    const lineParam = searchParams.get("line");
+    const pageParam = searchParams.get("page");
     let cancelled = false;
     fileEntries.path(entryId).then(
       (p) => {
         if (cancelled) return;
         setExpandPath(p.ancestors.map((a) => a.id));
         setPendingEntryId(p.entry_id);
-        // Drop the query param so a later navigation back to /library
-        // (without ?entry=) doesn't keep retriggering the expansion.
+        if (lineParam) setPendingLocator({ kind: "line", value: lineParam });
+        else if (pageParam) setPendingLocator({ kind: "page", value: pageParam });
+        else setPendingLocator(null);
+        // Drop the query params so a later navigation back to /library
+        // (without them) doesn't keep retriggering the expansion.
         const next = new URLSearchParams(searchParams);
         next.delete("entry");
+        next.delete("line");
+        next.delete("page");
         setSearchParams(next, { replace: true });
       },
       () => {
         if (!cancelled) {
           const next = new URLSearchParams(searchParams);
           next.delete("entry");
+          next.delete("line");
+          next.delete("page");
           setSearchParams(next, { replace: true });
         }
       },
@@ -169,7 +186,12 @@ export function LibraryPage() {
 
       <main className="flex flex-1 overflow-hidden bg-bg-base">
         {selectedEntry ? (
-          <FileViewer entryId={selectedEntry.id} meta={meta} />
+          <FileViewer
+            entryId={selectedEntry.id}
+            meta={meta}
+            locator={pendingLocator}
+            onLocatorConsumed={() => setPendingLocator(null)}
+          />
         ) : (
           <EmptyViewer folder={selectedFolder} onClick={clearSelection} />
         )}

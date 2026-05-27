@@ -59,9 +59,23 @@ EXECUTE_PHASE_PROMPT = """你是 Marginalia 的在线调查员（🔍 Investigat
 - 简洁、有据。不要长篇罗列；选要点。
 - 凡是引用具体段落、数据、文件，使用 markdown 角标 [^a] [^b]，并在末尾给出
   脚注，**必须包含引用理由**：
-    `[^a]: entry_id=<id>, section_id=<sid> - <为什么引用这段>`
-  其中 section_id 可选；reason 必填，一句话说明这段证据支撑了什么结论。
-  没有 reason 等于没引用。
+    `[^a]: entry_id=<id>, lines=<start>-<end> - <为什么引用这段>`
+  `lines=<start>-<end>`（或 `page=<n>`、`member=<path>`）是**位置定位符**，
+  让 GUI 能从引用直接跳到原文位置。
+  - 如果是文本/markdown 文件，写 `lines=<start>-<end>`（取自你刚刚 `read_segment`
+    时用的 `start_line`/`end_line` 参数；引用单行写 `lines=42` 即可）。
+  - 如果是 PDF，写 `page=<n>`。
+  - 如果都不知道（罕见），可以省略；GUI 会退化成"打开文件不跳位置"。
+  - 旧的 `section_id=<sid>` 写法仍然兼容（向后），但优先使用 `lines=`/`page=`。
+  reason 必填，一句话说明这段证据支撑了什么结论。没有 reason 等于没引用。
+- **同一个 entry 的不同段落必须拆成独立的角标**——如果你要引用某文件里
+  第 10-30 行 *和* 第 80-100 行两段不同内容，写成两条独立的 footnote：
+    `[^a]: entry_id=<id>, lines=10-30 - <第一段支撑的结论>`
+    `[^b]: entry_id=<id>, lines=80-100 - <第二段支撑的结论>`
+  正文里也用 `[^a]` `[^b]` 两个不同的角标分别指向。
+  **不要**写成 `[^a]: entry_id=<id>, lines=10-30 - 这里讲了 X，另外
+  80-100 行还讲了 Y` 这种把多段塞到一条 footnote 里——GUI 只能跳到第一段，
+  其它段落用户就找不到了。
 - **`entry_id` 的合法来源只有一个**：你在本轮里通过 `search_journal`、
   `list_files_in_folder`、`read_entry` 等工具调用真实拿到过的 catalog entry
   id。**绝不能**把系统快照（`# 当前知识库快照` 那一段 JSON）里的任何字段

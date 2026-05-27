@@ -10,8 +10,13 @@
  *  We rely on the entry's display_name extension and metadata.mime_type
  *  to decide. Both are best-effort — Marginalia's mime detection is
  *  loose, so we fall back to extension when in doubt.
+ *
+ *  Deep-link locators (`{kind: "line"|"page", value}`) come from chat
+ *  citations: text/markdown/code views scroll to the target line range
+ *  and flash a highlight; PDF passes `#page=N` to the iframe so the
+ *  browser PDF viewer jumps the page on load.
  */
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { FileText, Download, AlertCircle, Loader2 } from "lucide-react";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { vscDarkPlus, prism } from "react-syntax-highlighter/dist/esm/styles/prism";
@@ -21,9 +26,16 @@ import { MarkdownView } from "@/components/MarkdownView";
 import type { FileMetadata } from "@/types/api";
 import { useTheme } from "@/lib/theme";
 
+export interface ViewerLocator {
+  kind: "line" | "page";
+  value: string;
+}
+
 interface Props {
   entryId: string;
   meta: FileMetadata | null;
+  locator?: ViewerLocator | null;
+  onLocatorConsumed?: () => void;
 }
 
 type Kind = "pdf" | "image" | "md" | "text" | "code" | "docx" | "binary";
@@ -52,11 +64,28 @@ function classifyByName(name: string): Kind {
   return "binary";
 }
 
-export function FileViewer({ entryId, meta }: Props) {
+function parseLineRange(value: string): { start: number; end: number } | null {
+  const m = /^(\d+)(?:-(\d+))?$/.exec(value.trim());
+  if (!m) return null;
+  const start = parseInt(m[1], 10);
+  const end = m[2] ? parseInt(m[2], 10) : start;
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start < 1) return null;
+  return { start, end: Math.max(start, end) };
+}
+
+export function FileViewer({ entryId, meta, locator, onLocatorConsumed }: Props) {
   const name = meta?.display_name || "";
   const kind = useMemo<Kind>(() => classifyByName(name), [name]);
   const contentUrl = fileEntries.contentUrl(entryId);
   const downloadUrl = fileEntries.downloadUrl(entryId);
+
+  const lineLoc = locator?.kind === "line" ? parseLineRange(locator.value) : null;
+  const pageLoc = locator?.kind === "page" ? parseInt(locator.value, 10) : null;
+  // PDF reads its locator straight from the URL fragment, so consume it
+  // immediately. Text-family viewers consume it after their scroll runs.
+  useEffect(() => {
+    if (kind === "pdf" && locator && onLocatorConsumed) onLocatorConsumed();
+  }, [kind, locator, onLocatorConsumed]);
 
   return (
     <div className="flex h-full min-w-0 flex-1 flex-col">
@@ -68,13 +97,26 @@ export function FileViewer({ entryId, meta }: Props) {
         </a>
       </header>
       <div className="flex-1 overflow-hidden">
-        {kind === "pdf" && <PdfView url={contentUrl} />}
+        {kind === "pdf" && (
+          <PdfView
+            url={contentUrl}
+            page={Number.isFinite(pageLoc as number) ? (pageLoc as number) : null}
+          />
+        )}
         {kind === "image" && <ImageView url={contentUrl} />}
-        {kind === "md" && <MdView url={contentUrl} />}
-        {kind === "text" && <TextView url={contentUrl} />}
+        {kind === "md" && (
+          <MdView url={contentUrl} lineRange={lineLoc} onScrolled={onLocatorConsumed} />
+        )}
+        {kind === "text" && (
+          <TextView url={contentUrl} lineRange={lineLoc} onScrolled={onLocatorConsumed} />
+        )}
         {kind === "code" && (
-          <CodeView url={contentUrl}
-                    lang={CODE_EXT_TO_LANG[(name.split(".").pop() || "").toLowerCase()] || "text"} />
+          <CodeView
+            url={contentUrl}
+            lang={CODE_EXT_TO_LANG[(name.split(".").pop() || "").toLowerCase()] || "text"}
+            lineRange={lineLoc}
+            onScrolled={onLocatorConsumed}
+          />
         )}
         {kind === "docx" && <DocxView url={contentUrl} />}
         {kind === "binary" && <BinaryView url={downloadUrl} name={name} />}
@@ -83,8 +125,13 @@ export function FileViewer({ entryId, meta }: Props) {
   );
 }
 
-function PdfView({ url }: { url: string }) {
-  return <iframe src={url} className="h-full w-full border-0" title="pdf" />;
+function PdfView({ url, page }: { url: string; page: number | null }) {
+  // The PDF Open Parameters spec lets us append `#page=N` to scroll the
+  // browser viewer to a 1-indexed page. Works in Chrome, Firefox, and
+  // Edge's built-in viewers — Safari historically ignores it but degrades
+  // to "open at page 1", which is acceptable.
+  const src = page ? `${url}#page=${page}` : url;
+  return <iframe src={src} className="h-full w-full border-0" title="pdf" />;
 }
 
 function ImageView({ url }: { url: string }) {
@@ -119,39 +166,79 @@ function useTextResource(url: string, maxBytes = 2_000_000) {
   return { text, err, truncated };
 }
 
-function MdView({ url }: { url: string }) {
+interface LineJumpProps {
+  lineRange: { start: number; end: number } | null;
+  onScrolled?: () => void;
+}
+
+function MdView({ url, lineRange, onScrolled }:
+  { url: string } & LineJumpProps,
+) {
   const { text, err } = useTextResource(url);
+  const { ref, flashKey } = useLineJumpForPlainBlock(text, lineRange, onScrolled);
   if (err) return <ViewerError msg={err} />;
   if (text === null) return <ViewerLoading />;
   return (
-    <div className="h-full overflow-auto px-6 py-4">
+    <div className="h-full overflow-auto px-6 py-4" ref={ref}>
       <div className="mx-auto max-w-3xl">
+        {flashKey != null && <LocatorBanner range={lineRange!} />}
         <MarkdownView content={text} />
       </div>
     </div>
   );
 }
 
-function TextView({ url }: { url: string }) {
+function TextView({ url, lineRange, onScrolled }:
+  { url: string } & LineJumpProps,
+) {
   const { text, err, truncated } = useTextResource(url);
   if (err) return <ViewerError msg={err} />;
   if (text === null) return <ViewerLoading />;
   return (
-    <div className="h-full overflow-auto px-4 py-3">
-      {truncated && <TruncatedBanner />}
-      <pre className="whitespace-pre-wrap break-all font-mono text-xs">{text}</pre>
-    </div>
+    <PlainTextLines
+      text={text}
+      lineRange={lineRange}
+      truncated={truncated}
+      onScrolled={onScrolled}
+    />
   );
 }
 
-function CodeView({ url, lang }: { url: string; lang: string }) {
+function CodeView({ url, lang, lineRange, onScrolled }:
+  { url: string; lang: string } & LineJumpProps,
+) {
   const { text, err, truncated } = useTextResource(url);
   const { effective } = useTheme();
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [flashKey, setFlashKey] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (!text || !lineRange) return;
+    // SyntaxHighlighter wraps each line with showLineNumbers in a
+    // `.linenumber` span. The line number value isn't a DOM id, so we
+    // count children of the rendered code block and scroll the matching
+    // index into view.
+    const root = containerRef.current;
+    if (!root) return;
+    const lineEls = root.querySelectorAll<HTMLElement>(".react-syntax-highlighter-line-number");
+    // showLineNumbers gives one .linenumber per line — its parent is the
+    // line wrapper. Scroll the wrapper at index (start-1).
+    const target = lineEls[lineRange.start - 1]?.parentElement;
+    if (target) {
+      target.scrollIntoView({ block: "center", behavior: "smooth" });
+      setFlashKey(Date.now());
+      onScrolled?.();
+      const t = window.setTimeout(() => setFlashKey(null), 1600);
+      return () => window.clearTimeout(t);
+    }
+  }, [text, lineRange, onScrolled]);
+
   if (err) return <ViewerError msg={err} />;
   if (text === null) return <ViewerLoading />;
   return (
-    <div className="h-full overflow-auto">
+    <div className="h-full overflow-auto" ref={containerRef}>
       {truncated && <TruncatedBanner />}
+      {flashKey != null && lineRange && <LocatorBanner range={lineRange} />}
       <SyntaxHighlighter
         language={lang}
         style={effective === "dark" ? vscDarkPlus : prism}
@@ -161,6 +248,102 @@ function CodeView({ url, lang }: { url: string; lang: string }) {
       >
         {text}
       </SyntaxHighlighter>
+    </div>
+  );
+}
+
+function PlainTextLines({
+  text, lineRange, truncated, onScrolled,
+}: {
+  text: string;
+  lineRange: { start: number; end: number } | null;
+  truncated: boolean;
+  onScrolled?: () => void;
+}) {
+  const lines = useMemo(() => text.split("\n"), [text]);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const targetRef = useRef<HTMLDivElement>(null);
+  const [flashKey, setFlashKey] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (!lineRange || !targetRef.current) return;
+    targetRef.current.scrollIntoView({ block: "center", behavior: "smooth" });
+    setFlashKey(Date.now());
+    onScrolled?.();
+    const t = window.setTimeout(() => setFlashKey(null), 1600);
+    return () => window.clearTimeout(t);
+  }, [lineRange, onScrolled]);
+
+  return (
+    <div className="h-full overflow-auto" ref={containerRef}>
+      {truncated && <TruncatedBanner />}
+      {flashKey != null && lineRange && <LocatorBanner range={lineRange} />}
+      <pre className="whitespace-pre-wrap break-all px-4 py-3 font-mono text-xs">
+        {lines.map((ln, i) => {
+          const lineNo = i + 1;
+          const inRange =
+            lineRange && lineNo >= lineRange.start && lineNo <= lineRange.end;
+          const isStart = lineRange && lineNo === lineRange.start;
+          return (
+            <div
+              key={i}
+              ref={isStart ? targetRef : undefined}
+              className={
+                inRange && flashKey != null
+                  ? "-mx-1 rounded bg-accent/15 px-1 transition-colors duration-1000"
+                  : undefined
+              }
+            >
+              {ln || "​"}
+            </div>
+          );
+        })}
+      </pre>
+    </div>
+  );
+}
+
+// Markdown reflows source lines, so we can't pin to "line 42" with
+// per-line wrappers like the plain-text viewer does. Instead we approximate:
+// scroll the container by the fraction (start / total) of its scrollHeight
+// after the markdown renders. Inaccurate, but more useful than no jump,
+// and we flag the range in a banner so the reader knows where to look.
+function useLineJumpForPlainBlock(
+  text: string | null,
+  lineRange: { start: number; end: number } | null,
+  onScrolled?: () => void,
+) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [flashKey, setFlashKey] = useState<number | null>(null);
+  useEffect(() => {
+    if (!text || !lineRange || !ref.current) return;
+    const total = text.split("\n").length || 1;
+    const ratio = Math.max(0, (lineRange.start - 1) / total);
+    // Wait one rAF so KaTeX / syntax highlighting finishes layout, then
+    // scroll. Without this, scrollHeight is the pre-render height.
+    const handle = window.requestAnimationFrame(() => {
+      const el = ref.current;
+      if (!el) return;
+      el.scrollTop = ratio * el.scrollHeight;
+      setFlashKey(Date.now());
+      onScrolled?.();
+    });
+    const t = window.setTimeout(() => setFlashKey(null), 1600);
+    return () => {
+      window.cancelAnimationFrame(handle);
+      window.clearTimeout(t);
+    };
+  }, [text, lineRange, onScrolled]);
+  return { ref, flashKey };
+}
+
+function LocatorBanner({ range }: { range: { start: number; end: number } }) {
+  const span = range.start === range.end
+    ? `line ${range.start}`
+    : `lines ${range.start}–${range.end}`;
+  return (
+    <div className="sticky top-0 z-10 border-b border-accent/30 bg-accent/10 px-3 py-1 text-[11px] font-mono text-accent">
+      jumped to {span}
     </div>
   );
 }

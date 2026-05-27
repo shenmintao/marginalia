@@ -453,22 +453,71 @@ async def _run_plan_phase(
 
 # ---- live-render footnote rewrite ----------------------------------------
 
+
+def _capture_locators(
+    tool_call: Any, locators: dict[str, dict[str, Any]],
+) -> None:
+    """Sniff `read_files` tool calls and stash the most recent segment
+    locator per entry into `locators`. Used as the C-style fallback when
+    the agent emits a citation footnote without an explicit `lines=`/`page=`.
+
+    Shape inside read_files args:
+        {"requests": [{"entry_id": "<uuid>", "reads": [{...}, ...]}]}
+    Each `reads[i]` carries pipeline-specific keys: text/markdown set
+    `start_line` and (optionally) `end_line`; PDF sets `page`. We capture
+    the LAST one because if the agent reads multiple ranges then cites,
+    the most recent read is the closest in attention to the citation.
+    """
+    if getattr(tool_call, "name", None) != "read_files":
+        return
+    args = getattr(tool_call, "arguments", None) or {}
+    requests = args.get("requests") if isinstance(args, dict) else None
+    if not isinstance(requests, list):
+        return
+    for req in requests:
+        if not isinstance(req, dict):
+            continue
+        eid = req.get("entry_id")
+        reads = req.get("reads")
+        if not isinstance(eid, str) or not isinstance(reads, list) or not reads:
+            continue
+        for read in reads:
+            if not isinstance(read, dict):
+                continue
+            sl = read.get("start_line")
+            el = read.get("end_line")
+            page = read.get("page")
+            if isinstance(sl, int):
+                value = f"{sl}-{el}" if isinstance(el, int) and el > sl else str(sl)
+                locators[eid] = {"kind": "line", "value": value}
+            elif isinstance(page, int):
+                locators[eid] = {"kind": "page", "value": str(page)}
+
 # Same shape as services/exports.py:_FOOTNOTE_RE — agent emits citation
-# defs as `[^a]: entry_id=<uuid>[, section_id=<sid>] - reason`. For the
-# live SSE answer we resolve the uuid to display_name and rewrite to a
-# user-friendly form. The persisted `agent_response` (and therefore
+# defs as `[^a]: entry_id=<uuid>[, lines=...|page=...|section_id=...] - reason`.
+# For the live SSE answer we resolve the uuid to display_name and rewrite
+# to a user-friendly form. The persisted `agent_response` (and therefore
 # downstream exports) keep the raw form so the export parser still works.
 #
 # UUID is matched strictly so the regex doesn't greedy-backtrack and eat
-# the trailing `, section_id=...` / parenthetical / em-dash + reason.
-# Models routinely wrap the uuid (and section_id value) in backticks
-# because they treat ids as inline code — `\`?` makes those backticks
-# optional so the rewrite still fires.
+# the trailing locator / parenthetical / em-dash + reason. Models routinely
+# wrap the uuid (and locator value) in backticks because they treat ids as
+# inline code — `\`?` makes those backticks optional so the rewrite still
+# fires.
+#
+# Locator group order matters: `lines=` (text/markdown) and `page=` (PDF)
+# are the new-style locators that the GUI deep-links on. `section_id=` is
+# the legacy form — captured but ignored for display, kept here so old
+# turns don't regress.
 _LIVE_FOOTNOTE_RE = re.compile(
     r"^\[\^([^\]]+)\]:\s*entry_id\s*=\s*`?"
     r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
     r"`?"
-    r"(?:\s*,\s*section_id\s*=\s*`?([^\s,`]+)`?)?"
+    r"(?:\s*,\s*(?:"
+    r"lines\s*=\s*`?([0-9]+(?:-[0-9]+)?)`?"
+    r"|page\s*=\s*`?([0-9]+)`?"
+    r"|section_id\s*=\s*`?[^\s,`]+`?"
+    r"))*"
     r"(?:\s+\([^)]*\))?"
     r"(?:\s*[-—–]\s*(.+?))?"
     r"\s*$",
@@ -476,13 +525,21 @@ _LIVE_FOOTNOTE_RE = re.compile(
 )
 
 
-async def _rewrite_footnotes_for_display(answer: str) -> str:
+async def _rewrite_footnotes_for_display(
+    answer: str,
+    locators: dict[str, dict[str, Any]] | None = None,
+) -> str:
     """Resolve `[^a]: entry_id=<uuid>...` defs to `[^a]: [name](entry:<short>)...`.
 
     Same logic as services/exports.py:render_inline_markdown but for live
     streaming — looks up display_name in one DB round trip and rewrites
     each definition. Missing entries fall back to `(entry <short> unavailable)`.
     Body `[^a]` markers are untouched so GFM footnote linking still works.
+
+    `locators` is the per-turn read_segment fallback: { entry_id -> {kind, value} }.
+    Used only when the agent's footnote didn't carry an explicit `lines=` or
+    `page=`. The link is decorated with `?line=...` / `?page=...` so the GUI
+    routes deep into the right viewer position.
     """
     if not answer or "entry_id" not in answer:
         return answer
@@ -503,20 +560,36 @@ async def _rewrite_footnotes_for_display(answer: str) -> str:
     def _replace(m: re.Match[str]) -> str:
         marker = m.group(1)
         eid = m.group(2).strip()
-        # section_id (m.group(3)) is intentionally not surfaced in the
-        # user-visible footnote — it's an LLM-internal handle (s1, s2, …)
-        # that means nothing to a reader. The persisted footnote form
-        # still carries it for export/tool dispatch.
-        reason = m.group(4).strip() if m.group(4) else None
+        lines_loc = (m.group(3) or "").strip() or None
+        page_loc = (m.group(4) or "").strip() or None
+        reason = m.group(5).strip() if m.group(5) else None
+
+        # Fall back to the read_segment locator cache when the agent didn't
+        # write an explicit one. C-style fusion: prompt-authored takes
+        # priority because the agent knows which segment the citation is
+        # about; cache fills in when the agent forgot or wrote a legacy
+        # `section_id=` form we can't act on.
+        if not lines_loc and not page_loc and locators:
+            stash = locators.get(eid)
+            if stash:
+                kind = stash.get("kind")
+                value = stash.get("value")
+                if kind == "line" and value:
+                    lines_loc = value
+                elif kind == "page" and value:
+                    page_loc = value
+
         short = eid[:8]
         name = name_by_id.get(eid)
         if name is None:
             head = f"(entry {short} unavailable)"
         else:
-            # Full uuid in the link so the GUI can resolve back to a
-            # specific FileEntry without ambiguity. The visible label
-            # stays the display_name.
-            head = f"[{name}](entry:{eid})"
+            qs = ""
+            if lines_loc:
+                qs = f"?line={lines_loc}"
+            elif page_loc:
+                qs = f"?page={page_loc}"
+            head = f"[{name}](entry:{eid}{qs})"
         if reason:
             return f"[^{marker}]: {head} — {reason}"
         return f"[^{marker}]: {head}"
@@ -553,6 +626,12 @@ async def _run_execute_phase(
     tool_defs = all_tool_defs()
     ctx = ToolContext(session_id=session_id, conversation_id=conversation_id)
     guard = _CallGuard()
+    # Per-turn locator cache: when the agent calls `read_files` with
+    # `reads=[{start_line, end_line}]` (text/markdown) or `[{page}]` (PDF),
+    # we stash the latest read for each entry. _rewrite_footnotes_for_display
+    # consults this when the citation footnote didn't carry an explicit
+    # `lines=`/`page=` of its own. See module-level comment on Plan C.
+    locators: dict[str, dict[str, Any]] = {}
 
     messages: list[ChatMessage] = list(resumed_history or []) + [
         ChatMessage(role="user", content=user_message),
@@ -605,6 +684,7 @@ async def _run_execute_phase(
                 assistant_blocks.append(ToolUseBlock(
                     id=tc.id, name=tc.name, arguments=tc.arguments,
                 ))
+                _capture_locators(tc, locators)
             messages.append(ChatMessage(role="assistant", content=assistant_blocks))
 
             tool_result_blocks: list[ToolResultBlock] = []
@@ -626,7 +706,7 @@ async def _run_execute_phase(
             outcome.answer = answer
             yield AgentEvent(
                 event_type="answer",
-                data=await _rewrite_footnotes_for_display(answer),
+                data=await _rewrite_footnotes_for_display(answer, locators),
             )
             return
         if resp.stop_reason == "max_tokens":
@@ -635,7 +715,7 @@ async def _run_execute_phase(
             outcome.answer = answer
             yield AgentEvent(
                 event_type="answer",
-                data=await _rewrite_footnotes_for_display(answer),
+                data=await _rewrite_footnotes_for_display(answer, locators),
             )
             return
 
@@ -649,7 +729,7 @@ async def _run_execute_phase(
     outcome.answer = fallback
     yield AgentEvent(
         event_type="answer",
-        data=await _rewrite_footnotes_for_display(fallback),
+        data=await _rewrite_footnotes_for_display(fallback, locators),
     )
 
 

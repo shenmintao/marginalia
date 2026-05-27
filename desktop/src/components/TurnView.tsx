@@ -15,6 +15,7 @@ import {
 import { useNavigate } from "react-router-dom";
 
 import { MarkdownView } from "@/components/MarkdownView";
+import type { EntryLocator } from "@/components/MarkdownView";
 import { cn } from "@/lib/utils";
 
 export type StepKind = "planning" | "plan" | "thinking" | "tool_call";
@@ -76,9 +77,16 @@ export function TurnView({ turn }: { turn: Turn }) {
   // `entry:<uuid>` links in citation footnotes resolve to a Library
   // deep-link. Hand them to react-router so the tree expands to that
   // file in-app instead of the browser trying to open a custom-scheme
-  // URL.
-  const onEntryLink = (id: string) =>
-    navigate(`/library?entry=${encodeURIComponent(id)}`);
+  // URL. When the citation carries a position locator (`lines=` /
+  // `page=` rewritten by runtime.py into ?line=/?page= query params on
+  // the entry: URL), forward it so the file viewer can scroll to the
+  // exact spot.
+  const onEntryLink = (id: string, locator?: EntryLocator) => {
+    const q = new URLSearchParams({ entry: id });
+    if (locator?.kind === "line") q.set("line", locator.value);
+    else if (locator?.kind === "page") q.set("page", locator.value);
+    navigate(`/library?${q.toString()}`);
+  };
 
   return (
     <div className="mb-6 animate-fade-in">

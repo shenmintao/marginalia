@@ -31,13 +31,37 @@ import { processLatexBrackets } from "@/lib/markdown";
 import { useTemporaryValue } from "@/hooks/useTemporaryValue";
 import { cn } from "@/lib/utils";
 
+/** Deep-link position on top of an `entry:<uuid>` citation. The agent
+ *  emits `lines=<start>-<end>` for text/markdown and `page=<n>` for PDF;
+ *  runtime.py rewrites those into the URL query string of the link. */
+export interface EntryLocator {
+  kind: "line" | "page";
+  value: string;
+}
+
+function parseEntryHref(href: string): { id: string; locator?: EntryLocator } {
+  const tail = href.slice("entry:".length);
+  const q = tail.indexOf("?");
+  if (q === -1) return { id: tail };
+  const id = tail.slice(0, q);
+  const params = new URLSearchParams(tail.slice(q + 1));
+  const line = params.get("line");
+  if (line) return { id, locator: { kind: "line", value: line } };
+  const page = params.get("page");
+  if (page) return { id, locator: { kind: "page", value: page } };
+  return { id };
+}
+
 interface Props {
   content: string;
   /** Called when the user clicks an `entry:<uuid>` link (citation
-   *  footnote in chat answers). The handler typically navigates to
-   *  /library?entry=<id>. If absent, entry: links render as plain
-   *  anchors and the browser handles them. */
-  onEntryLink?: (entryId: string) => void;
+   *  footnote in chat answers). `locator` carries the optional deep-link
+   *  position from the URL query string — e.g. `entry:<uuid>?line=10-40`
+   *  yields `{kind: "line", value: "10-40"}`, `?page=3` yields
+   *  `{kind: "page", value: "3"}`. Handlers route to /library?entry=...
+   *  with the locator forwarded so the file viewer can scroll to that
+   *  position. If absent, entry: links render as plain anchors. */
+  onEntryLink?: (entryId: string, locator?: EntryLocator) => void;
   /** Tailwind class for the wrapping div. Defaults to `prose-marginalia`. */
   className?: string;
   /** Override the `clobberPrefix` mdast-util-to-hast applies to footnote
@@ -84,11 +108,11 @@ export function MarkdownView({ content, onEntryLink, className, idPrefix }: Prop
     children?: React.ReactNode;
   }) => {
     if (onEntryLink && href && href.startsWith("entry:")) {
-      const id = href.slice("entry:".length);
+      const { id, locator } = parseEntryHref(href);
       return (
         <a
           href="#"
-          onClick={(e) => { e.preventDefault(); onEntryLink(id); }}
+          onClick={(e) => { e.preventDefault(); onEntryLink(id, locator); }}
           className="text-accent hover:underline"
           {...rest}
         >
