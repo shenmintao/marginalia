@@ -26,6 +26,16 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
+/// CREATE_NO_WINDOW from winbase.h. Set on Windows so spawning the
+/// console-subsystem python.exe child from this windows-subsystem
+/// parent doesn't make Windows allocate a fresh black console window
+/// for the sidecar (the parent has none to inherit).
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 use serde::Deserialize;
 use tauri::{
     menu::{Menu, MenuItem},
@@ -169,16 +179,28 @@ impl BackendState {
             c
         };
 
-        match cmd
-            .current_dir(&home)
+        // Redirect sidecar stdout/stderr to a log file under MARGINALIA_HOME
+        // so the user (and we) can read what happened on a crash. Inheriting
+        // from the parent doesn't help here — the windows-subsystem parent
+        // has no console to inherit from on a packaged build.
+        let (stdout_target, stderr_target) = open_backend_log_streams(&home);
+
+        cmd.current_dir(&home)
             .env("MARGINALIA_HOME", &home)
             .env("MARGINALIA_API_PORT", port.to_string())
             .env("MARGINALIA_DESKTOP", "1")
             .env("PYTHONUNBUFFERED", "1")
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .spawn()
-        {
+            .stdout(stdout_target)
+            .stderr(stderr_target);
+
+        // Suppress the auto-allocated console window for the python.exe child
+        // on Windows. Without this flag the parent's windows-subsystem flag
+        // doesn't propagate, so the OS gives the console-subsystem child its
+        // own black window in the foreground.
+        #[cfg(target_os = "windows")]
+        cmd.creation_flags(CREATE_NO_WINDOW);
+
+        match cmd.spawn() {
             Ok(child) => {
                 log::info!("spawned backend pid={} cwd={}", child.id(), home.display());
                 *self.child.lock().unwrap() = Some(child);
@@ -241,6 +263,39 @@ LLM_DEFAULT_API_KEY=
         Ok(_) => log::info!("wrote starter .env at {}", env_path.display()),
         Err(e) => log::warn!("could not write starter .env at {}: {}", env_path.display(), e),
     }
+}
+
+/// Open append-mode handles for the sidecar's stdout / stderr so its
+/// output survives across launches. Returns piped Stdio's that the
+/// child can take over. Falls back to `Stdio::null()` if the log file
+/// can't be opened — losing diagnostics is preferable to crashing the
+/// app at startup over a logging permission error.
+fn open_backend_log_streams(home: &Path) -> (Stdio, Stdio) {
+    let logs = home.join("logs");
+    if let Err(e) = std::fs::create_dir_all(&logs) {
+        log::warn!("could not create logs dir {}: {}", logs.display(), e);
+        return (Stdio::null(), Stdio::null());
+    }
+    let log_path = logs.join("backend.log");
+    let file = match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    {
+        Ok(f) => f,
+        Err(e) => {
+            log::warn!("could not open {}: {}", log_path.display(), e);
+            return (Stdio::null(), Stdio::null());
+        }
+    };
+    let dup = match file.try_clone() {
+        Ok(f) => f,
+        Err(e) => {
+            log::warn!("could not duplicate {} handle: {}", log_path.display(), e);
+            return (Stdio::null(), Stdio::null());
+        }
+    };
+    (Stdio::from(file), Stdio::from(dup))
 }
 
 /// PYTHONHOME for a python-build-standalone layout: on Windows the
