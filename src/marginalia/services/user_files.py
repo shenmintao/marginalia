@@ -7,8 +7,9 @@ Three user-side capabilities:
                                 only display_name / folder / lifecycle / etc.
   - get_user_metadata(eid):    return user-visible metadata + the librarian's
                                 short summary (the "label card" exception in
-                                §14.3 #4).  AI fields like description /
-                                catalog / tags / extra are NOT exposed.
+                                §14.3 #4), resolved tags, and entry-level
+                                extra.  AI fields like description / catalog /
+                                kind remain NOT exposed.
   - open_for_download(eid):    resolve to a (file_row, async iterator of
                                 bytes) so the route can stream.
 
@@ -23,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from marginalia.db.models import File, FileEntry, Folder
 from marginalia.repositories import entries as entries_repo
+from marginalia.repositories import entry_tags as entry_tags_repo
 from marginalia.repositories import folders as folders_repo
 from marginalia.storage import get_storage
 from marginalia.storage.base import StorageBackend
@@ -158,6 +160,11 @@ async def get_user_metadata(
         # §14.3 #4 carves this out as the legitimate cross-boundary view.
         "summary": file_row.summary,
         "preview": _description_preview(file_row.description),
+        # Tags: resolved tag names with facets for the Library panel.
+        "tags": await _tags_for_entry(session, entry.id),
+        # Extra: per-entry mutable AI field. Falls back to per-file
+        # immutable field when entry-level is empty.
+        "extra": entry.extra or file_row.extra or None,
         "related_entries": await _related_entries_for(
             session, entry.id, top_k=METADATA_RELATED_TOP_K,
         ),
@@ -269,6 +276,14 @@ async def collect_folder_entries(
 
 
 # ---- helpers --------------------------------------------------------------
+
+async def _tags_for_entry(
+    session: AsyncSession, entry_id: str,
+) -> list[dict[str, str | None]]:
+    """Resolved tags for display: `{name, facet}` for each canonical tag."""
+    rows = await entry_tags_repo.list_name_facet_for_entry(session, entry_id)
+    return [{"name": n, "facet": f} for n, f in rows]
+
 
 async def _build_folder_path(
     session: AsyncSession, folder_id: str | None

@@ -5,7 +5,7 @@
  *  tags, related entries) but keeps the layout flexible — fields the
  *  backend hasn't filled yet are just hidden.
  */
-import { ChevronRight, ChevronLeft, Tag, Sparkles } from "lucide-react";
+import { ChevronRight, ChevronLeft, Tag, Sparkles, FileText } from "lucide-react";
 import { Link } from "react-router-dom";
 
 import type { FileMetadata } from "@/types/api";
@@ -62,13 +62,21 @@ function MetaBody({ meta }: { meta: FileMetadata }) {
           </p>
         </section>
       )}
+      {meta.extra && (
+        <section>
+          <SectionHeader icon={<FileText size={11} />} text="Extra" />
+          <p className="mt-1 whitespace-pre-wrap leading-relaxed text-fg-muted">
+            {meta.extra}
+          </p>
+        </section>
+      )}
       {meta.tags && meta.tags.length > 0 && (
         <section>
           <SectionHeader icon={<Tag size={11} />} text="Tags" />
           <div className="mt-1 flex flex-wrap gap-1">
             {meta.tags.map((t) => (
-              <span key={t} className="rounded-md border border-border bg-bg-base px-1.5 py-0.5 text-[10px] text-fg-muted">
-                {t}
+              <span key={t.name} className="rounded-md border border-border bg-bg-base px-1.5 py-0.5 text-[10px] text-fg-muted">
+                {t.facet ? <span className="text-fg-subtle">{t.facet}:</span> : null}{t.name}
               </span>
             ))}
           </div>

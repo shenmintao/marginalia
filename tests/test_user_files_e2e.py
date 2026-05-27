@@ -184,8 +184,7 @@ async def main():
             assert meta["display_name"] == "raft.md"
             assert meta["folder_path"] == "/research/llm"
             assert meta["sha256"]
-            for forbidden in ("catalog_id", "description", "kind", "extra",
-                              "tags", "entry_tags"):
+            for forbidden in ("catalog_id", "description", "kind", "entry_tags"):
                 assert forbidden not in meta, f"{forbidden} leaked into metadata"
 
             # ---- 5. Metadata 404 on soft-deleted ---------------------

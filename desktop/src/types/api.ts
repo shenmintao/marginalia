@@ -76,7 +76,8 @@ export interface FileMetadata {
   mime_type?: string | null;
   lifecycle: string;
   summary?: string | null;
-  tags?: string[];
+  tags?: { name: string; facet?: string | null }[];
+  extra?: string | null;
   related_entries?: RelatedEntry[];
   [key: string]: unknown;
 }
