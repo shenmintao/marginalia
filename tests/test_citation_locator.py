@@ -176,6 +176,23 @@ async def _check_rewrite():
         assert "entry:deadbeef" not in out
         assert "my-doc.md" not in out
 
+        # 9. page + quote both present → page wins. PDFs only honour
+        # `#page=N`; if the LLM helpfully tags both fields, we want the
+        # page form so the iframe can scroll, not a `?q=` URL the PDF
+        # viewer can't act on.
+        out = await rt._rewrite_footnotes_for_display(
+            f'body[^a]\n\n[^a]: entry_id={eid}, page=4, quote="abc" - r',
+        )
+        assert f"[my-doc.md](entry:{eid}?page=4)" in out, out
+        assert "?q=" not in out
+
+        # 10. same with the fields written in the opposite source order.
+        out = await rt._rewrite_footnotes_for_display(
+            f'body[^a]\n\n[^a]: entry_id={eid}, quote="abc", page=4 - r',
+        )
+        assert f"[my-doc.md](entry:{eid}?page=4)" in out, out
+        assert "?q=" not in out
+
     print("[2] _rewrite_footnotes_for_display: quote/page/legacy/prefix all wire correctly")
 
 
