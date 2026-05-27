@@ -59,6 +59,43 @@ By default your files live as a real folder tree under
 marginalia just indexes it. After editing files outside marginalia, run
 `/check` to diff and `/ingest --all` to sync.
 
+## Desktop app
+
+The [Releases page](https://github.com/shenmintao/marginalia/releases)
+ships ready-to-run desktop bundles for Windows, macOS (Apple Silicon),
+and Linux. Each bundle embeds its own Python runtime — no system Python
+required.
+
+- **Windows**: `Marginalia_<version>_windows_x86_64-setup.exe` (NSIS
+  installer) or `Marginalia_<version>_windows_x86_64_portable.zip`
+  (unzip-and-run). Microsoft Edge WebView2 Runtime must be installed
+  (already shipped with current Windows 10 / 11).
+- **macOS**: `Marginalia_<version>_aarch64.dmg`. Apple Silicon only.
+- **Linux**: `.deb`, `.rpm`, or `.AppImage`.
+
+### First-launch notes (unsigned binaries)
+
+The bundles aren't code-signed (no Apple Developer / Microsoft EV cert),
+so the OS will warn you the first time. Each warning is a one-click
+override; subsequent launches go straight through.
+
+- **Windows SmartScreen** — "Windows protected your PC". Click **More
+  info** → **Run anyway**.
+- **macOS Gatekeeper** — "Marginalia.app is damaged and can't be
+  opened" or "cannot be opened because the developer cannot be
+  verified". After dragging the app to `/Applications`, run once:
+
+  ```bash
+  xattr -dr com.apple.quarantine /Applications/Marginalia.app
+  ```
+
+- **Linux AppImage** — make it executable: `chmod +x
+  Marginalia*.AppImage`, then double-click or run from a terminal.
+
+The app stores its database, library, and `.env` under
+`~/Marginalia/` by default. Set `MARGINALIA_HOME` before launch to
+relocate.
+
 `MARGINALIA_HOME=/some/path` relocates everything (db + library +
 caches).
 

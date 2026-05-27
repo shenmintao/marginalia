@@ -56,6 +56,40 @@ marginalia> 比较一下 raft 和 paxos
 `MARGINALIA_HOME=/some/path` 把整个目录(db + library + cache)挪到
 任意位置。
 
+## 桌面应用
+
+[Releases 页面](https://github.com/shenmintao/marginalia/releases) 提
+供 Windows、macOS(Apple Silicon)和 Linux 的开箱即用桌面包。每个包
+都内置了自己的 Python 运行时——无需系统 Python。
+
+- **Windows**:`Marginalia_<version>_windows_x86_64-setup.exe`(NSIS
+  安装版)或 `Marginalia_<version>_windows_x86_64_portable.zip`(解
+  压即用绿色版)。需要预装 Microsoft Edge WebView2 Runtime(当前
+  Windows 10 / 11 已经默认带了)。
+- **macOS**:`Marginalia_<version>_aarch64.dmg`,仅支持 Apple Silicon。
+- **Linux**:`.deb`、`.rpm` 或 `.AppImage`。
+
+### 首次启动须知(未签名二进制)
+
+由于没有 Apple Developer / Microsoft EV 证书,这些包都没有做代码签
+名,第一次打开时系统会弹警告。点一下放行就好,以后再打开就不会再弹
+了。
+
+- **Windows SmartScreen** — 弹出"Windows 已保护你的电脑"。点
+  **更多信息** → **仍要运行**。
+- **macOS Gatekeeper** — 报"Marginalia.app 已损坏"或"无法验证开
+  发者"。把 App 拖到 `/Applications` 之后,先跑一次:
+
+  ```bash
+  xattr -dr com.apple.quarantine /Applications/Marginalia.app
+  ```
+
+- **Linux AppImage** — 先加可执行权限:`chmod +x
+  Marginalia*.AppImage`,之后双击或终端运行。
+
+桌面应用默认把数据库、library、`.env` 都放在 `~/Marginalia/` 下。启
+动前设置 `MARGINALIA_HOME` 可以挪到别的位置。
+
 ## CLI
 
 `marginalia` 是 Claude-Code 风格的 REPL。`/` 开头是 slash 命令,其他
