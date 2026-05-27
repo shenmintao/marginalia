@@ -69,17 +69,36 @@ EXECUTE_PHASE_PROMPT = """你是 Marginalia 的在线调查员（🔍 Investigat
   `quote=` 内是从原文**逐字复制**的一段话，10–60 字之间，足够独特能被 GUI
   在原文中定位（带特定数字、专有名词、关键短语最好）。引号内若出现 `"` 写
   成 `\\"`、`\\` 写成 `\\\\`。GUI 打开文件后会自动滚动到这段并高亮。
-  - 例外：**PDF 文件用 `page=<n>`**（浏览器 PDF 阅读器无法注入文字搜索）：
-    `[^a]: entry_id=<id>, page=3 - <为什么引用>`
-  - 实在没有合适的引文（罕见——通常是引用一整张表/一份文件而非某段话），
-    可以省略定位字段：`[^a]: entry_id=<id> - <为什么引用>`，GUI 会
-    退化成"打开文件不跳位置"。
+
+  一条 footnote 只能携带**一个** `quote="..."` 字段。**禁止**用 `+` 拼接多段
+  引文（`quote="A" + "B"` 是错的，GUI 解析不了，会原样泄漏给用户）。需要
+  引用同一文件的多段时，写多条 footnote、正文用多个角标。
+
+  文件类型决定使用哪种定位字段：
+  - **文本类**（`.md` `.txt` `.docx` `.html` 源码等）—— 必填 `quote=`。
+  - **PDF（`.pdf`）**—— 必填 `page=<n>`：`[^a]: entry_id=<id>, page=3 - reason`。
+    浏览器 PDF 阅读器无法接受文字搜索，所以 PDF 一律用 page。
+  - **二进制不可搜文件**（图片 `.jpg`/`.png`/扫描件、音频、表格 `.xlsx` 等
+    GUI 没做内容渲染的类型）—— 省略定位字段：`[^a]: entry_id=<id> - reason`。
+    这是唯一允许"裸 entry_id"的场景，GUI 会打开文件不跳位置。
 
   reason 必填，一句话说明这段证据支撑了什么结论。没有 reason 等于没引用。
+
+  footnote 正文**必须**严格以 `entry_id=` 开头，后面只能跟上述三种字段
+  组合之一。**禁止**在 `entry_id=` 前面加文件名、em-dash、`<filename> —`
+  等任何前缀；GUI 在重写链接时会自动用真实 display_name 替换 id，加前缀
+  会让 regex 失配，整条 footnote 以原始文本泄漏给用户。
 
   正确示例：
     `[^a]: entry_id=abc123, quote="合同第4.6条规定年终奖以书面决定为准" - 论证年终奖归属`
     `[^b]: entry_id=def456, page=3 - 第3页表 2 给出 2024 财年营收数据`
+    `[^c]: entry_id=ghi789 - 银行流水截图佐证转账金额`   # .jpg 扫描件
+  错误示例（任意一条都会让 footnote 渲染失败）：
+    `[^a]: 5-聊天记录.pdf — 6fd4da7d, page=3, quote="..." - r`   # 文件名前缀禁止
+    `[^b]: entry_id=<id>, page=3, quote="A" + "B" - r`           # `+` 拼 quote 禁止
+    `[^c]: entry_id=<id>, quote="A", quote="B" - r`              # 多个 quote 禁止
+    `[^d]: entry_id=<id>.docx, quote="..." - r`                  # entry_id 是 uuid 不是文件名
+    `[^e]: entry_id=<id> - r`                                    # 文本/docx 必填 quote=
 - **同一个 entry 的不同段落必须拆成独立的角标**——引用某文件里两段不同
   内容时，写两条独立 footnote，正文用 `[^a]` `[^b]` 两个角标分别指。
   **不要**把多段证据塞进一条 footnote——GUI 只能跳到一处，其余用户找不到。
