@@ -34,6 +34,23 @@ os.environ["LLM_DEFAULT_PROVIDER"] = "openai"
 # pointing at DeepSeek / a real provider — when a profile inherits the
 # default api_key it'd then try to reach that host. Clear it.
 os.environ.pop("LLM_DEFAULT_BASE_URL", None)
+# A developer's local `.env` may pin per-profile fields like
+# `LLM_INGEST_MODEL=deepseek-v4-flash`. The PUT handler does
+# `get_settings.cache_clear(); llm_settings()` which re-reads `.env`
+# via pydantic-settings, so popping env vars or scrubbing the cached
+# instance can't survive that round-trip — we have to stop Settings
+# from reading the file at all. Cut the env_file binding once at import
+# time so every `Settings()` constructed during this test module sees
+# only `os.environ`.
+from marginalia.config import Settings as _Settings  # noqa: E402
+
+_Settings.model_config["env_file"] = None
+# Also drop any LLM_<PROFILE>_* env vars the dev's .env exported into
+# os.environ (python-dotenv may have loaded them via app startup),
+# so the profiles really do fall back to LLM_DEFAULT_*.
+for _opt in ("CHAT", "INGEST", "REFLECT", "VISION", "AUDIO"):
+    for _field in ("PROVIDER", "API_KEY", "BASE_URL", "MODEL"):
+        os.environ.pop(f"LLM_{_opt}_{_field}", None)
 
 
 def _scrub_optional_profiles(s) -> None:
