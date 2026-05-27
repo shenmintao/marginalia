@@ -52,9 +52,12 @@ jobs:
               desktop/src-tauri/target/release/bundle/dmg/*.dmg
           - target: linux
             runner: ubuntu-latest
+            # AppImage is intentionally dropped: linuxdeploy chokes on the
+            # bundled python runtime's thousands of .so files. deb + rpm
+            # cover the supported distros without the fragility.
+            tauri_args: "--bundles deb,rpm"
             artifact_glob: |
               desktop/src-tauri/target/release/bundle/deb/*.deb
-              desktop/src-tauri/target/release/bundle/appimage/*.AppImage
               desktop/src-tauri/target/release/bundle/rpm/*.rpm
     runs-on: ${{ matrix.runner }}
     steps:
@@ -124,9 +127,9 @@ jobs:
             **First-launch notes for unsigned binaries:**
             - Windows: SmartScreen will say "Windows protected your PC". Click "More info" → "Run anyway".
             - macOS: Gatekeeper will refuse to open the .dmg. Run `xattr -dr com.apple.quarantine /Applications/Marginalia.app` after dragging it across.
-            - Linux AppImage: `chmod +x Marginalia*.AppImage` first.
           releaseDraft: true
           prerelease: false
+          args: ${{ matrix.tauri_args || '' }}
 
       # Build the portable .zip after the NSIS installer is on disk so
       # we can reuse the same target/release/ tree NSIS was assembled

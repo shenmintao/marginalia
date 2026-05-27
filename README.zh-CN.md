@@ -67,7 +67,7 @@ marginalia> 比较一下 raft 和 paxos
   压即用绿色版)。需要预装 Microsoft Edge WebView2 Runtime(当前
   Windows 10 / 11 已经默认带了)。
 - **macOS**:`Marginalia_<version>_aarch64.dmg`,仅支持 Apple Silicon。
-- **Linux**:`.deb`、`.rpm` 或 `.AppImage`。
+- **Linux**:`.deb` 或 `.rpm`。
 
 ### 首次启动须知(未签名二进制)
 
@@ -83,9 +83,6 @@ marginalia> 比较一下 raft 和 paxos
   ```bash
   xattr -dr com.apple.quarantine /Applications/Marginalia.app
   ```
-
-- **Linux AppImage** — 先加可执行权限:`chmod +x
-  Marginalia*.AppImage`,之后双击或终端运行。
 
 桌面应用默认把数据库、library、`.env` 都放在 `~/Marginalia/` 下。启
 动前设置 `MARGINALIA_HOME` 可以挪到别的位置。

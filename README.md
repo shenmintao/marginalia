@@ -71,7 +71,7 @@ required.
   (unzip-and-run). Microsoft Edge WebView2 Runtime must be installed
   (already shipped with current Windows 10 / 11).
 - **macOS**: `Marginalia_<version>_aarch64.dmg`. Apple Silicon only.
-- **Linux**: `.deb`, `.rpm`, or `.AppImage`.
+- **Linux**: `.deb` or `.rpm`.
 
 ### First-launch notes (unsigned binaries)
 
@@ -88,9 +88,6 @@ override; subsequent launches go straight through.
   ```bash
   xattr -dr com.apple.quarantine /Applications/Marginalia.app
   ```
-
-- **Linux AppImage** — make it executable: `chmod +x
-  Marginalia*.AppImage`, then double-click or run from a terminal.
 
 The app stores its database, library, and `.env` under
 `~/Marginalia/` by default. Set `MARGINALIA_HOME` before launch to

@@ -70,8 +70,13 @@ const collectFiles = (dir, base = dir) => {
 };
 
 const main = () => {
-  const exeName = `${productName}.exe`;
-  const exePath = path.join(releaseDir, exeName);
+  // Cargo names the binary after the package (`marginalia-tauri`); the
+  // bundle pipeline renames it to `${productName}.exe` only inside the
+  // MSI/NSIS installers. We rename it in the portable zip so users see
+  // a friendly executable name.
+  const cargoExeName = 'marginalia-tauri.exe';
+  const friendlyExeName = `${productName}.exe`;
+  const exePath = path.join(releaseDir, cargoExeName);
   if (!existsSync(exePath)) {
     throw new Error(`Tauri release binary not found at ${exePath}. Did 'tauri build' succeed?`);
   }
@@ -99,7 +104,7 @@ const main = () => {
     const r = spawnSync('cp', ['-r', src, dst], { stdio: 'inherit' });
     if (r.status !== 0) throw new Error(`cp -r ${src} ${dst} failed`);
   };
-  cp(exePath, path.join(stagingApp, exeName));
+  cp(exePath, path.join(stagingApp, friendlyExeName));
 
   // WebView2Loader.dll lives next to the exe on Tauri Windows builds.
   for (const sibling of readdirSync(releaseDir)) {
