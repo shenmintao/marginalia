@@ -45,12 +45,11 @@ def _download_with_retries(url: str, output_path: pathlib.Path, retries: int = 3
 def _build_request(url: str) -> urllib.request.Request:
     headers = {
         "Accept": "application/vnd.github+json",
-        "User-Agent": "astrbot-desktop-tauri",
+        "User-Agent": "marginalia-desktop-tauri",
     }
     github_token = (
         os.environ.get("GITHUB_TOKEN")
         or os.environ.get("GH_TOKEN")
-        or os.environ.get("ASTRBOT_GITHUB_TOKEN")
         or ""
     ).strip()
     if github_token:
@@ -156,9 +155,9 @@ def main() -> None:
     )
     expected_sha256 = _resolve_expected_sha256(release, asset_name)
 
-    target_runtime_root = runner_temp / "astrbot-cpython-runtime"
+    target_runtime_root = runner_temp / "marginalia-cpython-runtime"
     download_archive_path = runner_temp / asset_name
-    extract_root = runner_temp / "astrbot-cpython-runtime-extract"
+    extract_root = runner_temp / "marginalia-cpython-runtime-extract"
 
     if target_runtime_root.exists():
         shutil.rmtree(target_runtime_root)
@@ -189,8 +188,8 @@ def main() -> None:
     _run_probe(runtime_python, ["-V"], "version")
     _run_probe(runtime_python, ["-c", "import ssl"], "ssl")
 
-    print(f"ASTRBOT_DESKTOP_CPYTHON_HOME={target_runtime_root}")
-    print(f"ASTRBOT_DESKTOP_CPYTHON_ASSET={asset_name}")
+    print(f"MARGINALIA_DESKTOP_CPYTHON_HOME={target_runtime_root}")
+    print(f"MARGINALIA_DESKTOP_CPYTHON_ASSET={asset_name}")
 
 
 if __name__ == "__main__":
