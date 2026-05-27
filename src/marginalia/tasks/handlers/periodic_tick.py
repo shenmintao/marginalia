@@ -273,7 +273,20 @@ async def bootstrap_periodic_tick() -> None:
 
     Idempotent: if a pending/running tick already exists, no-op. Otherwise
     enqueue one due immediately so the dispatcher kicks in on the next claim.
+
+    Skip entirely when no LLM api_key is configured. Every downstream
+    fan-out (tag_quality, normalize_tags, summarize_session) hits the LLM
+    on its first step, so without a key the worker crashes in a loop with
+    OpenAIError: Missing credentials. Bootstrap re-runs on next startup,
+    so the user just sets a key in Settings and restarts.
     """
+    from marginalia.config import LlmConfigError, get_settings, validate_llm_config
+    try:
+        validate_llm_config(get_settings())
+    except LlmConfigError as e:
+        log.warning("bootstrap_periodic_tick skipped: %s", e)
+        return
+
     async with session_scope() as session:
         if await tasks_repo.has_inflight_for_kind(session, KIND_PERIODIC_TICK):
             await session.commit()
