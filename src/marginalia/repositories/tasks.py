@@ -282,3 +282,42 @@ async def list_by_status(
         )
     ).scalars().all()
     return list(rows)
+
+
+async def list_recent_with_usage(
+    db: AsyncSession, *, limit: int,
+) -> list[dict]:
+    """Recently-finished tasks joined with their task_outcomes row so the
+    StatusBar popover can show duration + tokens + cache % per task.
+
+    Returns plain dicts, not ORM rows, because the join straddles two
+    models and the caller (HTTP route) just serialises them."""
+    from marginalia.db.models.task_outcomes import TaskOutcome
+
+    rows = (
+        await db.execute(
+            select(Task, TaskOutcome.detail)
+            .join(
+                TaskOutcome,
+                (TaskOutcome.object_kind == "task")
+                & (TaskOutcome.object_id == Task.id),
+                isouter=True,
+            )
+            .where(Task.status.in_(("done", "dead")))
+            .order_by(Task.finished_at.desc())
+            .limit(limit)
+        )
+    ).all()
+    return [
+        {
+            "id": t.id,
+            "kind": t.kind,
+            "status": t.status,
+            "started_at": t.started_at,
+            "finished_at": t.finished_at,
+            "last_error": t.last_error,
+            "payload": t.payload or {},
+            "detail": detail or {},
+        }
+        for t, detail in rows
+    ]

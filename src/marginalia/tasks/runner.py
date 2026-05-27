@@ -4,13 +4,18 @@ import asyncio
 import logging
 import os
 import socket
+import time
 from datetime import datetime, timedelta, timezone
 
 from marginalia.config import Settings, get_settings
 from marginalia.db.session import session_scope
 from marginalia.repositories import tasks as tasks_repo
+from marginalia.repositories import task_outcomes as outcomes_repo
 from marginalia.tasks import handlers as _handlers_pkg  # noqa: F401  (register)
 from marginalia.tasks.kinds import get_handler
+from marginalia.tasks.usage import (
+    bind_accumulator, unbind_accumulator, UsageCounters,
+)
 
 log = logging.getLogger(__name__)
 
@@ -109,20 +114,56 @@ class TaskRunner:
             await self._fail(task_id, attempts, max_attempts, f"no handler registered for {kind!r}")
             return
 
+        token = bind_accumulator()
+        started = time.monotonic()
         heartbeat = asyncio.create_task(self._heartbeat(task_id))
         try:
             await handler(payload)
         except Exception as exc:
             heartbeat.cancel()
             log.exception("task %s (%s) failed", task_id, kind)
+            duration_ms = int((time.monotonic() - started) * 1000)
+            counters = unbind_accumulator(token) or UsageCounters()
+            await self._record_outcome(
+                task_id=task_id, kind=kind, outcome="error",
+                counters=counters, duration_ms=duration_ms,
+            )
             await self._fail(task_id, attempts, max_attempts, repr(exc))
             return
         finally:
             heartbeat.cancel()
 
+        duration_ms = int((time.monotonic() - started) * 1000)
+        counters = unbind_accumulator(token) or UsageCounters()
         async with session_scope() as session:
             await tasks_repo.mark_done(session, task_id=task_id, now=_now())
+            await outcomes_repo.record_outcome(
+                session,
+                task_kind=kind,
+                object_kind="task",
+                object_id=task_id,
+                outcome="applied",
+                detail=counters.to_detail(duration_ms=duration_ms),
+            )
             await session.commit()
+
+    async def _record_outcome(
+        self, *, task_id: str, kind: str, outcome: str,
+        counters: UsageCounters, duration_ms: int,
+    ) -> None:
+        try:
+            async with session_scope() as session:
+                await outcomes_repo.record_outcome(
+                    session,
+                    task_kind=kind,
+                    object_kind="task",
+                    object_id=task_id,
+                    outcome=outcome,
+                    detail=counters.to_detail(duration_ms=duration_ms),
+                )
+                await session.commit()
+        except Exception:
+            log.exception("failed to record task_outcome for %s", task_id)
 
     async def _heartbeat(self, task_id: str) -> None:
         interval = self.settings.worker_heartbeat_seconds

@@ -192,6 +192,27 @@ export interface ActiveTasks {
   pending: ActiveTask[];
 }
 
+export interface RecentTask {
+  id: string;
+  kind: string;
+  status: "done" | "dead";
+  label: string;
+  file_id?: string | null;
+  entry_id?: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  last_error: string | null;
+  duration_ms: number | null;
+  tokens_in: number | null;
+  tokens_out: number | null;
+  cache_read: number | null;
+  llm_calls: number | null;
+}
+
+export interface RecentTasks {
+  items: RecentTask[];
+}
+
 export type OnConflict = "rename" | "error" | "skip";
 
 /** SSE event names emitted by POST /v1/chat/{session_id}.

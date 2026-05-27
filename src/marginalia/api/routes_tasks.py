@@ -88,3 +88,42 @@ async def list_active(
         "running": [_row(t) for t in running],
         "pending": [_row(t) for t in pending],
     }
+
+
+@router.get("/tasks/recent")
+async def list_recent(
+    db: AsyncSession = Depends(get_session),
+    limit: int = 30,
+) -> dict[str, list[dict]]:
+    """Recently-finished tasks (done + dead), newest first, with the
+    per-run usage detail captured by the runner. Powers the StatusBar
+    Activity popover so users can see how long ingest / reflect / embed
+    took and how many tokens each call burned."""
+    from marginalia.repositories import tasks as tasks_repo
+    rows = await tasks_repo.list_recent_with_usage(db, limit=limit)
+
+    def _row(r: dict) -> dict:
+        payload = r["payload"] or {}
+        detail = r["detail"] or {}
+        return {
+            "id": r["id"],
+            "kind": r["kind"],
+            "status": r["status"],
+            "label": _payload_label(payload),
+            "file_id": payload.get("file_id"),
+            "entry_id": payload.get("entry_id"),
+            "started_at": (
+                r["started_at"].isoformat() if r["started_at"] else None
+            ),
+            "finished_at": (
+                r["finished_at"].isoformat() if r["finished_at"] else None
+            ),
+            "last_error": r["last_error"],
+            "duration_ms": detail.get("duration_ms"),
+            "tokens_in": detail.get("tokens_in"),
+            "tokens_out": detail.get("tokens_out"),
+            "cache_read": detail.get("cache_read"),
+            "llm_calls": detail.get("llm_calls"),
+        }
+
+    return {"items": [_row(r) for r in rows]}

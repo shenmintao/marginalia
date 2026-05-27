@@ -17,6 +17,7 @@ import type {
   FolderListing,
   LlmSettings,
   OnConflict,
+  RecentTasks,
   RunningCount,
   SearchResult,
   ServerSettings,
@@ -294,6 +295,8 @@ export const sessions = {
 export const tasks = {
   runningCount: () => _request<RunningCount>(`/v1/tasks/running-count`),
   active: () => _request<ActiveTasks>(`/v1/tasks/active`),
+  recent: (limit = 30) =>
+    _request<RecentTasks>(`/v1/tasks/recent?limit=${limit}`),
 };
 
 // ---- exports --------------------------------------------------------------

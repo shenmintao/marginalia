@@ -14,14 +14,41 @@ from marginalia.config import (
 from marginalia.llm.anthropic_adapter import AnthropicChatClient
 from marginalia.llm.base import AudioClient, ChatClient
 from marginalia.llm.openai_adapter import OpenAIAudioClient, OpenAIChatClient
+from marginalia.llm.types import ChatRequest, ChatResponse
+
+
+class _UsageRecordingChatClient:
+    """Transparent wrapper that drops every response.usage into the task-
+    bound UsageCounters (if one is bound). When nothing is bound — e.g.
+    chat-page calls running outside the TaskRunner — record_chat_use is a
+    no-op and the wrapper is invisible.
+
+    Kept as a thin proxy so `isinstance(c, ChatClient)` still holds and
+    test code that monkeypatches `complete` keeps working."""
+
+    def __init__(self, inner: ChatClient) -> None:
+        self._inner = inner
+        self.profile_name = inner.profile_name
+        self.model = inner.model
+
+    async def complete(self, request: ChatRequest) -> ChatResponse:
+        # Import here to avoid a circular dep at module import time
+        # (tasks.usage doesn't import llm, but tasks.runner does, and
+        # tasks.runner imports through this factory).
+        from marginalia.tasks.usage import record_chat_use
+        resp = await self._inner.complete(request)
+        record_chat_use(resp.usage)
+        return resp
 
 
 def _build_chat(profile: LlmProfile) -> ChatClient:
     if profile.provider in ("openai", "openai-compatible"):
-        return OpenAIChatClient(profile)
-    if profile.provider == "anthropic":
-        return AnthropicChatClient(profile)
-    raise ValueError(f"unknown provider for profile {profile.name}: {profile.provider}")
+        inner: ChatClient = OpenAIChatClient(profile)
+    elif profile.provider == "anthropic":
+        inner = AnthropicChatClient(profile)
+    else:
+        raise ValueError(f"unknown provider for profile {profile.name}: {profile.provider}")
+    return _UsageRecordingChatClient(inner)
 
 
 @lru_cache(maxsize=8)
