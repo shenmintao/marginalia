@@ -153,8 +153,8 @@ async def name_by_ids(
     db: AsyncSession, ids: list[str],
 ) -> dict[str, str]:
     """Map `folder_id -> name` for the given ids. Used by the agent
-    runtime so tool_call display can render `list_folders Papers`
-    instead of `list_folders 019e6339-…`. Includes soft-deleted folders
+    runtime so tool_call display can render `list_folder Papers`
+    instead of `list_folder 019e6339-…`. Includes soft-deleted folders
     so historical replay still resolves."""
     if not ids:
         return {}

@@ -205,7 +205,7 @@ async def cmd_bg(ctx: CliContext, args: str) -> None:
 async def cmd_ls(ctx: CliContext, args: str) -> None:
     """List folders + entries at root or under a folder id."""
     parent_id = args.strip() or None
-    out = await ctx.client.list_folders(parent_id=parent_id)
+    out = await ctx.client.list_folder(parent_id=parent_id)
     folders = out.get("folders") or []
     if not folders:
         print("(no folders)")
@@ -227,7 +227,7 @@ async def cmd_tree(ctx: CliContext, args: str) -> None:
     async def _walk(parent_id: str | None, depth: int, prefix: str, path: str) -> None:
         if depth > max_depth:
             return
-        out = await ctx.client.list_folders(parent_id=parent_id)
+        out = await ctx.client.list_folder(parent_id=parent_id)
         folders = out.get("folders") or []
         for i, f in enumerate(folders):
             last = i == len(folders) - 1

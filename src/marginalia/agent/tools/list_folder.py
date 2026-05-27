@@ -1,7 +1,8 @@
-"""list_folders — DESIGN.md §10.1.
+"""list_folder — browse a folder's contents.
 
-Walks the user's folder tree. Returns both child folders and entries
-(files) at the requested level in one call.
+Returns both child folders and entries (files) at the requested level
+in one call. The singular name emphasizes that this tool lists the
+*contents of one folder*, not multiple folders.
 
 Three ways to point at a level:
   - parent_id=<id>           direct id (UUID or short hex prefix)
@@ -71,8 +72,10 @@ async def _resolve_path(
                 prefix = "/".join(segments[:i]) or "(root)"
                 return None, {
                     "ok": False,
-                    "error": f"no folder named '{seg}' under '{prefix}'",
-                    "available_folders_at_level": hint,
+                    "error": (
+                        f"no folder named '{seg}' under '{prefix}'. "
+                        f"Available: {hint}"
+                    ),
                     "folders": [], "entries": [],
                     "folder_count": 0, "entry_count": 0,
                 }
@@ -85,24 +88,21 @@ async def _resolve_path(
         hint = ", ".join(r.name for r in roots[:20])
         return None, {
             "ok": False,
-            "error": f"no folder named '{path}'",
-            "available_root_folders": hint,
+            "error": f"no folder named '{path}'. Available at root: {hint}",
             "folders": [], "entries": [],
             "folder_count": 0, "entry_count": 0,
         }
     if len(matches) > 1:
+        names = ", ".join(
+            f"{m.parent_id or 'root'}/{m.name}" for m in matches[:20]
+        )
         return None, {
             "ok": False,
             "error": (
                 f"folder name '{path}' is ambiguous "
-                f"({len(matches)} matches) — disambiguate with a full path "
-                f"like 'Parent/{path}', or call list_folders again with one "
-                f"of the parent_id values below."
+                f"({len(matches)} matches). "
+                f"Disambiguate with a full path: {names}"
             ),
-            "candidates": [
-                {"id": m.id, "parent_id": m.parent_id, "name": m.name}
-                for m in matches[:20]
-            ],
             "folders": [], "entries": [],
             "folder_count": 0, "entry_count": 0,
         }
@@ -110,17 +110,17 @@ async def _resolve_path(
 
 
 @tool(
-    name="list_folders",
+    name="list_folder",
     description=(
-        "List a folder's direct child folders AND the entries (files) "
-        "inside it. Pass parent_id=null (or omit) for root level, "
-        "parent_id=<id> for a specific folder, or path='Papers/2024' to "
-        "resolve by name. parent_id and path are mutually exclusive. "
-        "Returns both folders and entries in a single call."
+        "List ONE folder's contents: its direct child folders AND the "
+        "entries (files) inside it. Pass parent_id=null (or omit) for "
+        "root level, parent_id=<id> for a specific folder, or "
+        "path='Papers/2024' to resolve by name. parent_id and path are "
+        "mutually exclusive. Returns both folders and entries in one call."
     ),
     schema=SCHEMA,
 )
-async def list_folders(
+async def list_folder(
     db: AsyncSession,
     ctx: ToolContext,
     args: Mapping[str, Any],

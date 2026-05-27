@@ -88,7 +88,7 @@ class MarginaliaClient:
 
     # ---- folders -------------------------------------------------------------
 
-    async def list_folders(self, parent_id: str | None = None) -> dict[str, Any]:
+    async def list_folder(self, parent_id: str | None = None) -> dict[str, Any]:
         params: dict[str, Any] = {}
         if parent_id is not None:
             params["parent_id"] = parent_id

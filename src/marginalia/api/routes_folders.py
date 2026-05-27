@@ -53,7 +53,7 @@ def _serialize_entry(e: FileEntry, ingest_status: str | None = None) -> dict[str
 
 
 @router.get("")
-async def list_folders(
+async def list_folder(
     parent_id: str | None = Query(default=None),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:

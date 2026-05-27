@@ -1,7 +1,7 @@
 """GET /v1/sessions/{id}/messages emits resolved `display` strings.
 
 The live SSE tool_call event carries a server-resolved `display`
-(`list_folders Papers`); the replay payload must mirror that so the
+(`list_folder Papers`); the replay payload must mirror that so the
 GUI doesn't fall back to printing raw uuids in the chat history.
 
 Asserts:
@@ -96,7 +96,7 @@ async def _seed() -> dict:
             agent_response="here you go",
             tool_calls=[
                 {
-                    "name": "list_folders",
+                    "name": "list_folder",
                     "arguments": {"parent_id": folder.id},
                     "duration_ms": 1,
                 },
@@ -139,11 +139,11 @@ async def test_replay_display_resolves_names() -> None:
             assert len(calls) == 3, calls
 
             by_name = {tc["name"]: tc for tc in calls}
-            assert "display" in by_name["list_folders"], by_name["list_folders"]
-            assert seeded["folder_name"] in by_name["list_folders"]["display"], (
-                by_name["list_folders"]["display"], seeded["folder_name"]
+            assert "display" in by_name["list_folder"], by_name["list_folder"]
+            assert seeded["folder_name"] in by_name["list_folder"]["display"], (
+                by_name["list_folder"]["display"], seeded["folder_name"]
             )
-            print("[1] list_folders display includes folder name (not uuid)")
+            print("[1] list_folder display includes folder name (not uuid)")
 
             assert seeded["catalog_name"] in by_name["read_catalog"]["display"], (
                 by_name["read_catalog"]["display"], seeded["catalog_name"]

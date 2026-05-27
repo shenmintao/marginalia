@@ -7,8 +7,8 @@ Produces strings like:
     read_files paper.pdf section s15
     search_metadata "raft", "consensus" + tags 'machine-learning'
     search_journal "leader election"
-    list_folders Papers/2024
-    list_folders Papers
+    list_folder Papers/2024
+    list_folder Papers
     read_entries_metadata paper.pdf, slides.pdf
     query_sql 'select count(*) from entry where ...'
 
@@ -89,10 +89,10 @@ def _entry_ids_from_args(args: Mapping[str, Any]) -> list[str]:
 
 
 def _folder_ids_from_args(name: str, args: Mapping[str, Any]) -> list[str]:
-    """Pull folder ids out of folder-aware tools. list_folders uses
+    """Pull folder ids out of folder-aware tools. list_folder uses
     parent_id; parent_id can also be null (root) — skip those."""
     out: list[str] = []
-    if name == "list_folders":
+    if name == "list_folder":
         v = args.get("parent_id")
         if _looks_like_id(v):
             out.append(str(v))
@@ -207,7 +207,7 @@ def format_tool_call(
     """Render a compact one-line description of a tool call.
 
     Resolvers map ids to user-visible names so the live trace shows
-    "list_folders Papers" instead of the raw uuid the agent passed:
+    "list_folder Papers" instead of the raw uuid the agent passed:
       - `resolver` — entry_id → display_name
       - `tag_resolver` — uuid-shaped tag_id → tag name (no-op for
         bare-name tag inputs that the agent already typed by name)
@@ -274,11 +274,14 @@ def format_tool_call(
             parts.append(f"(limit {args['limit']})")
         return " ".join(parts)
 
-    if name == "list_folders":
-        v = args.get("parent_id") or args.get("path")
-        if v:
-            label = _name(str(v), folder_resolver) if _looks_like_id(v) else str(v)
+    if name == "list_folder":
+        pid = args.get("parent_id")
+        ppath = args.get("path")
+        if pid:
+            label = _name(str(pid), folder_resolver) if _looks_like_id(pid) else str(pid)
             parts.append(label)
+        elif ppath:
+            parts.append(str(ppath))
         return " ".join(parts)
 
     if name == "list_catalogs":
@@ -388,14 +391,23 @@ def format_tool_result_preview(name: str, result: Any) -> str:
     if result.get("error"):
         return f"error: {_truncate(str(result['error']), 160)}"
 
-    if name == "list_folders":
+    if name == "list_folder":
         rows = result.get("folders") or []
-        if not rows:
-            return "no folders"
-        names = [r.get("name") or r.get("id", "") for r in rows[:5] if isinstance(r, dict)]
-        head = ", ".join(n for n in names if n)
-        more = "" if len(rows) <= 5 else f" +{len(rows) - 5} more"
-        return f"{_ru(rows, 'folder')}: {head}{more}"
+        entries = result.get("entries") or []
+        bits: list[str] = []
+        if rows:
+            names = [r.get("name") or r.get("id", "") for r in rows[:5] if isinstance(r, dict)]
+            head = ", ".join(n for n in names if n)
+            more = "" if len(rows) <= 5 else f" +{len(rows) - 5} more"
+            bits.append(f"{_ru(rows, 'folder')}: {head}{more}")
+        else:
+            bits.append("no subfolders")
+        if entries:
+            names = [r.get("display_name") or "" for r in entries[:5] if isinstance(r, dict)]
+            head = ", ".join(n for n in names if n)
+            more = "" if len(entries) <= 5 else f" +{len(entries) - 5} more"
+            bits.append(f"{_ru(entries, 'file')}: {head}{more}")
+        return " · ".join(bits) if bits else "empty"
 
     if name == "list_catalogs":
         rows = result.get("catalogs") or []

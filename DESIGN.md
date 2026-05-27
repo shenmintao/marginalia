@@ -437,7 +437,7 @@ purge_deleted_files 自包含
 **结构层**
 - `list_catalogs(parent_id?)` — 下钻 catalog 树
 - `read_catalog(id)` — catalog 完整 metadata
-- `list_folders(parent_id?, path?)` — 用户文件夹树(作先验提示)。path='Papers/2024' 一次解析到位。
+- `list_folder(parent_id?, path?)` — 用户文件夹树(作先验提示)。path='Papers/2024' 一次解析到位。
 - `materialize_view(id, limit)` — 跑 view filter
 - `resolve_tag(name)` — 任意写法 → 规范 tag id
 

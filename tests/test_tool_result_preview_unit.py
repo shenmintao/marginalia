@@ -23,12 +23,12 @@ def _check(name: str, result: dict, *needles: str) -> None:
 
 
 def test_known_shapes() -> None:
-    _check("list_folders", {
+    _check("list_folder", {
         "folders": [{"id": "f1", "name": "Papers"}, {"id": "f2", "name": "Code"}],
         "count": 2,
     }, "2 folders", "Papers", "Code")
 
-    _check("list_folders", {"folders": [], "count": 0}, "no folders")
+    _check("list_folder", {"folders": [], "count": 0}, "no subfolders")
 
     _check("list_catalogs", {
         "catalogs": [{"name": "Algorithms"}, {"name": "Systems"}],

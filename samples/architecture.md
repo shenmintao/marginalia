@@ -56,7 +56,7 @@ priority   kind                       interval
 
 ```
 search_journal       翻自己的笔记本（最常用，新对话第一动作）
-list_folders         列用户文件夹（同时返回子文件夹和 entries；支持 path='Papers/2024'）
+list_folder          列单个文件夹（同时返回子文件夹和 entries；支持 path='Papers/2024'）
 list_catalogs        列 AI 内部分类树
 read_catalog         看分类节点详情
 resolve_tag          tag 名 → canonical id
