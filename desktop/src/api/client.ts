@@ -1,11 +1,21 @@
 /** Typed fetch wrapper for the /v1/ API.
  *
- *  - The dev server proxies /v1/* to the Marginalia backend, so we use
- *    relative paths and the browser stays same-origin (no preflight).
- *  - In Tauri / production, baseUrl can be overridden via setBaseUrl()
- *    or VITE_API_BASE.
- *  - All errors surface as ApiError with status + parsed body so UI
- *    can show conflict details (e.g. display_name_conflict on upload).
+ *  Base URL precedence:
+ *    1. localStorage["marginalia.api_base"]  (set from Settings → Connection)
+ *    2. VITE_API_BASE                         (compile-time override)
+ *    3. Tauri: ask the Rust shell which port the sidecar bound.
+ *       Rust picks an ephemeral port on launch and exposes it via the
+ *       `backend_port` invoke command — call resolveTauriBaseUrl() once
+ *       at app boot to fill it in.
+ *    4. ""                                    (browser dev → vite proxy)
+ *
+ *  In a packaged Tauri build the webview is served from a `tauri://` /
+ *  `http://tauri.localhost` origin, so a relative fetch never reaches the
+ *  Python sidecar. The dynamic port keeps us from colliding with anything
+ *  the user already has running on 8000.
+ *
+ *  All errors surface as ApiError with status + parsed body so UI can show
+ *  conflict details (e.g. display_name_conflict on upload).
  */
 import type {
   ActiveTasks,
@@ -28,7 +38,53 @@ import type {
   UploadResult,
 } from "@/types/api";
 
-let _base = import.meta.env.VITE_API_BASE || "";
+const STORAGE_KEY = "marginalia.api_base";
+
+function isTauri(): boolean {
+  if (typeof window === "undefined") return false;
+  // Tauri 2 exposes __TAURI_INTERNALS__; older builds set __TAURI__.
+  return Boolean(
+    (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ ||
+      (window as unknown as { __TAURI__?: unknown }).__TAURI__,
+  );
+}
+
+function initialBase(): string {
+  if (typeof window !== "undefined") {
+    const stored = window.localStorage?.getItem(STORAGE_KEY);
+    if (stored) return stored.replace(/\/$/, "");
+  }
+  if (import.meta.env.VITE_API_BASE) return import.meta.env.VITE_API_BASE;
+  // Tauri's port is filled in asynchronously by resolveTauriBaseUrl();
+  // an empty string means "haven't heard back yet — retry later".
+  return "";
+}
+
+let _base = initialBase();
+let _tauriResolved: Promise<string> | null = null;
+
+/** Ask the Tauri shell which port the bundled sidecar bound, then set
+ *  the API base to http://127.0.0.1:<port>. Idempotent. Skips if a user
+ *  override (localStorage / VITE_API_BASE) is already in effect. */
+export async function resolveTauriBaseUrl(): Promise<string> {
+  if (!isTauri()) return _base;
+  if (_base) return _base;
+  if (_tauriResolved) return _tauriResolved;
+
+  _tauriResolved = (async () => {
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const port = await invoke<number | null>("backend_port");
+      if (typeof port === "number" && port > 0) {
+        _base = `http://127.0.0.1:${port}`;
+      }
+    } catch (e) {
+      console.error("failed to resolve Tauri backend port:", e);
+    }
+    return _base;
+  })();
+  return _tauriResolved;
+}
 
 export function setBaseUrl(url: string) {
   _base = url.replace(/\/$/, "");
@@ -51,6 +107,7 @@ async function _request<T>(
   path: string,
   init: RequestInit = {},
 ): Promise<T> {
+  if (!_base && isTauri()) await resolveTauriBaseUrl();
   const res = await fetch(_base + path, {
     ...init,
     headers: {
@@ -201,6 +258,7 @@ export const uploads = {
       onProgress?: (loaded: number, total: number) => void;
     } = {},
   ): Promise<UploadResult> => {
+    if (!_base && isTauri()) await resolveTauriBaseUrl();
     const fd = new FormData();
     fd.append("file", file);
     const params = new URLSearchParams();

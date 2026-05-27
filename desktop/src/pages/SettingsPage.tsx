@@ -4,6 +4,10 @@
  *  2. Preferences: theme, default conflict policy, status-bar polling
  *  3. Server status (read-only) + LLM profile editor (writable overlay)
  *
+ *  Server state (server + llm) lives on the page so Preferences and the
+ *  Server-status card stay in lockstep — picking a conflict policy in
+ *  Preferences updates the read-only line below without a re-fetch.
+ *
  *  Sections 1-2 work without a backend. Section 3 calls /v1/settings/*
  *  and shows a friendly empty state if the server is offline. */
 import { useEffect, useState } from "react";
@@ -18,18 +22,83 @@ import type { LlmSettings, OnConflict, ServerSettings } from "@/types/api";
 
 const STORAGE_KEY = "marginalia.api_base";
 
+interface ServerCtx {
+  server: ServerSettings | null;
+  llm: LlmSettings | null;
+  err: string | null;
+  setLlm: (next: LlmSettings) => void;
+  setDefaultConflict: (v: OnConflict) => Promise<void>;
+  setAgentBudget: (field: "agent_plan_max_tokens" | "agent_execute_max_tokens", v: number) => Promise<void>;
+}
+
 export function SettingsPage() {
+  const ctx = useServerCtx();
   return (
     <div className="h-full overflow-y-auto px-8 py-8">
       <div className="mx-auto max-w-2xl space-y-6">
         <h1 className="text-xl font-semibold">Settings</h1>
 
         <ConnectionSection />
-        <PreferencesSection />
-        <ServerSection />
+        <PreferencesSection ctx={ctx} />
+        <ServerSection ctx={ctx} />
       </div>
     </div>
   );
+}
+
+function useServerCtx(): ServerCtx {
+  const [server, setServer] = useState<ServerSettings | null>(null);
+  const [llm, setLlm] = useState<LlmSettings | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const [s, l] = await Promise.all([
+          settingsApi.server(),
+          settingsApi.llm(),
+        ]);
+        if (cancelled) return;
+        setServer(s);
+        setLlm(l);
+        setErr(null);
+      } catch (e: unknown) {
+        if (cancelled) return;
+        setErr(e instanceof Error ? e.message : String(e));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const setDefaultConflict = async (v: OnConflict) => {
+    if (!server || server.default_on_conflict === v) return;
+    const prev = server;
+    setServer({ ...server, default_on_conflict: v });
+    try {
+      await settingsApi.updateLlm({ default_on_conflict: v });
+    } catch {
+      setServer(prev); // roll back the optimistic update
+    }
+  };
+
+  const setAgentBudget = async (
+    field: "agent_plan_max_tokens" | "agent_execute_max_tokens",
+    v: number,
+  ) => {
+    if (!server || server[field] === v) return;
+    const prev = server;
+    setServer({ ...server, [field]: v });
+    try {
+      await settingsApi.updateLlm({ [field]: v });
+    } catch {
+      setServer(prev);
+    }
+  };
+
+  return { server, llm, err, setLlm, setDefaultConflict, setAgentBudget };
 }
 
 // ---- Connection ------------------------------------------------------------
@@ -83,9 +152,10 @@ function ConnectionSection() {
 
 // ---- Preferences -----------------------------------------------------------
 
-function PreferencesSection() {
+function PreferencesSection({ ctx }: { ctx: ServerCtx }) {
   const { mode, setMode } = useTheme();
   const prefs = usePrefs();
+  const { server, setDefaultConflict, setAgentBudget } = ctx;
 
   return (
     <Section title="Preferences" subtitle="Local appearance and defaults.">
@@ -114,19 +184,37 @@ function PreferencesSection() {
 
         <Row
           label="Default conflict policy"
-          hint="Used when uploading a file whose name already exists in the target folder."
+          hint="Used when uploading a file whose name already exists in the target folder. Stored on the server so the CLI and GUI agree."
         >
           <select
-            value={prefs.defaultOnConflict}
-            onChange={(e) =>
-              prefs.setDefaultOnConflict(e.target.value as OnConflict)
-            }
-            className="rounded border border-border bg-bg-base px-2 py-1 text-sm"
+            value={server?.default_on_conflict ?? "rename"}
+            disabled={!server}
+            onChange={(e) => setDefaultConflict(e.target.value as OnConflict)}
+            className="rounded border border-border bg-bg-base px-2 py-1 text-sm disabled:opacity-50"
           >
             <option value="rename">rename (append a suffix)</option>
             <option value="error">error (reject the upload)</option>
             <option value="skip">skip (keep existing)</option>
           </select>
+        </Row>
+
+        <Row
+          label="Agent token budget"
+          hint="Max tokens per agent step (plan / execute). Bump these for long-context models that emit large single responses."
+        >
+          <div className="flex items-center gap-1.5">
+            <TokenInput
+              value={server?.agent_plan_max_tokens}
+              disabled={!server}
+              onCommit={(v) => setAgentBudget("agent_plan_max_tokens", v)}
+            />
+            <span className="text-xs text-fg-subtle">/</span>
+            <TokenInput
+              value={server?.agent_execute_max_tokens}
+              disabled={!server}
+              onCommit={(v) => setAgentBudget("agent_execute_max_tokens", v)}
+            />
+          </div>
         </Row>
 
         <Row
@@ -161,32 +249,8 @@ function PreferencesSection() {
 
 // ---- Server status + LLM editor --------------------------------------------
 
-function ServerSection() {
-  const [server, setServer] = useState<ServerSettings | null>(null);
-  const [llm, setLlm] = useState<LlmSettings | null>(null);
-  const [err, setErr] = useState<string | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const [s, l] = await Promise.all([
-          settingsApi.server(),
-          settingsApi.llm(),
-        ]);
-        if (cancelled) return;
-        setServer(s);
-        setLlm(l);
-        setErr(null);
-      } catch (e: unknown) {
-        if (cancelled) return;
-        setErr(e instanceof Error ? e.message : String(e));
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+function ServerSection({ ctx }: { ctx: ServerCtx }) {
+  const { server, llm, err, setLlm } = ctx;
 
   if (err) {
     return (
@@ -206,13 +270,16 @@ function ServerSection() {
 
   return (
     <>
-      <Section title="Server status" subtitle="Read-only — set via .env or container env at startup.">
+      <Section title="Server status" subtitle="Read-only — set via .env or via Preferences above.">
         <dl className="grid grid-cols-[1fr_2fr] gap-x-4 gap-y-2 text-sm">
           <Kv k="App env" v={server.app_env} />
           <Kv k="Marginalia home" v={server.marginalia_home} mono />
           <Kv k="Database backend" v={server.db_backend} />
           <Kv k="Storage backend" v={server.storage_backend} />
           <Kv k="Worker enabled" v={server.worker_enabled ? "yes" : "no"} />
+          {server.worker_batch_size != null && (
+            <Kv k="Concurrent ingest tasks" v={String(server.worker_batch_size)} />
+          )}
           <Kv k="Default conflict policy" v={server.default_on_conflict} />
           <Kv
             k="Agent token budget (plan/exec)"
@@ -220,7 +287,7 @@ function ServerSection() {
           />
           <Kv
             k="Vision profile"
-            v={server.vision_profile_configured ? "configured" : "not set (image OCR skipped)"}
+            v={visionConfigured(llm) ? "configured" : "not set (image OCR skipped)"}
           />
         </dl>
       </Section>
@@ -282,4 +349,57 @@ function Kv({ k, v, mono }: { k: string; v: string; mono?: boolean }) {
       <dd className={cn("truncate", mono && "font-mono text-xs")}>{v}</dd>
     </>
   );
+}
+
+// Local-state number input that commits on blur / Enter, so the server
+// only sees the final value (PUT per keystroke would spam the overlay
+// with intermediate junk like 1, 12, 124, ...). Out-of-range values
+// roll back to the last accepted server value.
+function TokenInput({
+  value,
+  disabled,
+  onCommit,
+}: {
+  value: number | undefined;
+  disabled?: boolean;
+  onCommit: (v: number) => void;
+}) {
+  const [draft, setDraft] = useState<string>(value != null ? String(value) : "");
+  useEffect(() => {
+    setDraft(value != null ? String(value) : "");
+  }, [value]);
+
+  const commit = () => {
+    const n = parseInt(draft, 10);
+    if (!Number.isFinite(n) || n < 1 || n > 200000 || n === value) {
+      setDraft(value != null ? String(value) : "");
+      return;
+    }
+    onCommit(n);
+  };
+
+  return (
+    <input
+      type="number"
+      min={1}
+      max={200000}
+      step={128}
+      value={draft}
+      disabled={disabled}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+      }}
+      className="w-20 rounded border border-border bg-bg-base px-2 py-1 text-right font-mono text-xs disabled:opacity-50"
+    />
+  );
+}
+
+// vision_profile_configured from /v1/settings/server is captured at first
+// fetch and goes stale after the user edits the overlay. The /v1/settings/llm
+// response always reflects current overlay+env state, so derive from there.
+function visionConfigured(llm: LlmSettings): boolean {
+  const v = llm.profiles.vision;
+  return Boolean(v?.api_key_set || v?.base_url || v?.model);
 }

@@ -18,7 +18,7 @@ import { settings as settingsApi } from "@/api/client";
 import { cn } from "@/lib/utils";
 import type { LlmProfileName, LlmSettings } from "@/types/api";
 
-const PROFILES: LlmProfileName[] = ["chat", "reflect", "ingest", "vision"];
+const PROFILES: LlmProfileName[] = ["default", "chat", "reflect", "ingest", "vision"];
 
 type FormState = Partial<Record<string, string>>;
 
@@ -55,10 +55,26 @@ interface RowProps {
 }
 
 function ProfileRow({ name, data, isOpen, onToggle, onChange }: RowProps) {
-  const profile = data.profiles[name];
+  const isDefault = name === "default";
+  const profile = isDefault ? null : data.profiles[name];
   const overlay = data.overlay;
   const optional = name === "vision";
-  const overlayKey = (suffix: string) => `llm_${name}_${suffix}`;
+  const overlayKey = (suffix: string) =>
+    isDefault ? `llm_default_${suffix}` : `llm_${name}_${suffix}`;
+
+  // Default row reads its "current" view from data.defaults; per-profile
+  // rows read from data.profiles[name]. The fields share the same shape
+  // (provider/model/base_url/api_key{_set}) so downstream rendering can
+  // ignore the difference.
+  const view = isDefault
+    ? {
+        provider: data.defaults.provider,
+        model: data.defaults.model,
+        base_url: data.defaults.base_url,
+        api_key: data.defaults.api_key,
+        api_key_set: data.defaults.api_key_set,
+      }
+    : profile!;
 
   const [form, setForm] = useState<FormState>({});
   const [saving, setSaving] = useState(false);
@@ -145,8 +161,8 @@ function ProfileRow({ name, data, isOpen, onToggle, onChange }: RowProps) {
         <div className="flex items-center gap-3">
           <span className="font-medium capitalize">{name}</span>
           <span className="font-mono text-xs text-fg-subtle">
-            {profile.provider || profile.model
-              ? `${profile.provider ?? "(unset)"}/${profile.model || "(unset)"}`
+            {view.provider || view.model
+              ? `${view.provider ?? "(unset)"}/${view.model || "(unset)"}`
               : "(unset)"}
           </span>
         </div>
@@ -154,10 +170,14 @@ function ProfileRow({ name, data, isOpen, onToggle, onChange }: RowProps) {
           {overrideCount > 0
             ? `${overrideCount} override${overrideCount > 1 ? "s" : ""}`
             : optional
-              ? profile.model || profile.api_key_set
+              ? view.model || view.api_key_set
                 ? "from .env"
                 : "not configured"
-              : "inherited"}
+              : isDefault
+                ? view.api_key_set
+                  ? "from .env"
+                  : "not configured"
+                : "inherited"}
         </span>
       </button>
 
@@ -170,11 +190,15 @@ function ProfileRow({ name, data, isOpen, onToggle, onChange }: RowProps) {
               className="w-full rounded border border-border bg-bg-base px-2 py-1 text-sm"
             >
               <option value="">
-                {optional
-                  ? profile.provider
-                    ? `(from .env: ${profile.provider})`
+                {isDefault
+                  ? view.provider
+                    ? `(from .env: ${view.provider})`
                     : "(unset)"
-                  : `(inherit: ${data.defaults.provider})`}
+                  : optional
+                    ? view.provider
+                      ? `(from .env: ${view.provider})`
+                      : "(unset)"
+                    : `(inherit: ${data.defaults.provider})`}
               </option>
               <option value="openai">openai</option>
               <option value="openai-compatible">openai-compatible</option>
@@ -186,11 +210,15 @@ function ProfileRow({ name, data, isOpen, onToggle, onChange }: RowProps) {
               value={form.model ?? ""}
               onChange={(e) => setForm({ ...form, model: e.target.value })}
               placeholder={
-                optional
-                  ? profile.model
-                    ? `(from .env: ${profile.model})`
+                isDefault
+                  ? view.model
+                    ? `(from .env: ${view.model})`
                     : "(unset)"
-                  : `(inherit: ${data.defaults.model})`
+                  : optional
+                    ? view.model
+                      ? `(from .env: ${view.model})`
+                      : "(unset)"
+                    : `(inherit: ${data.defaults.model})`
               }
               className="w-full rounded border border-border bg-bg-base px-2 py-1 font-mono text-sm"
             />
@@ -200,11 +228,15 @@ function ProfileRow({ name, data, isOpen, onToggle, onChange }: RowProps) {
               value={form.base_url ?? ""}
               onChange={(e) => setForm({ ...form, base_url: e.target.value })}
               placeholder={
-                optional
-                  ? profile.base_url
-                    ? `(from .env: ${profile.base_url})`
-                    : "(unset)"
-                  : data.defaults.base_url || "(provider default)"
+                isDefault
+                  ? view.base_url
+                    ? `(from .env: ${view.base_url})`
+                    : "(provider default)"
+                  : optional
+                    ? view.base_url
+                      ? `(from .env: ${view.base_url})`
+                      : "(unset)"
+                    : data.defaults.base_url || "(provider default)"
               }
               className="w-full rounded border border-border bg-bg-base px-2 py-1 font-mono text-sm"
             />
@@ -215,8 +247,8 @@ function ProfileRow({ name, data, isOpen, onToggle, onChange }: RowProps) {
               value={form.api_key ?? ""}
               onChange={(e) => setForm({ ...form, api_key: e.target.value })}
               placeholder={
-                profile.api_key_set
-                  ? `(set: ${profile.api_key ?? ""})`
+                view.api_key_set
+                  ? `(set: ${view.api_key ?? ""})`
                   : "(unset)"
               }
               className="w-full rounded border border-border bg-bg-base px-2 py-1 font-mono text-sm"

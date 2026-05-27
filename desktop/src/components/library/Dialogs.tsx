@@ -10,7 +10,7 @@
 import { useEffect, useRef, useState } from "react";
 import { X, Upload, FolderPlus, Loader2 } from "lucide-react";
 
-import { folders as foldersApi, uploads, ApiError } from "@/api/client";
+import { folders as foldersApi, uploads, ApiError, settings as settingsApi } from "@/api/client";
 import type { OnConflict } from "@/types/api";
 import { cn } from "@/lib/utils";
 
@@ -97,6 +97,25 @@ export function UploadDialog({ folderId, folderName, onClose, onUploaded }: {
   const [scanning, setScanning] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
+
+  // Seed conflict policy from the server's current default so what the
+  // dialog opens with matches what Settings → Default conflict policy
+  // shows. Failure (server offline, etc.) just leaves the "rename"
+  // initial value alone.
+  useEffect(() => {
+    let cancelled = false;
+    settingsApi.server().then(
+      (s) => {
+        if (cancelled) return;
+        const v = s.default_on_conflict as OnConflict;
+        if (v === "rename" || v === "error" || v === "skip") setConflict(v);
+      },
+      () => {},
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const addItems = (next: UploadItem[]) => {
     setItems((prev) => [...prev, ...next]);

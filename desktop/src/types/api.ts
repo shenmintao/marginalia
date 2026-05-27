@@ -287,6 +287,7 @@ export interface ServerSettings {
   db_backend: string;
   storage_backend: string;
   worker_enabled: boolean;
+  worker_batch_size: number;
   default_on_conflict: string;
   agent_plan_max_tokens: number;
   agent_execute_max_tokens: number;
@@ -294,7 +295,7 @@ export interface ServerSettings {
 }
 
 export type LlmProfileName =
-  | "chat" | "reflect" | "ingest" | "vision";
+  | "default" | "chat" | "reflect" | "ingest" | "vision";
 
 export interface LlmProfileResolved {
   provider: string | null;
