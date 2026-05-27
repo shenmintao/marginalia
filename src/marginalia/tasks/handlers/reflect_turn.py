@@ -6,15 +6,26 @@ produce a structured field-log entry (question + answer + entry_ids
 + tags) that the future planner can recall when a similar question
 returns.
 
-Scope (intentionally narrow as of 2026-05-24):
+**Prefix-cache reuse (2026-05-27):** The handler now replays the
+session's conversation history using the same `build_resumed_messages`
++ `render_system_prompt(snapshot, phase="execute")` that the agent
+runtime uses for its execute phase. This gives the reflect LLM call
+the identical prefix (system prompt + resumed history) that was
+already sent to the chat model, so DeepSeek / OpenAI automatic
+prefix caching kicks in — the reflect call only pays for the new
+reflect-request message appended at the end, not the full history
+prefix again.
+
+Before this change, reflect_turn sent a fresh one-shot prompt with
+the entire conversation payload serialized as JSON, producing zero
+prefix overlap with the execute phase → 0% cache hit rate and
+~35k input tokens per reflect call. After the change, the shared
+prefix is cached → reflect input drops to ~3-5k (the new message
+only).
+
+Scope (intentionally narrow):
   - The ONLY write this handler performs is INSERT INTO journal.
-  - Per-conversation increments to entry_relations / entry_tags / *_extra
-    were removed — those signals are weaker per-conversation than the
-    cross-corpus miners (`mine_*`, `enrich_tags`, `refresh_entry_extra`,
-    `propose_views`) that already cover the same ground.
-  - Cross-session synthesis (the "big summary" tier) lives in
-    `summarize_session`, which reads many reflect_turn rows and writes
-    `source_kind='insight'` journal rows — see [[journal-tiers]].
+  - Cross-session synthesis lives in `summarize_session`.
 
 Inputs:
   payload = {"conversation_id": "..."}
@@ -22,32 +33,35 @@ Inputs:
 Flow:
   1. Idempotence: short-circuit on existing task_outcomes row.
   2. Pull the conversation; require it to be ended.
-  3. Resolve involved entry_ids from tool_calls payload (read trail).
-  4. Call the `reflect` LLM profile with strict JSON schema.
-  5. INSERT 0..1 journal rows; record_outcome.
+  3. Build resumed history (same prefix as execute phase).
+  4. Append the current turn + reflect-request message.
+  5. Call the `reflect` LLM profile with the execute-phase system
+     prompt (prefix matches execute → cache hit).
+  6. Parse the <entry> block; INSERT 0..1 journal rows; record_outcome.
 """
 from __future__ import annotations
 
-import json
 import logging
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
+from marginalia.agent.stable_context import (
+    build_resumed_messages,
+    build_stable_snapshot,
+    render_system_prompt,
+)
 from marginalia.db.models import (
     Conversation,
-    File,
     Journal,
+    Session as SessionRow,
 )
 from marginalia.db.session import session_scope
 from marginalia.llm import (
     ChatMessage,
     ChatRequest,
-    TextBlock,
     get_chat_client,
 )
 from marginalia.llm.tagged_response import parse_tagged
-from marginalia.repositories import entries as entries_repo
-from marginalia.repositories import entry_tags as entry_tags_repo
 from marginalia.repositories.task_outcomes import has_outcome, record_outcome
 from marginalia.tasks.kinds import task_handler
 from marginalia.utils.ids import new_id
@@ -58,62 +72,35 @@ KIND_REFLECT_TURN = "reflect_turn"
 
 ENTRY_LIMIT = 30  # cap how many entries we feed the model context for
 
+# Reflect instructions — embedded in the final user message rather than
+# as a separate system prompt, so the system prompt stays identical to
+# the execute phase (prefix-cache reuse).
+REFLECT_INSTRUCTIONS = """\
+你现在需要为以上对话生成一条调查日志，供将来的 planner 回忆。
 
-REFLECT_SYSTEM = """You are Marginalia's reflection investigator.
+判断：
+1. 如果本轮与知识库内容无关（纯闲聊、问能力、天气等）——留空 <entry> 块。
+2. 否则，填写 <entry>：
 
-You read ONE finished turn between the user and the Marginalia agent
-(user message + agent's full response + tool_calls + llm_calls), plus
-the current metadata of file_entries the agent touched. You write a
-faithful, compressed record of THIS turn — a "field log entry" the
-future planner can recall when a similar question comes back.
+   - question: 用户的问题，用自己的措辞，尽量简洁但保留完整含义。
+   - answer: 调查的实际结论。去掉问候、格式、重复问题——只保留发现、关键名字、数字。
+     如果 agent 说"未找到"，直接写"未找到"——空结果本身值得记录。
+   - entry_ids: agent 实际引用或读取过的、与结论相关的 entry_id。跳过看过但放弃的。
+   - tags: 主题标签，方便日后回忆。
 
-For each turn, decide:
+与知识库相关的回合总要写一条，哪怕结论是"没找到"。只有纯闲聊才留空。
 
-1. If the turn has NOTHING to do with the corpus — pure small talk,
-   weather, "what can you do", system meta — leave the <entry> block
-   empty. The framework will skip the write.
-
-2. Otherwise, fill the <entry> block with these fields:
-
-   - question: the user's question in their own framing, as concise as
-     possible while still being a real question (not a topic label).
-     Length follows content — short for simple lookups, longer when the
-     ask was multi-part.
-   - answer:   what the investigation actually concluded. Strip the
-     prose layer — greetings, formatting, restating the question — and
-     keep only epistemic content: findings, key names, numbers,
-     meaningful turns of the investigation. Be as concise as possible
-     while preserving every distinct finding; length follows content,
-     do not pad. If the agent said "I don't know" or "no match", say
-     so plainly — that null result is itself worth recalling.
-   - entry_ids: every file_entry the agent read or cited in this turn
-     that was actually relevant to the answer. Skip entries the agent
-     looked at but discarded.
-   - tags: topical tags useful for later recall. Subject of the
-     question, not housekeeping tags.
-
-A turn touching the corpus ALWAYS produces one entry, even if the
-answer was "nothing found" — that null result is itself worth recalling.
-Only leave the block empty for turns that never engaged the corpus.
-
-Output format — exactly one block:
+输出格式——恰好一个块：
 
   <entry>
-  question: one-line question
-  answer: free-form text; may span multiple lines
+  question: 一行问题
+  answer: 自由文本；可多行
   entry_ids: id1, id2
   tags: tag1, tag2
   </entry>
 
-Each field starts with its label on its own line. The `answer:` field
-may run across multiple lines; the next labeled field (`entry_ids:`,
-`tags:`) ends it. Leave the entire block EMPTY (or omit field values)
-to skip the write. Do NOT wrap in JSON or add ``` fences.
-"""
-
-
-# Schema kept for legacy callers but no longer fed to the LLM.
-REFLECT_SCHEMA: dict[str, Any] = {}
+`answer:` 可跨行，下一个标签字段 `entry_ids:` 或 `tags:` 结束它。
+留空整个块（或省略字段值）以跳过写入。不要用 JSON 或 ``` 围栏。"""
 
 
 def _utcnow() -> datetime:
@@ -148,33 +135,60 @@ async def handle_reflect_turn(payload: Mapping[str, Any]) -> None:
             )
 
         involved_entry_ids = _collect_involved_entry_ids(conversation)
-        entry_metadata = await _fetch_entry_metadata(session, involved_entry_ids)
+
+        # Build the stable snapshot using the session's started_at (same
+        # frozen journal slice as execute phase → prefix matches).
+        session_row = await session.get(SessionRow, conversation.session_id)
+        if session_row is None:
+            raise ValueError(f"session {conversation.session_id!r} not found")
+        snapshot = await build_stable_snapshot(
+            session, session_started_at=session_row.started_at,
+        )
         await session.commit()
 
-    payload_for_llm = {
-        "conversation": {
-            "user_message": conversation.user_message,
-            "agent_response": conversation.agent_response,
-            "tool_calls": conversation.tool_calls or [],
-            "llm_calls": conversation.llm_calls or [],
-        },
-        "involved_entries": entry_metadata,
-    }
-    user_text = (
-        "Below is one finished turn along with the current metadata of "
-        "the file_entries the agent touched. Produce a structured field-"
-        "log entry (question + answer + entry_ids + tags) for the journal, "
-        "or skip if the turn never engaged the corpus.\n\n"
-        f"<conversation_and_context>\n"
-        f"{json.dumps(payload_for_llm, ensure_ascii=False)}\n"
-        "</conversation_and_context>"
+    # --- Build messages: reuse execute-phase prefix for cache hit ---
+    system_prompt = render_system_prompt(snapshot, phase="execute")
+    resumed = await build_resumed_messages(
+        conversation.session_id,
+        current_conversation_id=conversation_id,
     )
+
+    # Instead of replaying the current turn's full tool_calls (which
+    # would add ~10k tokens of results the reflect model doesn't need
+    # and wouldn't be in the cached prefix anyway), send a compact
+    # summary of what happened in this turn. The cached prefix
+    # (system_prompt + resumed_history) is byte-for-byte identical to
+    # what the execute phase already sent → DeepSeek / OpenAI prefix
+    # cache should hit on that portion.
+    tool_names = [
+        str(tc.get("name") or "tool")
+        for tc in (conversation.tool_calls or [])
+        if isinstance(tc, dict)
+    ]
+    tool_summary = ", ".join(tool_names) if tool_names else "(无工具调用)"
+    reflect_tail = (
+        f"本轮对话概要：\n"
+        f"- 用户提问：{conversation.user_message}\n"
+        f"- 工具调用：{tool_summary}\n"
+        f"- Agent 回答：{(conversation.agent_response or '(无回答)')[:500]}\n\n"
+    )
+    if involved_entry_ids:
+        reflect_tail += (
+            f"本轮涉及的 entry_id："
+            + ", ".join(involved_entry_ids)
+            + "\n\n"
+        )
+    reflect_tail += REFLECT_INSTRUCTIONS
+
+    reflect_messages = list(resumed) + [
+        ChatMessage(role="user", content=reflect_tail),
+    ]
 
     client = get_chat_client("reflect")
     resp = await client.complete(ChatRequest(
-        system=REFLECT_SYSTEM,
-        messages=[ChatMessage(role="user", content=[TextBlock(text=user_text)])],
-        max_tokens=2048,
+        system=system_prompt,
+        messages=reflect_messages,
+        max_tokens=1024,
         temperature=0.3,
     ))
     tagged = parse_tagged(resp.text or "")
@@ -243,7 +257,7 @@ def _collect_involved_entry_ids(conv: Conversation) -> list[str]:
 
     Convention: tool_calls is a JSON array of `{name, arguments, result, ...}`
     where `arguments` and `result` are dicts. Any string value at any depth
-    that looks like a uuid7 we accept as a candidate (cheap; the metadata
+    that looks like a UUID we accept as a candidate (cheap; the metadata
     fetch will quietly drop unknowns).
     """
     seen: list[str] = []
@@ -272,28 +286,6 @@ def _walk_strings(obj: Any):
 
 def _looks_like_id(s: str) -> bool:
     return len(s) == 36 and s.count("-") == 4
-
-
-async def _fetch_entry_metadata(session, entry_ids: list[str]) -> list[dict[str, Any]]:
-    if not entry_ids:
-        return []
-    rows = await entries_repo.list_by_ids_any(session, entry_ids)
-    out: list[dict[str, Any]] = []
-    for e in rows:
-        file_row = await session.get(File, e.file_id)
-        tag_rows = await entry_tags_repo.list_name_facet_for_entry(session, e.id)
-        out.append({
-            "entry_id": e.id,
-            "display_name": e.display_name,
-            "lifecycle": e.lifecycle,
-            "extra": e.extra,
-            "file": {
-                "kind": file_row.kind if file_row else None,
-                "summary": file_row.summary if file_row else None,
-            },
-            "tags": [{"name": n, "facet": f} for n, f in tag_rows],
-        })
-    return out
 
 
 async def _persist_reflection(

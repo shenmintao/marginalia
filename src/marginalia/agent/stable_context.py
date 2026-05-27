@@ -40,6 +40,10 @@ from typing import Any, Literal
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from marginalia.db.session import session_scope
+from marginalia.llm.types import ChatMessage, ToolResultBlock, ToolUseBlock
+from marginalia.repositories import sessions as session_service
+
 from marginalia.repositories import catalogs as catalogs_repo
 from marginalia.repositories import journal as journal_repo
 from marginalia.repositories import tags as tags_repo
@@ -62,12 +66,20 @@ EXECUTE_PHASE_PROMPT = """你是 Marginalia 的在线调查员（🔍 Investigat
     `[^a]: entry_id=<id>, lines=<start>-<end> - <为什么引用这段>`
   `lines=<start>-<end>`（或 `page=<n>`、`member=<path>`）是**位置定位符**，
   让 GUI 能从引用直接跳到原文位置。
-  - 如果是文本/markdown 文件，写 `lines=<start>-<end>`（取自你刚刚 `read_segment`
-    时用的 `start_line`/`end_line` 参数；引用单行写 `lines=42` 即可）。
-  - 如果是 PDF，写 `page=<n>`。
+  - 如果是文本/markdown 文件，写 `lines=<start>-<end>`（取自你刚刚 `read_files`
+    时传给 `reads[i]` 的 `line_start`/`line_end` 参数；引用单行写 `lines=42` 即可）。
+    **`lines=` 只接受数字，不接受合同条款号、章节标题等描述性文字。** 描述性信息（如
+    "合同第4.6条"）写在 `-` 后面的 reason 里，不要放在 `lines=` 字段。
+  - 如果是 PDF，写 `page=<n>`（对应 `page_start`/`page_end`）。
+    同理，**`page=` 只接受数字**。描述性信息放 reason 里。
   - 如果都不知道（罕见），可以省略；GUI 会退化成"打开文件不跳位置"。
   - 旧的 `section_id=<sid>` 写法仍然兼容（向后），但优先使用 `lines=`/`page=`。
   reason 必填，一句话说明这段证据支撑了什么结论。没有 reason 等于没引用。
+
+  正确示例：
+    `[^a]: entry_id=abc123, lines=10-30 - 合同第4.6条规定年终奖以书面决定为准`
+  错误示例：
+    `[^a]: entry_id=abc123, lines=合同第4.6条 - 年终奖以书面决定为准`  ← `lines=` 不能写描述文字
 - **同一个 entry 的不同段落必须拆成独立的角标**——如果你要引用某文件里
   第 10-30 行 *和* 第 80-100 行两段不同内容，写成两条独立的 footnote：
     `[^a]: entry_id=<id>, lines=10-30 - <第一段支撑的结论>`
@@ -77,10 +89,12 @@ EXECUTE_PHASE_PROMPT = """你是 Marginalia 的在线调查员（🔍 Investigat
   80-100 行还讲了 Y` 这种把多段塞到一条 footnote 里——GUI 只能跳到第一段，
   其它段落用户就找不到了。
 - **`entry_id` 的合法来源只有一个**：你在本轮里通过 `search_journal`、
-  `list_files_in_folder`、`read_entry` 等工具调用真实拿到过的 catalog entry
+  `list_folders`、`read_entry` 等工具调用真实拿到过的 catalog entry
   id。**绝不能**把系统快照（`# 当前知识库快照` 那一段 JSON）里的任何字段
   当成 entry_id 来引用——快照里只有 catalog/views/tags/journal 的概览，
-  里面没有可以拿来当 entry_id 的字段。
+  里面没有可以拿来当 entry_id 的字段。完整 36 字符 uuid 和 8 字符以上的十六进制
+  前缀都接受（前缀只要在当前库内唯一），二选一即可；但 id 本身必须来自真实
+  工具结果，不能凭空编造前缀。
 - **「0 工具 = 0 角标」硬规则**：如果本轮一次工具都没调，最终回答里
   **任何形式的 `[^a]` `[^b]` 角标和对应脚注一律禁止出现**——包括没有
   `entry_id=` 的、写"journal 里多条记录"的、写"过往同类提问"的、写
@@ -112,7 +126,7 @@ EXECUTE_PHASE_PROMPT = """你是 Marginalia 的在线调查员（🔍 Investigat
 
 工具使用规则：
 - 接到一个新问题，先 search_journal 看自己之前是否走过类似路径。
-- 然后用 list_folders / list_files_in_folder 浏览结构，对感兴趣的 entry
+- 然后用 list_folders 浏览结构，对感兴趣的 entry
   通过更深的工具读取。
 - 工具调用是有预算的，每轮末尾框架会注入预算 tail，按节制调用。
 
@@ -170,8 +184,10 @@ catalog/views/tags 列表只是索引概览，不是数据本身——回答"知
 # 工具规划的常见路径（仅供参考）
 
 - 查"以前是不是查过类似的" → `search_journal`
-- 浏览结构 → `list_folders` / `list_files_in_folder`
-- 按主题/标签筛选 → `search_metadata`（参数 text、tags_all、kind 等）
+- 按文件名/摘要关键字找文件 → `search_metadata(text=...)`（已覆盖 display_name/summary/extra）
+- 知道文件夹路径 → `list_folders(path='Papers/2024')` 一次拿到该层 folders+entries
+- 浏览根目录 → `list_folders()`（不带参数）
+- 按 tag/catalog/lifecycle 等结构化条件筛选 → `search_metadata`（参数 text、tags_all、kind 等）
 - 看 catalog 收录什么 → `list_catalogs` / `read_catalog`
 - 取条目元数据 → `read_entries_metadata`
 - 读条目正文 → `read_files`
@@ -180,7 +196,7 @@ catalog/views/tags 列表只是索引概览，不是数据本身——回答"知
 # 合格示例
 
     1. 用 search_journal 查 "DoS" 关键词，看是否有过往调查路径。
-    2. 用 list_files_in_folder 列 Papers/ 看实际条目数量与名称。
+    2. 用 list_folders(path='Papers') 列 Papers/ 看实际条目数量与名称。
     3. 用 search_metadata 配合 tags_all 过滤含 Denial-of-service 标签的条目。
     4. 在 execute 阶段汇总 entry_id 后用 read_entries_metadata 读元数据并答复。
 
@@ -289,3 +305,87 @@ def render_system_prompt(
         + json.dumps(snapshot, ensure_ascii=False, indent=2)
         + "\n```\n"
     )
+
+
+RESUME_BOUNDARY_NOTE = (
+    "（以上为本会话之前已完成的回合回放；接下来的 user 消息是新一轮真实输入，"
+    "请基于完整对话上下文继续调查与作答。）"
+)
+
+# Cap for tool result text when replaying history — prevents a single
+# massive result from blowing out the resumed prefix.
+RESUME_MAX_TOOL_RESULT_LEN = 50_000
+
+
+async def build_resumed_messages(
+    session_id: str, *, current_conversation_id: str,
+) -> list[ChatMessage]:
+    """Reconstruct the LLM's prior conversation history for an open session.
+
+    Replays every prior turn — user message, every tool_call/tool_result
+    pair, and the final agent_response — so the executor sees the same
+    context it would have during the original turns. Synthesizes fresh
+    `tool_use_id`s per resumed turn (`tu_resume_<turn>_<idx>`); the model
+    only needs ToolUse↔ToolResult ids to be self-consistent within one
+    request, not stable across turns.
+
+    Closes with a Chinese boundary note (system-note in user-role since
+    the top-level `system` field is already pinned) so the model can
+    distinguish replayed history from the live new turn.
+
+    Shared between the execute phase and reflect_turn handler so both
+    use the same prefix — enabling prompt-cache hits across the two
+    LLM profiles when they share the same provider/model.
+    """
+    async with session_scope() as db:
+        rows = await session_service.list_for_session_ordered(db, session_id)
+
+    history: list[ChatMessage] = []
+    for conv in rows:
+        if conv.id == current_conversation_id:
+            continue
+        if not conv.user_message:
+            continue
+        history.append(ChatMessage(role="user", content=conv.user_message))
+
+        tool_calls = [tc for tc in (conv.tool_calls or []) if isinstance(tc, dict)]
+        if tool_calls:
+            assistant_blocks: list = []
+            tool_blocks: list[ToolResultBlock] = []
+            for idx, tc in enumerate(tool_calls):
+                tu_id = f"tu_resume_{conv.turn_index}_{idx}"
+                assistant_blocks.append(ToolUseBlock(
+                    id=tu_id,
+                    name=str(tc.get("name") or "tool"),
+                    arguments=dict(tc.get("arguments") or {}),
+                ))
+                result = tc.get("result")
+                err = tc.get("error")
+                if err:
+                    body = f"[error] {err}"
+                    is_error = True
+                elif isinstance(result, dict):
+                    try:
+                        body = json.dumps(result, ensure_ascii=False)
+                    except (TypeError, ValueError):
+                        body = str(result)
+                    is_error = False
+                else:
+                    body = str(result) if result is not None else ""
+                    is_error = False
+                if len(body) > RESUME_MAX_TOOL_RESULT_LEN:
+                    body = body[:RESUME_MAX_TOOL_RESULT_LEN] + "\n…[truncated on resume]"
+                tool_blocks.append(ToolResultBlock(
+                    tool_call_id=tu_id, content=body, is_error=is_error,
+                ))
+            history.append(ChatMessage(role="assistant", content=assistant_blocks))
+            history.append(ChatMessage(role="user", content=tool_blocks))
+
+        if conv.agent_response:
+            history.append(ChatMessage(
+                role="assistant", content=conv.agent_response,
+            ))
+
+    if history:
+        history.append(ChatMessage(role="user", content=RESUME_BOUNDARY_NOTE))
+    return history

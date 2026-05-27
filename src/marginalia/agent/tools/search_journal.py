@@ -48,9 +48,9 @@ SCHEMA: dict[str, Any] = {
             "type": "array",
             "items": {"type": "string", "enum": ["insight", "reflect_turn"]},
             "description": (
-                "Which journal tiers to search. Default ['insight']: "
-                "durable cross-session memory. Pass ['reflect_turn'] with "
-                "conversation_id to read one session's per-turn bullets."
+                "Which journal tiers to search. Default "
+                "['insight', 'reflect_turn']: both durable "
+                "cross-session memory and per-turn bullets."
             ),
         },
         "conversation_id": {
@@ -91,8 +91,8 @@ SCHEMA: dict[str, Any] = {
     description=(
         "Skim your investigator's notebook for past insights. Always your "
         "first move on a fresh user message — before reading any file. "
-        "Defaults to durable cross-session insights; pass kinds=['reflect_turn'] "
-        "+ conversation_id for one session's per-turn bullets."
+        "Searches both durable cross-session insights and per-turn "
+        "reflect_turn notes by default."
     ),
     schema=SCHEMA,
 )
@@ -104,7 +104,7 @@ async def search_journal(
     text_q = args.get("text")
     entry_id = args.get("entry_id")
     tags = args.get("tags") or []
-    kinds = list(args.get("kinds") or ["insight"])
+    kinds = list(args.get("kinds") or ["insight", "reflect_turn"])
     conversation_id = args.get("conversation_id")
     include_superseded = bool(args.get("include_superseded") or False)
     since_days = int(args.get("since_days") or 90)
