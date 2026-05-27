@@ -52,12 +52,21 @@ export function ChatPage() {
     scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
   }, [turns]);
 
-  // Restore the conversation when ChatPage remounts with a sessionId
-  // already pinned in the store (e.g. user clicked an `entry:` citation,
-  // landed on /library, then navigated back). turns aren't persisted —
-  // they're refetched from the server, which is the source of truth.
+  // Mount-only: restore the conversation when ChatPage remounts with a
+  // sessionId already pinned in the store (user clicked an `entry:`
+  // citation, landed on /library, then navigated back). turns aren't
+  // persisted — they're refetched from the server, which is the source
+  // of truth.
+  //
+  // Why mount-only and not `[sessionId]`: send() opens a fresh session
+  // by calling setSessionId(newId) before setTurns(optimisticTurn).
+  // With [sessionId] deps, this effect fires the moment sessionId flips
+  // truthy and the optimistic turn hasn't flushed yet — fetching the new
+  // session's transcript (empty) and overwriting the just-appended turn
+  // with []. The other paths that change sessionId (send, loadSession,
+  // newChat) manage `turns` directly, so they don't need this effect.
   useEffect(() => {
-    if (!sessionId || turns.length > 0) return;
+    if (!sessionId) return;
     let cancelled = false;
     setLoading(true);
     sessions.messages(sessionId)
@@ -68,10 +77,8 @@ export function ChatPage() {
       })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-    // sessionId is the trigger; turns.length is checked once on entry to
-    // avoid clobbering a freshly-streamed turn list.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId]);
+  }, []);
 
   const send = useCallback(async () => {
     const q = input.trim();
