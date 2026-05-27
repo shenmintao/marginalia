@@ -21,6 +21,9 @@ build/
 
 conversation-*.zip
 
+# Per-developer Claude Code permissions/state — should not be committed.
+.claude/settings.local.json
+
 # E2E test working directories — populated by tests/test_*_e2e.py
 # at runtime; should never be committed.
 tests/_*_e2e_data/
