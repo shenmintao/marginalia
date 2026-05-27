@@ -105,6 +105,28 @@ async def mark_dead(
     )
 
 
+async def mark_pending_dead_by_kinds(
+    db: AsyncSession, *, kinds: Sequence[str], now: datetime, error: str,
+) -> int:
+    """Mark every pending task whose kind is in `kinds` as dead in one
+    UPDATE. Returns the number of rows affected.
+
+    Used at runner startup to clear the queue of LLM-dependent tasks
+    when no api_key is configured, so a freshly-installed instance
+    doesn't pile up failures from rows queued by an earlier version
+    that didn't have the bootstrap guard."""
+    if not kinds:
+        return 0
+    result = await db.execute(
+        update(Task)
+        .where(Task.status == "pending", Task.kind.in_(list(kinds)))
+        .values(_release_values(
+            status="dead", finished_at=now, last_error=error,
+        ))
+    )
+    return int(result.rowcount or 0)
+
+
 async def reschedule_for_retry(
     db: AsyncSession,
     *,

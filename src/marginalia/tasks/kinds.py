@@ -118,3 +118,25 @@ PERIODIC_INTERVALS: Mapping[str, timedelta] = {
     KIND_REFRESH_ENTRY_EXTRA: timedelta(days=7),
     KIND_PRUNE: timedelta(days=1),
 }
+
+
+# Kinds whose handler will hit an LLM endpoint on its first step. The
+# runner consults this set so it can fail-fast (with a clear message)
+# instead of letting handlers crash with `OpenAIError: Missing
+# credentials` when no api_key is configured.
+#
+# Update when adding/removing a handler that calls get_chat_client /
+# get_completion_client. Handlers not in this set must be safe to run
+# without any LLM credentials at all.
+LLM_DEPENDENT_KINDS: frozenset[str] = frozenset({
+    KIND_INGEST_FILE,
+    KIND_REFLECT_TURN,
+    KIND_SUMMARIZE_SESSION,
+    KIND_TAG_QUALITY,
+    KIND_RESTRUCTURE_CATALOGS,
+    KIND_VET_RELATIONS,
+    KIND_PROPOSE_VIEWS,
+    KIND_REFRESH_ENTRY_EXTRA,
+    # mine_relations dispatches mine_corpus_evidence which calls LLM.
+    KIND_MINE_RELATIONS,
+})

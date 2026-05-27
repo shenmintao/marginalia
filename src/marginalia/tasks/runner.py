@@ -7,17 +7,23 @@ import socket
 import time
 from datetime import datetime, timedelta, timezone
 
-from marginalia.config import Settings, get_settings
+from marginalia.config import LlmConfigError, Settings, get_settings, validate_llm_config
 from marginalia.db.session import session_scope
 from marginalia.repositories import tasks as tasks_repo
 from marginalia.repositories import task_outcomes as outcomes_repo
 from marginalia.tasks import handlers as _handlers_pkg  # noqa: F401  (register)
-from marginalia.tasks.kinds import get_handler
+from marginalia.tasks.kinds import LLM_DEPENDENT_KINDS, get_handler
 from marginalia.tasks.usage import (
     bind_accumulator, unbind_accumulator, UsageCounters,
 )
 
 log = logging.getLogger(__name__)
+
+
+_NO_LLM_KEY_ERROR = (
+    "skipped: no LLM api_key configured. "
+    "Set LLM_DEFAULT_API_KEY in .env or in Settings → LLM Profile, then restart."
+)
 
 
 def _now() -> datetime:
@@ -42,10 +48,42 @@ class TaskRunner:
     async def start(self) -> None:
         if self._loop_task is not None:
             return
+        await self._sweep_llm_dependent_if_no_key()
         from marginalia.tasks.handlers.periodic_tick import bootstrap_periodic_tick
         await bootstrap_periodic_tick()
         self._stop.clear()
         self._loop_task = asyncio.create_task(self._run(), name="marginalia.task_runner")
+
+    def _has_llm_key(self) -> bool:
+        try:
+            validate_llm_config(self.settings)
+        except LlmConfigError:
+            return False
+        return True
+
+    async def _sweep_llm_dependent_if_no_key(self) -> None:
+        """At startup, if no api_key is configured, mark all pending
+        LLM-dependent tasks dead. Otherwise the runner picks them up
+        within seconds and they fail one by one with OpenAIError noise.
+
+        Runs once per start(). The user's path back is: set a key,
+        restart the app — bootstrap_periodic_tick will then re-enqueue
+        the periodic kinds normally on the next startup."""
+        if self._has_llm_key():
+            return
+        async with session_scope() as session:
+            n = await tasks_repo.mark_pending_dead_by_kinds(
+                session,
+                kinds=sorted(LLM_DEPENDENT_KINDS),
+                now=_now(),
+                error=_NO_LLM_KEY_ERROR,
+            )
+            await session.commit()
+        if n:
+            log.warning(
+                "marked %d pending LLM-dependent task(s) dead: no api_key configured",
+                n,
+            )
 
     async def stop(self) -> None:
         self._stop.set()
@@ -112,6 +150,15 @@ class TaskRunner:
 
         if handler is None:
             await self._fail(task_id, attempts, max_attempts, f"no handler registered for {kind!r}")
+            return
+
+        # Guard: if this kind needs LLM and no key is configured, mark
+        # dead immediately with a clean message instead of letting the
+        # handler crash with `OpenAIError: Missing credentials`. Catches
+        # rows queued before bootstrap was guarded, plus anything
+        # enqueued by future code paths that forget to check first.
+        if kind in LLM_DEPENDENT_KINDS and not self._has_llm_key():
+            await self._fail(task_id, max_attempts, max_attempts, _NO_LLM_KEY_ERROR)
             return
 
         token = bind_accumulator()
