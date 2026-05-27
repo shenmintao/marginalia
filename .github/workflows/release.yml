@@ -1,14 +1,18 @@
 name: Release
 
-# Triggers on tags matching v*.*.* (e.g. v0.1.0). What it produces:
+# Triggers on tags matching v*.*.* (e.g. v0.2.0). What it produces:
 #   - Tauri desktop bundles for Windows / macOS / Linux, attached to a
-#     GitHub Release.
-#   - A multi-arch Docker image pushed to ghcr.io/<owner>/marginalia
-#     tagged with the version and `latest`.
+#     GitHub Release. Each runner first prepares a self-contained
+#     python-build-standalone runtime under
+#     desktop/src-tauri/resources/backend/ via scripts/prepare-backend.mjs,
+#     so the shipped bundles do NOT depend on a system Python.
+#   - A portable .zip on Windows in addition to the NSIS installer.
+#   - A multi-arch (currently amd64 only) Docker image pushed to
+#     ghcr.io/<owner>/marginalia tagged with the version and `latest`.
 #
 # Tag-driven releases keep the version in tauri.conf.json + pyproject.toml
 # in lockstep with the binary names. To cut a release:
-#   git tag v0.1.0 && git push origin v0.1.0
+#   git tag v0.2.0 && git push origin v0.2.0
 #
 # A `workflow_dispatch` is also wired so we can re-run a release without
 # moving a tag if a runner had a transient failure.
@@ -19,7 +23,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing tag to release (e.g. v0.1.0)"
+        description: "Existing tag to release (e.g. v0.2.0)"
         required: true
 
 permissions:
@@ -37,8 +41,11 @@ jobs:
           - target: windows
             runner: windows-latest
             artifact_glob: |
-              desktop/src-tauri/target/release/bundle/msi/*.msi
               desktop/src-tauri/target/release/bundle/nsis/*.exe
+              desktop/src-tauri/target/release/bundle/nsis/*portable*.zip
+          # Apple Silicon only — we don't have an Apple Developer account,
+          # so x86_64 dmg signing is moot, and Apple Silicon Macs are the
+          # overwhelming share of new macOS hardware.
           - target: macos
             runner: macos-latest
             artifact_glob: |
@@ -61,6 +68,13 @@ jobs:
           cache: npm
           cache-dependency-path: desktop/package-lock.json
 
+      # The pip install . step inside prepare-backend.mjs needs a host
+      # Python to bootstrap; the standalone interpreter only takes over
+      # afterwards. Any 3.11+ works.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
@@ -81,10 +95,19 @@ jobs:
         working-directory: desktop
         run: npm ci
 
+      # Download python-build-standalone, pip-install marginalia into it,
+      # and stage the result at desktop/src-tauri/resources/backend/.
+      # tauri.conf.json's bundle.resources picks that directory up.
+      - name: Prepare backend sidecar
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/prepare-backend.mjs
+
       # tauri-action drives `tauri build`, picks the right bundle targets
       # for the host OS, and uploads artifacts to a draft release. We let
-      # it create / amend the draft so all three matrix legs converge on
-      # one Release page.
+      # it create / amend the draft so all matrix legs converge on one
+      # Release page. tauri.conf.json's beforeBuildCommand runs the
+      # frontend build; the sidecar resource is already on disk by now.
       - name: Build & upload bundles
         uses: tauri-apps/tauri-action@v0
         env:
@@ -95,9 +118,31 @@ jobs:
           releaseName: "Marginalia ${{ github.event.inputs.tag || github.ref_name }}"
           releaseBody: |
             Desktop bundles built from `${{ github.event.inputs.tag || github.ref_name }}`.
+            Each bundle ships a self-contained Python runtime — no system Python required.
             Docker image: `ghcr.io/${{ github.repository_owner }}/marginalia:${{ github.event.inputs.tag || github.ref_name }}`
+
+            **First-launch notes for unsigned binaries:**
+            - Windows: SmartScreen will say "Windows protected your PC". Click "More info" → "Run anyway".
+            - macOS: Gatekeeper will refuse to open the .dmg. Run `xattr -dr com.apple.quarantine /Applications/Marginalia.app` after dragging it across.
+            - Linux AppImage: `chmod +x Marginalia*.AppImage` first.
           releaseDraft: true
           prerelease: false
+
+      # Build the portable .zip after the NSIS installer is on disk so
+      # we can reuse the same target/release/ tree NSIS was assembled
+      # from. The zip lands inside bundle/nsis/ to match the glob above.
+      - name: Package Windows portable zip
+        if: matrix.target == 'windows'
+        run: node scripts/package-windows-portable.mjs
+
+      - name: Upload Windows portable zip
+        if: matrix.target == 'windows'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          draft: true
+          fail_on_unmatched_files: true
+          files: desktop/src-tauri/target/release/bundle/nsis/*portable*.zip
 
   # ---- 2. Docker image to ghcr.io --------------------------------------------
   docker:
