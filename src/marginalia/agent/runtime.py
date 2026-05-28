@@ -8,7 +8,8 @@ for SSE streaming. One `run_turn(session_id, user_message)` invocation:
      yield "plan" with full plan_text. Stored in conversations.llm_calls
      under phase='plan'. If plan_text starts with `NO_PLAN:` the trailing
      answer is treated as the final answer and execute is skipped.
-  3. Execute phase: up to MAX_EXECUTE_TURNS = 15 LLM calls. For each:
+  3. Execute phase: up to `settings.agent_execute_max_turns` (default 15)
+     LLM calls. For each:
          - yield "thinking", LLM call (records usage)
          - if model returned tool_calls: yield "tool_call" per call,
            dispatch (with dedup + doom-loop guards), yield "tool_result",
@@ -17,8 +18,8 @@ for SSE streaming. One `run_turn(session_id, user_message)` invocation:
            yield "answer" with final text
          - if final text hits stop_reason='max_tokens', continue the answer
            server-side and emit one merged "answer" event.
-     Starting at turn 11 (>= EXECUTE_NUDGE_FROM), append wrap-up tail.
-  4. Truncation: if MAX_EXECUTE_TURNS hit, yield "answer" with fallback
+     Once the run enters the last 1/3 of the budget, append wrap-up tail.
+  4. Truncation: if the turn budget is hit, yield "answer" with fallback
      text and mark truncated=True.
   5. Finalize: write agent_response, ended_at; enqueue reflect_turn task
      (priority 30); record task_outcome; yield "done" with usage JSON.
@@ -90,8 +91,6 @@ from marginalia.agent import tool_display
 
 log = logging.getLogger(__name__)
 
-MAX_EXECUTE_TURNS = 15
-EXECUTE_NUDGE_FROM = 11
 MAX_TOOL_RESULT_LEN = 50_000
 # Structured-truncation safety net: how many trim passes before falling
 # back to string slicing. Practically each pass halves one large list, so
@@ -857,9 +856,10 @@ async def _run_execute_phase(
     ]
 
     settings = get_settings()
+    max_execute_turns = max(3, settings.agent_execute_max_turns)
     max_final_continuations = max(0, settings.agent_final_answer_continue_turns)
     max_final_chars = max(0, settings.agent_final_answer_max_chars)
-    max_total_turns = MAX_EXECUTE_TURNS + max_final_continuations
+    max_total_turns = max_execute_turns + max_final_continuations
 
     last_text: str | None = None
     final_parts: list[str] = []
@@ -867,10 +867,14 @@ async def _run_execute_phase(
     continuing_final_answer = False
 
     for turn in range(max_total_turns):
-        if turn >= MAX_EXECUTE_TURNS and not continuing_final_answer:
+        if turn >= max_execute_turns and not continuing_final_answer:
             break
 
-        budget_tail = None if continuing_final_answer else _budget_tail(turn=turn)
+        budget_tail = (
+            None
+            if continuing_final_answer
+            else _budget_tail(turn=turn, limit=max_execute_turns)
+        )
         loop_messages = messages + [
             ChatMessage(role="user", content=budget_tail)
         ] if budget_tail else messages
@@ -1038,8 +1042,8 @@ async def _run_execute_phase(
             continuing_final_answer = True
             continue
 
-    log.warning("conversation %s hit MAX_EXECUTE_TURNS=%d", conversation_id,
-                MAX_EXECUTE_TURNS)
+    log.warning("conversation %s hit agent_execute_max_turns=%d", conversation_id,
+                max_execute_turns)
     fallback = _strip_leaked_no_plan(
         last_text
         or "This investigation exceeded the turn budget before a complete answer was produced. Please narrow the question or try another angle."
@@ -1052,19 +1056,23 @@ async def _run_execute_phase(
     )
 
 
-def _budget_tail(*, turn: int) -> str | None:
+def _budget_tail(*, turn: int, limit: int) -> str | None:
     """Return the budget tail message for execute turn `turn` (0-indexed).
 
-    Always show 'rounds used / left'. From EXECUTE_NUDGE_FROM onwards add a
-    wrap-up nudge so the agent stops gathering and writes the answer.
+    Always show 'rounds used / left'. Once the run enters the last third of
+    `limit`, append a wrap-up nudge so the agent stops gathering and writes
+    the answer.
     """
     used = turn  # turns already consumed before this call
-    left = MAX_EXECUTE_TURNS - used
+    left = limit - used
     base = (
-        f"[turn tail] tool rounds used {used} / limit {MAX_EXECUTE_TURNS} "
+        f"[turn tail] tool rounds used {used} / limit {limit} "
         f"(remaining {left})."
     )
-    if used + 1 >= EXECUTE_NUDGE_FROM:
+    # Nudge once we enter the last third of the budget. For limit=15 this
+    # fires from turn 10 onwards (matching the original constant).
+    nudge_from = (2 * limit) // 3 + 1
+    if used + 1 >= nudge_from:
         base += (
             " You are close to the budget limit. Unless one or two key pieces "
             "of evidence are missing, give the final answer from the material "

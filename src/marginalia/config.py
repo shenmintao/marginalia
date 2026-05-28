@@ -108,6 +108,7 @@ class Settings(BaseSettings):
     # runtime.py can continue instead of returning a half-finished answer.
     agent_plan_max_tokens: int = 1024
     agent_execute_max_tokens: int = 2048
+    agent_execute_max_turns: int = 15
     agent_final_answer_continue_turns: int = 3
     agent_final_answer_max_chars: int = 120_000
 

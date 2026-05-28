@@ -66,6 +66,7 @@ def server_settings() -> dict[str, Any]:
         "default_on_conflict": s.default_on_conflict,
         "agent_plan_max_tokens": s.agent_plan_max_tokens,
         "agent_execute_max_tokens": s.agent_execute_max_tokens,
+        "agent_execute_max_turns": s.agent_execute_max_turns,
         "agent_final_answer_continue_turns": s.agent_final_answer_continue_turns,
         "agent_final_answer_max_chars": s.agent_final_answer_max_chars,
         "llm_ingest_concurrency": s.llm_ingest_concurrency,

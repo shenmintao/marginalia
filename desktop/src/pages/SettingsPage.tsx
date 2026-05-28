@@ -32,6 +32,7 @@ interface ServerCtx {
     field:
       | "agent_plan_max_tokens"
       | "agent_execute_max_tokens"
+      | "agent_execute_max_turns"
       | "worker_batch_size"
       | "llm_ingest_concurrency",
     v: number,
@@ -95,6 +96,7 @@ function useServerCtx(): ServerCtx {
     field:
       | "agent_plan_max_tokens"
       | "agent_execute_max_tokens"
+      | "agent_execute_max_turns"
       | "worker_batch_size"
       | "llm_ingest_concurrency",
     v: number,
@@ -237,6 +239,21 @@ function PreferencesSection({ ctx }: { ctx: ServerCtx }) {
         </Row>
 
         <Row
+          label="Agent execute turn budget"
+          hint="Max tool-using rounds per question. Higher = deeper investigations at the cost of more LLM calls. The agent gets a wrap-up nudge when the last 1/3 of the budget is reached."
+        >
+          <NumberInput
+            value={server?.agent_execute_max_turns}
+            disabled={!server}
+            min={3}
+            max={100}
+            step={1}
+            className="w-16"
+            onCommit={(v) => setServerNumber("agent_execute_max_turns", v)}
+          />
+        </Row>
+
+        <Row
           label="Concurrent ingest tasks"
           hint="Maximum background tasks the worker runs at once. Lower this when ingesting large scanned PDFs."
         >
@@ -335,6 +352,7 @@ function ServerSection({ ctx }: { ctx: ServerCtx }) {
             k="Agent token budget (plan/exec)"
             v={`${server.agent_plan_max_tokens.toLocaleString()} / ${server.agent_execute_max_tokens.toLocaleString()}`}
           />
+          <Kv k="Agent execute turns" v={String(server.agent_execute_max_turns)} />
           <Kv k="Ingest LLM concurrency" v={String(server.llm_ingest_concurrency)} />
           <Kv
             k="Vision profile"

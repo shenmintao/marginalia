@@ -328,13 +328,14 @@ async def main():
             assert closed["totals"]["llm_calls"] == 3
             assert closed["totals"]["tool_calls"] == 1
 
-    # ---- budget-tail: nudge appears at turn 10 (used+1 == 11) -------------
-    from marginalia.agent.runtime import _budget_tail, EXECUTE_NUDGE_FROM
-    early = _budget_tail(turn=0)  # used=0, used+1=1 < 11
-    late = _budget_tail(turn=10)  # used=10, used+1=11 >= 11
+    # ---- budget-tail: nudge appears once we enter the last 1/3 -----------
+    from marginalia.agent.runtime import _budget_tail
+    early = _budget_tail(turn=0, limit=15)   # used+1=1, well below nudge_from=11
+    late = _budget_tail(turn=10, limit=15)   # used+1=11 >= 11
     print("[7] tail at turn 0:", early[:60])
     print("[7] tail at turn 10:", late[:80])
     assert "tool rounds used 0" in early
+    assert "limit 15" in early
     assert "close to the budget limit" not in early
     assert "tool rounds used 10" in late
     assert "close to the budget limit" in late

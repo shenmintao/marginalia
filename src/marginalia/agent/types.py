@@ -24,7 +24,7 @@ class TurnResult:
     agent_response: str
     plan_text: str
     usage: TurnUsage
-    truncated: bool = False  # True when MAX_EXECUTE_TURNS hit
+    truncated: bool = False  # True when agent_execute_max_turns hit
 
 
 @dataclass(slots=True)

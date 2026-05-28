@@ -34,6 +34,7 @@ _ALLOWED_FIELDS: frozenset[str] = frozenset({
     "default_on_conflict",
     "agent_plan_max_tokens",
     "agent_execute_max_tokens",
+    "agent_execute_max_turns",
     "agent_final_answer_continue_turns",
     "agent_final_answer_max_chars",
     "llm_ingest_concurrency",
@@ -130,6 +131,7 @@ def validate_and_normalize(patch: dict[str, Any]) -> dict[str, Any]:
         if k in (
             "agent_plan_max_tokens",
             "agent_execute_max_tokens",
+            "agent_execute_max_turns",
             "agent_final_answer_continue_turns",
             "agent_final_answer_max_chars",
             "llm_ingest_concurrency",
@@ -141,7 +143,9 @@ def validate_and_normalize(patch: dict[str, Any]) -> dict[str, Any]:
                 bad.append(f"{k}: must be an integer")
                 continue
             lower = 0 if k == "agent_final_answer_continue_turns" else 1
-            if k in ("llm_ingest_concurrency", "worker_batch_size"):
+            if k == "agent_execute_max_turns":
+                lower, upper = 3, 100
+            elif k in ("llm_ingest_concurrency", "worker_batch_size"):
                 upper = 32
             else:
                 upper = 200000
