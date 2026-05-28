@@ -172,9 +172,9 @@ async def main():
         "section_id=s2 - because it covers election\n"
         "[^b]: entry_id=019e5493-fca4-7524-b8d0-3c36885b1242 - whole doc\n"
         "[^c]: entry_id=019e5493-fca4-7524-b8d0-3c36885b1243, "
-        "quote=\"first quote\" + \"ignored quote\" - quoted doc\n"
-        "[^d]: entry_id=019e5493-fca4-7524-b8d0-3c36885b1244\uff0c"
-        "page=54\uff08p.54\uff09 - annotated page\n"
+        "quote=\"first quote\" - quoted doc\n"
+        "[^d]: entry_id=019e5493-fca4-7524-b8d0-3c36885b1244, "
+        "page=54 - page doc\n"
     )
     cites = parse_citations(sample)
     assert len(cites) == 4
@@ -186,7 +186,15 @@ async def main():
     assert cites[2].quote == "first quote"
     assert cites[2].reason == "quoted doc"
     assert cites[3].page == "54"
-    assert cites[3].reason == "annotated page"
+    assert cites[3].reason == "page doc"
+    non_contract = (
+        "[^x]: entry_id=019e5493-fca4-7524-b8d0-3c36885b1245，page=7 - bad\n"
+        "[^y]: entry_id=019e5493-fca4-7524-b8d0-3c36885b1246, "
+        "quote=\"first\" + \"second\" - bad\n"
+        "[^z]: entry_id=019e5493-fca4-7524-b8d0-3c36885b1247, "
+        "page=54（p.54） - bad\n"
+    )
+    assert parse_citations(non_contract) == []
     print("[1] parse_citations OK")
 
     # ---- 2. setup + run export endpoint -------------------------------

@@ -10,9 +10,9 @@ builds a zip plan: the report itself, each cited entry's file (deduped by
 entry_id), each cited entry's user-facing metadata, and a manifest.
 
 Boundary (DESIGN.md §14.3):
-  - The exported `references/<name>.metadata.json` is the same shape as
-    GET /file-entries/{id}/metadata — i.e. user-visible fields plus the
-    librarian's summary, NEVER catalog_id / description / extra / tags.
+  - The exported `references/<name>.metadata.json` is a sanitized subset of
+    GET /file-entries/{id}/metadata — user-visible identity/file facts plus
+    the librarian's summary, NEVER catalog_id / description / extra / tags.
   - References to soft-deleted or missing entries are recorded in the
     manifest under `missing` rather than aborting the export.
 """
@@ -32,20 +32,35 @@ from marginalia.services.user_files import get_user_metadata
 _FOOTNOTE_RE = re.compile(
     r"\[\^([^\]]+)\]:\s*entry_id\s*=\s*`?"
     r"([0-9a-fA-F][0-9a-fA-F\-]{6,35})`?"
-    r"(?:\s*[,，]\s*(?:"
+    r"(?:\s*,\s*(?:"
     r'quote\s*=\s*"((?:[^"\\]|\\.)*)"'                  # group 3: quote
-    r'(?:\s*\+\s*"(?:[^"\\]|\\.)*")*'                   # extra quote segments: tolerated, ignored
     r"|page\s*=\s*`?([0-9]+(?:-[0-9]+)?)`?"             # group 4: page
-    r"|section_id\s*=\s*`?([^\s,，`\-]+)`?"              # group 5: legacy section_id
+    r"|section_id\s*=\s*`?([^\s,`\-]+)`?"               # group 5: legacy section_id
     r"|lines?\s*=\s*`?\S+`?"                             # legacy lines: tolerated (no capture)
-    r")"
-    r"(?:\s*[(（][^)）]*[)）])?"                          # optional field annotation
-    r")*"
-    r"(?:\s+[(（][^)）]*[)）])?"                          # optional trailing annotation
-    r"(?:\s*[-—–]\s*(.+?))?"                             # group 6: reason
+    r"))*"
+    r"(?:\s+-\s+(.+?))?"                                 # group 6: reason
     r"\s*$",
     re.MULTILINE,
 )
+
+_EXPORT_METADATA_KEYS = frozenset({
+    "entry_id",
+    "file_id",
+    "display_name",
+    "folder_id",
+    "folder_path",
+    "lifecycle",
+    "mime_type",
+    "original_ext",
+    "size_bytes",
+    "sha256",
+    "ingest_status",
+    "created_at",
+    "updated_at",
+    "summary",
+    "preview",
+    "related_entries",
+})
 
 
 class ExportNotReadyError(Exception):
@@ -164,8 +179,10 @@ async def build_export_plan(
         for eid in entry_ids:
             if eid in live_by_id:
                 try:
-                    plan.metadata_blobs[eid] = await get_user_metadata(
-                        session, entry_id=eid,
+                    plan.metadata_blobs[eid] = _metadata_for_export(
+                        await get_user_metadata(
+                            session, entry_id=eid,
+                        )
                     )
                 except Exception:
                     plan.metadata_blobs[eid] = {"entry_id": eid, "error": "metadata_failed"}
@@ -181,6 +198,16 @@ async def build_export_plan(
             cite.storage_key = file_row.storage_key
 
     return plan
+
+
+def _metadata_for_export(meta: dict[str, Any]) -> dict[str, Any]:
+    """Keep export metadata on the user-facing side of the boundary.
+
+    The Library metadata endpoint may expose UI conveniences such as tags or
+    current AI notes. Exported archives are portable artifacts, so they keep
+    identity, file facts, summary/preview, and related-entry hints only.
+    """
+    return {k: v for k, v in meta.items() if k in _EXPORT_METADATA_KEYS}
 
 
 def render_manifest(plan: ExportPlan) -> dict[str, Any]:
