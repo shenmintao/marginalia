@@ -171,14 +171,22 @@ async def main():
         "[^a]: entry_id=019e5493-fca4-7524-b8d0-3c36885b1241, "
         "section_id=s2 - because it covers election\n"
         "[^b]: entry_id=019e5493-fca4-7524-b8d0-3c36885b1242 - whole doc\n"
+        "[^c]: entry_id=019e5493-fca4-7524-b8d0-3c36885b1243, "
+        "quote=\"first quote\" + \"ignored quote\" - quoted doc\n"
+        "[^d]: entry_id=019e5493-fca4-7524-b8d0-3c36885b1244\uff0c"
+        "page=54\uff08p.54\uff09 - annotated page\n"
     )
     cites = parse_citations(sample)
-    assert len(cites) == 2
+    assert len(cites) == 4
     assert cites[0].marker == "a"
     assert cites[0].section_id == "s2"
     assert cites[0].reason and "election" in cites[0].reason
     assert cites[1].section_id is None
     assert cites[1].reason == "whole doc"
+    assert cites[2].quote == "first quote"
+    assert cites[2].reason == "quoted doc"
+    assert cites[3].page == "54"
+    assert cites[3].reason == "annotated page"
     print("[1] parse_citations OK")
 
     # ---- 2. setup + run export endpoint -------------------------------

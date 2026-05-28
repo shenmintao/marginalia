@@ -493,8 +493,8 @@ async def _run_plan_phase(
 # ---- live-render footnote rewrite ----------------------------------------
 
 # Agent emits citation defs as:
-#     [^a]: entry_id=<id>, quote="<verbatim excerpt>" - reason   (text/md/code/docx)
-#     [^a]: entry_id=<id>, page=<n> - reason                     (pdf only)
+#     [^a]: entry_id=<id>, quote="<verbatim excerpt>" - reason
+#     [^a]: entry_id=<id>, page=<n> - reason
 #
 # The GUI deep-links via `?q=<urlencoded>` for quote-bearing footnotes (a
 # DOM text search highlights the match) and `?page=<n>` for PDFs (the
@@ -539,14 +539,121 @@ def _unescape_quote(s: str) -> str:
     return s.replace(r"\"", '"').replace(r"\\", "\\")
 
 
+# Kinds whose FileViewer body is DOM-rendered text — the in-page text
+# search behind `?q=<text>` actually scrolls + highlights on these. PDFs
+# render in an `<iframe>` that only honours `#page=N`, so they're handled
+# separately by mime/extension below.
+_TEXT_SEARCHABLE_KINDS = frozenset({"text", "code", "log", "docx"})
+_TEXT_SEARCHABLE_EXTS = frozenset({
+    "txt", "md", "markdown", "rst", "log", "csv", "tsv",
+    "json", "yaml", "yml", "toml", "ini", "conf", "env",
+    "sql", "html", "css", "scss", "ts", "tsx", "js", "jsx",
+    "py", "rb", "go", "rs", "java", "c", "h", "cpp", "hpp",
+    "sh", "bash", "zsh", "ps1", "docx",
+})
+
+
+def _is_pdf_file(file: Any) -> bool:
+    if file is None:
+        return False
+    mime = (getattr(file, "mime_type", None) or "").lower()
+    ext = (getattr(file, "original_ext", None) or "").lower().lstrip(".")
+    return mime == "application/pdf" or ext == "pdf"
+
+
+def _pick_query_string(
+    file: Any,
+    quote: str | None,
+    page: str | None,
+    *,
+    located_pdf_page: int | None = None,
+) -> str:
+    """Decide the locator query string from (file_type, quote, page).
+
+    File type wins over what the LLM wrote: a PDF emits `?page=N` using
+    the quote-located physical page when available, a text-shaped file
+    emits `?q=<quote>` (or bare), and everything else (images, tables,
+    audio) emits a bare link. This means the LLM doesn't have to choose
+    between fields by file type — it can write both `quote="..."` and
+    `page=N` and the backend keeps whichever is meaningful for this entry.
+    """
+    if file is None:
+        return ""
+    if _is_pdf_file(file):
+        if located_pdf_page:
+            return f"?page={located_pdf_page}"
+        return f"?page={page}" if page else ""
+    mime = (getattr(file, "mime_type", None) or "").lower()
+    ext = (getattr(file, "original_ext", None) or "").lower().lstrip(".")
+    kind = (getattr(file, "kind", None) or "").lower()
+    is_text_searchable = (
+        kind in _TEXT_SEARCHABLE_KINDS
+        or ext in _TEXT_SEARCHABLE_EXTS
+        or mime.startswith("text/")
+    )
+    if is_text_searchable and quote:
+        return f"?q={urllib.parse.quote_plus(_unescape_quote(quote))}"
+    return ""
+
+
+def _locator_norm(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip().casefold()
+
+
+def _locator_compact(text: str) -> str:
+    return re.sub(r"\s+", "", text).casefold()
+
+
+async def _locate_pdf_quote_page(
+    file: Any,
+    quote: str,
+    *,
+    pages_cache: dict[str, list[str]] | None = None,
+) -> int | None:
+    storage_key = getattr(file, "storage_key", None)
+    if not storage_key or not quote.strip():
+        return None
+    try:
+        cache_key = str(storage_key)
+        if pages_cache is not None and cache_key in pages_cache:
+            pages = pages_cache[cache_key]
+        else:
+            from marginalia.pipelines.pdf import PdfPipeline
+            from marginalia.storage import get_storage
+
+            storage = get_storage()
+            pdf_bytes = await PdfPipeline._read_bytes(storage, storage_key)
+            pages = await asyncio.to_thread(
+                PdfPipeline._extract_text, pdf_bytes, max_pages=None,
+            )
+            if pages_cache is not None:
+                pages_cache[cache_key] = pages
+    except Exception:
+        log.exception("footnote rewrite: PDF quote locator failed")
+        return None
+
+    needle = _unescape_quote(quote)
+    norm_needle = _locator_norm(needle)
+    compact_needle = _locator_compact(needle)
+    if not norm_needle and not compact_needle:
+        return None
+    for idx, page_text in enumerate(pages, start=1):
+        if norm_needle and norm_needle in _locator_norm(page_text):
+            return idx
+        if compact_needle and compact_needle in _locator_compact(page_text):
+            return idx
+    return None
+
+
 async def _rewrite_footnotes_for_display(answer: str) -> str:
-    """Resolve `[^a]: entry_id=<uuid>, quote="..." | page=N - reason` defs to
+    """Resolve `[^a]: entry_id=<uuid>, quote="...", page=N - reason` defs to
     `[^a]: [name](entry:<id>?q=...|?page=N) — reason` for live SSE rendering.
 
     The persisted `agent_response` keeps the raw form so downstream exports
     still parse. Missing/ambiguous ids fall back to `(entry <short> unavailable)`.
     Legacy `lines=`/`section_id=` fields are tolerated but don't produce a
-    deep-link query string.
+    deep-link query string. Locator selection (page vs quote vs bare) is
+    driven by the entry's actual file type — see [[_pick_query_string]].
     """
     if not answer or "entry_id" not in answer:
         return answer
@@ -556,6 +663,7 @@ async def _rewrite_footnotes_for_display(answer: str) -> str:
 
     raw_ids = list({m.group(2).strip() for m in matches})
     name_by_id: dict[str, str] = {}
+    file_by_id: dict[str, Any] = {}
     resolved: dict[str, str] = {}
     try:
         async with session_scope() as db:
@@ -568,9 +676,25 @@ async def _rewrite_footnotes_for_display(answer: str) -> str:
                     db, list(set(resolved.values())),
                 )
                 name_by_id = {entry.id: entry.display_name for entry, _ in rows}
+                file_by_id = {entry.id: file for entry, file in rows}
     except Exception:
         log.exception("footnote rewrite: entry lookup failed; keeping raw form")
         return answer
+
+    located_pdf_pages: dict[int, int] = {}
+    pdf_pages_cache: dict[str, list[str]] = {}
+    for m in matches:
+        raw_eid = m.group(2).strip()
+        full_eid = resolved.get(raw_eid, raw_eid)
+        file = file_by_id.get(full_eid)
+        quote = m.group(3)
+        if not quote or not _is_pdf_file(file):
+            continue
+        located = await _locate_pdf_quote_page(
+            file, quote, pages_cache=pdf_pages_cache,
+        )
+        if located:
+            located_pdf_pages[m.start()] = located
 
     def _replace(m: re.Match[str]) -> str:
         marker = m.group(1)
@@ -585,17 +709,12 @@ async def _rewrite_footnotes_for_display(answer: str) -> str:
         if name is None:
             head = f"(entry {short} unavailable)"
         else:
-            # Page wins over quote when both are present. The browser PDF
-            # iframe only honours `#page=N` — a `?q=` link on a PDF can't
-            # produce a jump (no DOM to text-search), so even if the LLM
-            # wrote both `page=N, quote="..."` we want the page form. For
-            # text/docx the LLM doesn't write `page=`, so this branch only
-            # fires on PDFs in practice.
-            qs = ""
-            if page:
-                qs = f"?page={page}"
-            elif quote is not None:
-                qs = f"?q={urllib.parse.quote_plus(_unescape_quote(quote))}"
+            qs = _pick_query_string(
+                file_by_id.get(full_eid),
+                quote,
+                page,
+                located_pdf_page=located_pdf_pages.get(m.start()),
+            )
             head = f"[{name}](entry:{full_eid}{qs})"
         if reason:
             return f"[^{marker}]: {head} — {reason}"

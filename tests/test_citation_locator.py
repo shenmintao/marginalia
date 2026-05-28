@@ -2,14 +2,25 @@
 
 Footnotes the agent emits look like:
 
-  [^a]: entry_id=<uuid>, quote="<verbatim 10-60 char excerpt>" - reason
-  [^p]: entry_id=<uuid>, page=<n> - reason   # PDF only
+  [^a]: entry_id=<uuid>, quote="<verbatim 10-60 char excerpt>", page=<n> - reason
 
-`_LIVE_FOOTNOTE_RE` parses these. `_rewrite_footnotes_for_display` looks
-up the entry name and emits
+`_LIVE_FOOTNOTE_RE` parses these. The LLM is instructed to write both
+`quote=` and `page=` whenever it can — `_rewrite_footnotes_for_display`
+then resolves entry_id to the live `File` row and lets the file's actual
+type pick the locator:
+
+  - PDF (`mime_type == "application/pdf"` or `original_ext == "pdf"`):
+    `?page=N`, preferably by locating the quote in extracted text and
+    using that physical page; fallback to page if quote lookup misses.
+  - text-shaped (`kind in {text, code, log, docx}` or text/code/docx ext):
+    `?q=<urlencoded quote>` if quote present, bare otherwise.
+  - everything else (image, table, audio, ...): bare link.
+
+Resolved form:
 
   [^a]: [name](entry:<uuid>?q=<urlencoded>) — reason
-  [^p]: [name](entry:<uuid>?page=<n>) — reason
+  [^a]: [name](entry:<uuid>?page=<n>) — reason
+  [^a]: [name](entry:<uuid>) — reason
 
 Legacy `lines=`/`section_id=` are still tolerated by the regex so old
 sessions don't crash on replay/export, but they produce no query string.
@@ -125,10 +136,25 @@ async def _check_rewrite():
     eid = "12345678-1234-1234-1234-123456789012"
 
     fake_entry = SimpleNamespace(id=eid, display_name="my-doc.md")
-    fake_file = SimpleNamespace(id="file-1", description={})
+    # The locator the backend emits depends on the entry's file type:
+    # text/code/log/docx → ?q=, PDF → ?page=, everything else → bare. Tests
+    # mutate `fake_file_attrs` before each call to set the type for that
+    # case. Default = markdown-shaped text file.
+    fake_file_attrs = {
+        "id": "file-1",
+        "mime_type": "text/markdown",
+        "original_ext": "md",
+        "kind": "text",
+        "description": {},
+    }
+
+    def set_file(*, mime_type=None, original_ext=None, kind=None):
+        fake_file_attrs["mime_type"] = mime_type
+        fake_file_attrs["original_ext"] = original_ext
+        fake_file_attrs["kind"] = kind
 
     async def fake_list_live(db, ids):
-        return [(fake_entry, fake_file)] if eid in ids else []
+        return [(fake_entry, SimpleNamespace(**fake_file_attrs))] if eid in ids else []
 
     async def fake_resolve_prefix(db, raw):
         if raw == eid:
@@ -147,21 +173,24 @@ async def _check_rewrite():
     ), patch.object(
         rt.entries_repo, "resolve_entry_id_prefix", new=fake_resolve_prefix,
     ), patch.object(rt, "session_scope", new=fake_session_scope):
-        # 1. quote → ?q=<urlencoded>
+        # 1. text file + quote → ?q=<urlencoded>
+        set_file(mime_type="text/markdown", original_ext="md", kind="text")
         out = await rt._rewrite_footnotes_for_display(
             f'body[^a]\n\n[^a]: entry_id={eid}, quote="合同第4.6条规定" - reason',
         )
         expected_q = urllib.parse.quote_plus("合同第4.6条规定")
         assert f"[my-doc.md](entry:{eid}?q={expected_q})" in out, out
 
-        # 2. page → ?page=<n>
+        # 2. PDF + page → ?page=<n>
+        set_file(mime_type="application/pdf", original_ext="pdf", kind="text")
         out = await rt._rewrite_footnotes_for_display(
             f"body[^a]\n\n[^a]: entry_id={eid}, page=3 - reason",
         )
         assert f"[my-doc.md](entry:{eid}?page=3)" in out, out
 
-        # 3. quote with escaped embedded double-quote — \" unescapes to "
-        # before urlencoding so the GUI search target matches the source.
+        # 3. text + quote with escaped embedded double-quote — \" unescapes
+        # to " before urlencoding so the GUI search target matches source.
+        set_file(mime_type="text/markdown", original_ext="md", kind="text")
         out = await rt._rewrite_footnotes_for_display(
             f'body[^a]\n\n[^a]: entry_id={eid}, quote="he said \\"yes\\"" - r',
         )
@@ -169,6 +198,7 @@ async def _check_rewrite():
         assert f"entry:{eid}?q={expected_q}" in out, out
 
         # 4. legacy lines= → no query string (link opens file without jump)
+        set_file(mime_type="text/markdown", original_ext="md", kind="text")
         out = await rt._rewrite_footnotes_for_display(
             f"body[^a]\n\n[^a]: entry_id={eid}, lines=10-40 - r",
         )
@@ -202,41 +232,117 @@ async def _check_rewrite():
         assert "entry:deadbeef" not in out
         assert "my-doc.md" not in out
 
-        # 9. page + quote both present → page wins. PDFs only honour
-        # `#page=N`; if the LLM helpfully tags both fields, we want the
-        # page form so the iframe can scroll, not a `?q=` URL the PDF
-        # viewer can't act on.
+        # 9. PDF + both quote and page → backend picks page (PDF iframe
+        # only honours #page=N; the quote is dropped because the viewer
+        # can't text-search). The LLM is now told to write both fields
+        # whenever it can — the type dispatcher is what makes that safe.
+        set_file(mime_type="application/pdf", original_ext="pdf", kind="text")
         out = await rt._rewrite_footnotes_for_display(
             f'body[^a]\n\n[^a]: entry_id={eid}, page=4, quote="abc" - r',
         )
         assert f"[my-doc.md](entry:{eid}?page=4)" in out, out
         assert "?q=" not in out
 
-        # 10. same with the fields written in the opposite source order.
+        # 10. same PDF, fields in opposite order.
         out = await rt._rewrite_footnotes_for_display(
             f'body[^a]\n\n[^a]: entry_id={eid}, quote="abc", page=4 - r',
         )
         assert f"[my-doc.md](entry:{eid}?page=4)" in out, out
         assert "?q=" not in out
 
-        # 11. `+`-concatenated quotes: the URL still gets the first
-        # quote, the second segment is silently dropped. The whole
-        # footnote must rewrite — this is the regression we hit live.
+        # 11. PDF + both fields + quote locator hit: backend uses the
+        # physical page found from extracted text, not the LLM's page
+        # number. This avoids cover/toc printed-page offsets.
+        async def fake_locate_pdf_quote_page(file, quote, *, pages_cache=None):
+            assert quote == "printed page one"
+            return 6
+
+        with patch.object(
+            rt, "_locate_pdf_quote_page", new=fake_locate_pdf_quote_page,
+        ):
+            set_file(mime_type="application/pdf", original_ext="pdf", kind="text")
+            out = await rt._rewrite_footnotes_for_display(
+                f'body[^a]\n\n[^a]: entry_id={eid}, quote="printed page one", page=1 - r',
+            )
+            assert f"[my-doc.md](entry:{eid}?page=6)" in out, out
+            assert "?page=1" not in out
+
+        # 12. text file + `+`-concatenated quotes: URL gets the first
+        # quote, the second segment is silently dropped.
+        set_file(mime_type="text/markdown", original_ext="md", kind="text")
         out = await rt._rewrite_footnotes_for_display(
             f'body[^a]\n\n[^a]: entry_id={eid}, quote="A段" + "B段" - r',
         )
         expected_q = urllib.parse.quote_plus("A段")
         assert f"[my-doc.md](entry:{eid}?q={expected_q})" in out, out
-        assert "B段" not in out  # the second quote isn't surfaced anywhere
+        assert "B段" not in out
 
-        # 12. page= with a full-width parenthetical annotation. The
+        # 13. PDF + page with full-width parenthetical annotation: the
         # annotation is dropped; the link uses the digits.
+        set_file(mime_type="application/pdf", original_ext="pdf", kind="text")
         out = await rt._rewrite_footnotes_for_display(
             f"body[^a]\n\n[^a]: entry_id={eid}, page=54（第54页） - r",
         )
         assert f"[my-doc.md](entry:{eid}?page=54)" in out, out
 
-    print("[2] _rewrite_footnotes_for_display: quote/page/legacy/prefix all wire correctly")
+        # 14. PDF + ONLY quote (no page): backend cannot honour the
+        # quote on a PDF iframe, so falls back to a bare link rather
+        # than emitting a useless ?q= URL.
+        set_file(mime_type="application/pdf", original_ext="pdf", kind="text")
+        out = await rt._rewrite_footnotes_for_display(
+            f'body[^a]\n\n[^a]: entry_id={eid}, quote="abc" - r',
+        )
+        assert f"[my-doc.md](entry:{eid})" in out, out
+        assert "?q=" not in out and "?page=" not in out
+
+        # 15. text file + page (LLM helpfully wrote a page number for a
+        # markdown file): page is meaningless on text, backend falls
+        # back to quote if present, bare otherwise. Here quote present.
+        set_file(mime_type="text/markdown", original_ext="md", kind="text")
+        out = await rt._rewrite_footnotes_for_display(
+            f'body[^a]\n\n[^a]: entry_id={eid}, quote="abc", page=4 - r',
+        )
+        assert f"[my-doc.md](entry:{eid}?q=abc)" in out, out
+        assert "?page=" not in out
+
+        # 16. image / scan kind: even if LLM wrote a quote, the GUI has
+        # no DOM to search, so the link is bare.
+        set_file(mime_type="image/jpeg", original_ext="jpg", kind="image")
+        out = await rt._rewrite_footnotes_for_display(
+            f'body[^a]\n\n[^a]: entry_id={eid}, quote="abc" - r',
+        )
+        assert f"[my-doc.md](entry:{eid})" in out, out
+        assert "?q=" not in out and "?page=" not in out
+
+        # 17. table kind (xlsx): no in-page search, bare link.
+        set_file(mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", original_ext="xlsx", kind="table")
+        out = await rt._rewrite_footnotes_for_display(
+            f'body[^a]\n\n[^a]: entry_id={eid}, quote="abc" - r',
+        )
+        assert f"[my-doc.md](entry:{eid})" in out, out
+        assert "?q=" not in out
+
+        # 18. code kind: in-page text search works, ?q= emitted.
+        set_file(mime_type="text/x-python", original_ext="py", kind="code")
+        out = await rt._rewrite_footnotes_for_display(
+            f'body[^a]\n\n[^a]: entry_id={eid}, quote="def foo" - r',
+        )
+        expected_q = urllib.parse.quote_plus("def foo")
+        assert f"[my-doc.md](entry:{eid}?q={expected_q})" in out, out
+
+        # 19. docx kind: FileViewer renders DOCX into searchable HTML.
+        set_file(
+            mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            original_ext="docx",
+            kind="docx",
+        )
+        out = await rt._rewrite_footnotes_for_display(
+            f'body[^a]\n\n[^a]: entry_id={eid}, quote="contract clause" - r',
+        )
+        expected_q = urllib.parse.quote_plus("contract clause")
+        assert f"[my-doc.md](entry:{eid}?q={expected_q})" in out, out
+
+    print("[2] _rewrite_footnotes_for_display: type-aware dispatcher routes quote/page/bare correctly")
 
 
 def main():

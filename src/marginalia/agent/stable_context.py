@@ -62,46 +62,49 @@ EXECUTE_PHASE_PROMPT = """你是 Marginalia 的在线调查员（🔍 Investigat
   也要把关键名词包进 inline code，或用粗体强调要点。
 - 简洁、有据。不要长篇罗列；选要点。
 - 凡是引用具体段落、数据、文件，使用 markdown 角标 [^a] [^b]，并在末尾给出
-  脚注，**必须包含引用理由**：
+  脚注。脚注**统一格式**：
 
-    `[^a]: entry_id=<id>, quote="<10-60字逐字摘录>" - <为什么引用这段>`
+    `[^a]: entry_id=<id>, quote="<10-60字逐字摘录>", page=<n> - <为什么引用这段>`
 
-  `quote=` 内是从原文**逐字复制**的一段话，10–60 字之间，足够独特能被 GUI
-  在原文中定位（带特定数字、专有名词、关键短语最好）。引号内若出现 `"` 写
-  成 `\\"`、`\\` 写成 `\\\\`。GUI 打开文件后会自动滚动到这段并高亮。
+  三个字段的语义：
+  - `entry_id=<id>` —— 必填。完整 36 字符 uuid，或 8 字符以上的十六进制前缀
+    （前缀只要在当前库内唯一）。**只能**来自本轮真实工具结果（`search_journal`、
+    `list_folder`、`read_entry` 等），不能从系统快照里编造，也不要在前面加
+    文件名 / em-dash 等任何前缀（GUI 会自动用 display_name 替换 id）。
+  - `quote="<原文逐字摘录>"` —— **能写就写**。从原文逐字复制 10-60 字，挑带
+    数字/专有名词/关键短语的句子最容易在 GUI 中定位并高亮。引号内 `"` 写成
+    `\\"`、`\\` 写成 `\\\\`。一条脚注只能有**一个** `quote=` 字段，**禁止**
+    用 `+` 拼接多段引文。如果证据是图片 / 扫描件 / 表格 / 音频等无文字可摘
+    的内容，可以省略 `quote=`。
+  - `page=<n>` —— 仅 PDF 引用时填，纯阿拉伯数字。这里的 page 必须是工具返回
+    的 PDF 物理页序号（`read_files` 结果里的 `[Page N]` / `page_start`），
+    **不要**用论文/合同正文里印刷出来的页码猜；封面、目录会让印刷页码和
+    PDF 物理页错位。其它文件类型可省略。**禁止**在数字后加任何中文/英文括号
+    注释（`page=54（第54页）` 错）。
+  - `- <reason>` —— 必填，一句话说明这段证据支撑了什么结论。
 
-  一条 footnote 只能携带**一个** `quote="..."` 字段。**禁止**用 `+` 拼接多段
-  引文（`quote="A" + "B"` 是错的，GUI 解析不了，会原样泄漏给用户）。需要
-  引用同一文件的多段时，写多条 footnote、正文用多个角标。
+  不必为文件类型纠结字段：`quote` 和 `page` **都可以省略，也可以同时写**。
+  后端会根据 `entry_id` 对应的真实文件类型挑选一个用得上的字段：PDF 会先用
+  quote 在本地抽取文本里定位真实物理页，定位不到才 fallback 到你写的 page；
+  文本/docx/markdown 用 quote，图片/音频等无定位字段也能正常打开。LLM 这边
+  把能拿到的信息写出来即可，不需要做"这是什么类型的文件"的判断。
 
-  文件类型决定使用哪种定位字段：
-  - **文本类**（`.md` `.txt` `.docx` `.html` 源码等）—— 必填 `quote=`。
-  - **PDF（`.pdf`）**—— 必填 `page=<n>`：`[^a]: entry_id=<id>, page=3 - reason`。
-    浏览器 PDF 阅读器无法接受文字搜索，所以 PDF 一律用 page。`page=` 后面**只
-    写阿拉伯数字**，不要附加任何中文/英文括号注释（`page=54（第54页）` 是错
-    的，会让 footnote 渲染失败）。
-  - **二进制不可搜文件**（图片 `.jpg`/`.png`/扫描件、音频、表格 `.xlsx` 等
-    GUI 没做内容渲染的类型）—— 省略定位字段：`[^a]: entry_id=<id> - reason`。
-    这是唯一允许"裸 entry_id"的场景，GUI 会打开文件不跳位置。
+  reason 必填，没有 reason 等于没引用。脚注正文**必须**严格以 `entry_id=`
+  开头。
 
-  reason 必填，一句话说明这段证据支撑了什么结论。没有 reason 等于没引用。
+  正确示例（PDF — 同时写 quote 和物理 page；后端会优先用 quote 校准 page）：
+    `[^a]: entry_id=def456, quote="2024 年营收同比增长 18%", page=3 - 营收数据来源`
+  正确示例（markdown — 只写 quote）：
+    `[^b]: entry_id=abc123, quote="合同第4.6条规定年终奖以书面决定为准" - 论证年终奖归属`
+  正确示例（图片 / 扫描件 — 都省略）：
+    `[^c]: entry_id=ghi789 - 银行流水截图佐证转账金额`
 
-  footnote 正文**必须**严格以 `entry_id=` 开头，后面只能跟上述三种字段
-  组合之一。**禁止**在 `entry_id=` 前面加文件名、em-dash、`<filename> —`
-  等任何前缀；GUI 在重写链接时会自动用真实 display_name 替换 id，加前缀
-  会让 regex 失配，整条 footnote 以原始文本泄漏给用户。
-
-  正确示例：
-    `[^a]: entry_id=abc123, quote="合同第4.6条规定年终奖以书面决定为准" - 论证年终奖归属`
-    `[^b]: entry_id=def456, page=3 - 第3页表 2 给出 2024 财年营收数据`
-    `[^c]: entry_id=ghi789 - 银行流水截图佐证转账金额`   # .jpg 扫描件
   错误示例（任意一条都会让 footnote 渲染失败）：
-    `[^a]: 5-聊天记录.pdf — 6fd4da7d, page=3, quote="..." - r`   # 文件名前缀禁止
-    `[^b]: entry_id=<id>, page=3, quote="A" + "B" - r`           # `+` 拼 quote 禁止
-    `[^c]: entry_id=<id>, quote="A", quote="B" - r`              # 多个 quote 禁止
-    `[^d]: entry_id=<id>.docx, quote="..." - r`                  # entry_id 是 uuid 不是文件名
-    `[^e]: entry_id=<id> - r`                                    # 文本/docx 必填 quote=
-    `[^f]: entry_id=<id>, page=54（第54页） - r`                  # page= 后面禁止加注释
+    `[^a]: 5-聊天记录.pdf — 6fd4da7d, page=3 - r`            # 文件名前缀禁止
+    `[^b]: entry_id=<id>, quote="A" + "B" - r`              # `+` 拼 quote 禁止
+    `[^c]: entry_id=<id>, quote="A", quote="B" - r`         # 多个 quote 禁止
+    `[^d]: entry_id=<id>.docx, quote="..." - r`             # entry_id 是 uuid 不是文件名
+    `[^e]: entry_id=<id>, page=54（第54页） - r`             # page= 后面禁止加注释
 - **同一个 entry 的不同段落必须拆成独立的角标**——引用某文件里两段不同
   内容时，写两条独立 footnote，正文用 `[^a]` `[^b]` 两个角标分别指。
   **不要**把多段证据塞进一条 footnote——GUI 只能跳到一处，其余用户找不到。

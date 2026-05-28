@@ -30,13 +30,18 @@ from marginalia.services.user_files import get_user_metadata
 
 
 _FOOTNOTE_RE = re.compile(
-    r"\[\^([^\]]+)\]:\s*entry_id\s*=\s*`?([0-9a-fA-F-]+)`?"
-    r"(?:\s*,\s*(?:"
+    r"\[\^([^\]]+)\]:\s*entry_id\s*=\s*`?"
+    r"([0-9a-fA-F][0-9a-fA-F\-]{6,35})`?"
+    r"(?:\s*[,，]\s*(?:"
     r'quote\s*=\s*"((?:[^"\\]|\\.)*)"'                  # group 3: quote
+    r'(?:\s*\+\s*"(?:[^"\\]|\\.)*")*'                   # extra quote segments: tolerated, ignored
     r"|page\s*=\s*`?([0-9]+(?:-[0-9]+)?)`?"             # group 4: page
-    r"|section_id\s*=\s*`?([^\s,`\-]+)`?"               # group 5: legacy section_id
+    r"|section_id\s*=\s*`?([^\s,，`\-]+)`?"              # group 5: legacy section_id
     r"|lines?\s*=\s*`?\S+`?"                             # legacy lines: tolerated (no capture)
-    r"))*"
+    r")"
+    r"(?:\s*[(（][^)）]*[)）])?"                          # optional field annotation
+    r")*"
+    r"(?:\s+[(（][^)）]*[)）])?"                          # optional trailing annotation
     r"(?:\s*[-—–]\s*(.+?))?"                             # group 6: reason
     r"\s*$",
     re.MULTILINE,
