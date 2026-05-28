@@ -25,13 +25,19 @@ import { SessionList } from "@/components/SessionList";
 import { useChatSession } from "@/lib/chatSession";
 import { cn } from "@/lib/utils";
 
-/** Module-level abort controller for the in-flight SSE stream.
- *  Not tied to component lifecycle so the stream survives navigation. */
-let activeAbort: AbortController | null = null;
+/** Module-level in-flight SSE streams.
+ *  Not tied to component lifecycle so streams survive navigation and
+ *  switching between chat sessions. */
+interface LiveStream {
+  abort: AbortController;
+  generation: number;
+  turnIdx: number;
+  turns: Turn[];
+}
 
-/** Monotonic counter bumped by loadSession / newChat / stop so the
- *  send() finally block can detect that a session switch happened
- *  after it was dispatched — and avoid corrupting the new turns. */
+const liveStreams = new Map<string, LiveStream>();
+
+/** Monotonic counter used to ignore stale callbacks from replaced streams. */
 let streamGeneration = 0;
 
 export function ChatPage() {
@@ -70,6 +76,12 @@ export function ChatPage() {
   useEffect(() => {
     const { sessionId } = useChatSession.getState();
     if (!sessionId) return;
+    const live = liveStreams.get(sessionId);
+    if (live) {
+      setTurns(live.turns);
+      setStreaming(true);
+      return;
+    }
     let cancelled = false;
     setLoading(true);
     sessions.messages(sessionId)
@@ -105,20 +117,33 @@ export function ChatPage() {
 
     setOpenErr(null);
     setInput("");
-    const turnIdx = useChatSession.getState().turns.length;
-    setTurns((prev) => [...prev, { query: q, steps: [], answer: null, error: null, done: false }]);
-    setStreaming(true);
-
     const ac = new AbortController();
-    activeAbort = ac;
-    const gen = streamGeneration;
+    const gen = ++streamGeneration;
+    const turnIdx = useChatSession.getState().turns.length;
+    const live: LiveStream = {
+      abort: ac,
+      generation: gen,
+      turnIdx,
+      turns: [
+        ...useChatSession.getState().turns,
+        { query: q, steps: [], answer: null, error: null, done: false },
+      ],
+    };
+    liveStreams.set(sid, live);
+    setTurns(live.turns);
+    setStreaming(true);
 
     try {
       await streamChat(sid, q, {
         signal: ac.signal,
         onEvent: (ev) => {
-          if (useChatSession.getState().sessionId !== sid || streamGeneration !== gen) return;
-          applyEvent(setTurns, turnIdx, ev);
+          const cur = liveStreams.get(sid);
+          if (!cur || cur.generation !== gen) return;
+          cur.turns = applyEventToTurnList(cur.turns, cur.turnIdx, ev);
+          if (useChatSession.getState().sessionId === sid) {
+            setTurns(cur.turns);
+            setStreaming(true);
+          }
           if (ev.type === "plan" && extractSessionNameFromPlan(ev.data)) {
             setRefreshSignal((n) => n + 1);
           }
@@ -126,49 +151,69 @@ export function ChatPage() {
       });
     } catch (e) {
       if (!ac.signal.aborted) {
-        if (useChatSession.getState().sessionId === sid && streamGeneration === gen) {
-          setTurns((prev) => updateTurn(prev, turnIdx, (t) => ({
+        const cur = liveStreams.get(sid);
+        if (cur && cur.generation === gen) {
+          cur.turns = updateTurn(cur.turns, cur.turnIdx, (t) => ({
             ...t, error: e instanceof Error ? e.message : String(e), done: true,
-          })));
+          }));
+          if (useChatSession.getState().sessionId === sid) setTurns(cur.turns);
         }
       }
     } finally {
-      activeAbort = null;
-      setStreaming(false);
-      if (useChatSession.getState().sessionId === sid && streamGeneration === gen) {
-        setTurns((prev) => updateTurn(prev, turnIdx, (t) => ({ ...t, done: true })));
+      const cur = liveStreams.get(sid);
+      if (cur && cur.generation === gen) {
+        cur.turns = updateTurn(cur.turns, cur.turnIdx, (t) => ({ ...t, done: true }));
+        liveStreams.delete(sid);
+        if (useChatSession.getState().sessionId === sid) {
+          setTurns(cur.turns);
+          setStreaming(false);
+        }
       }
-      if (isFirstTurn && streamGeneration === gen) setRefreshSignal((n) => n + 1);
+      if (cur && cur.generation === gen && isFirstTurn) setRefreshSignal((n) => n + 1);
     }
   }, [input, ensureSession, setTurns, setStreaming]);
 
   const stop = useCallback(() => {
-    streamGeneration++;
-    activeAbort?.abort();
+    const sid = useChatSession.getState().sessionId;
+    if (sid) {
+      const live = liveStreams.get(sid);
+      if (live) {
+        live.abort.abort();
+        live.turns = updateTurn(live.turns, live.turnIdx, (t) => ({ ...t, done: true }));
+        liveStreams.delete(sid);
+        setTurns(live.turns);
+      }
+    }
     setStreaming(false);
-  }, [setStreaming]);
+  }, [setTurns, setStreaming]);
 
   const loadSession = useCallback(async (id: string) => {
-    streamGeneration++;
-    activeAbort?.abort();
-    setStreaming(false);
     setLoading(true);
     setOpenErr(null);
+    setSessionId(id);
+    const live = liveStreams.get(id);
+    if (live) {
+      setTurns(live.turns);
+      setStreaming(true);
+      setLoading(false);
+      return;
+    }
+    setStreaming(false);
     try {
       const t = await sessions.messages(id);
-      setSessionId(id);
+      if (useChatSession.getState().sessionId !== id) return;
       setTurns(t.turns.map(replayedToTurn));
     } catch (e) {
+      if (useChatSession.getState().sessionId !== id) return;
       setOpenErr(e instanceof Error ? e.message : String(e));
     } finally {
-      setLoading(false);
+      if (useChatSession.getState().sessionId === id) setLoading(false);
     }
-  }, [setSessionId, setTurns, setLoading]);
+  }, [setSessionId, setTurns, setStreaming, setLoading]);
 
   const newChat = useCallback(() => {
-    streamGeneration++;
-    const { streaming: curStreaming } = useChatSession.getState();
-    if (curStreaming) activeAbort?.abort();
+    const { sessionId: curSessionId } = useChatSession.getState();
+    if (curSessionId) liveStreams.get(curSessionId)?.abort.abort();
     reset();
     setOpenErr(null);
     setInput("");
@@ -278,62 +323,8 @@ function updateTurn(prev: Turn[], idx: number, fn: (t: Turn) => Turn): Turn[] {
   return next;
 }
 
-// Map a server-replayed turn into the in-flight `Turn` shape so the
-// existing TurnView renders historical sessions identically to live
-// ones. Plan_text becomes a synthetic plan step; tool_calls each
-// become tool_call steps with their result already marked.
-function replayedToTurn(rt: ReplayedTurn): Turn {
-  const steps: Step[] = [];
-  if (rt.plan_text && rt.plan_text.trim()) {
-    const text = rt.plan_text.trim();
-    if (text.startsWith("NO_PLAN:")) {
-      steps.push({
-        kind: "plan", label: "NO_PLAN", plan: [text.slice("NO_PLAN:".length).trim()],
-      });
-    } else {
-      const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
-      steps.push({ kind: "plan", label: "plan", plan: lines });
-    }
-  }
-  for (const tc of rt.tool_calls) {
-    steps.push(replayedToolCallStep(tc));
-  }
-  return {
-    query: rt.user_message,
-    conversationId: rt.conversation_id,
-    steps,
-    answer: rt.agent_response,
-    metrics: rt.metrics,
-    error: null,
-    done: rt.ended_at !== null,
-  };
-}
-
-function replayedToolCallStep(tc: ReplayedToolCall): Step {
-  const name = tc.name || "tool";
-  // Replay payload now carries a server-resolved `display` string, just
-  // like the live SSE event does. Prefer that over the raw uuid args.
-  const label = tc.display
-    ? `calling ${tc.display}`
-    : `calling ${formatToolCall(name, tc.arguments)}`;
-  return {
-    kind: "tool_call",
-    label,
-    toolName: name,
-    args: tc.arguments,
-    result: tc.ok ? "ok" : "failed",
-    durationMs: tc.duration_ms ?? undefined,
-    error: tc.error ?? undefined,
-    resultPreview: tc.preview ?? undefined,
-  };
-}
-
-function applyEvent(
-  setTurns: (updater: Turn[] | ((prev: Turn[]) => Turn[])) => void,
-  idx: number,
-  ev: ChatEvent,
-) {
-  setTurns((prev) => updateTurn(prev, idx, (t) => {
+function applyEventToTurnList(prev: Turn[], idx: number, ev: ChatEvent): Turn[] {
+  return updateTurn(prev, idx, (t) => {
     switch (ev.type) {
       case "conversation":
         return {
@@ -341,14 +332,14 @@ function applyEvent(
           conversationId: typeof ev.data === "string" ? ev.data : extractId(ev.data, "conversation_id"),
         };
       case "planning":
-        return appendStep(t, "planning", "planning the investigation…");
+        return appendStep(t, "planning", "planning the investigation...");
       case "plan": {
         const text = typeof ev.data === "string" ? ev.data : "";
         const steps = text.trim().split("\n").filter(Boolean);
         return appendStep(t, "plan", "plan ready", { plan: steps });
       }
       case "thinking":
-        return appendStep(t, "thinking", "thinking…");
+        return appendStep(t, "thinking", "thinking...");
       case "tool_call": {
         const d = (ev.data && typeof ev.data === "object")
           ? (ev.data as {
@@ -407,7 +398,57 @@ function applyEvent(
       default:
         return t;
     }
-  }));
+  });
+}
+
+// Map a server-replayed turn into the in-flight `Turn` shape so the
+// existing TurnView renders historical sessions identically to live
+// ones. Plan_text becomes a synthetic plan step; tool_calls each
+// become tool_call steps with their result already marked.
+function replayedToTurn(rt: ReplayedTurn): Turn {
+  const steps: Step[] = [];
+  if (rt.plan_text && rt.plan_text.trim()) {
+    const text = rt.plan_text.trim();
+    if (text.startsWith("NO_PLAN:")) {
+      steps.push({
+        kind: "plan", label: "NO_PLAN", plan: [text.slice("NO_PLAN:".length).trim()],
+      });
+    } else {
+      const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
+      steps.push({ kind: "plan", label: "plan", plan: lines });
+    }
+  }
+  for (const tc of rt.tool_calls) {
+    steps.push(replayedToolCallStep(tc));
+  }
+  return {
+    query: rt.user_message,
+    conversationId: rt.conversation_id,
+    steps,
+    answer: rt.agent_response,
+    metrics: rt.metrics,
+    error: null,
+    done: rt.ended_at !== null,
+  };
+}
+
+function replayedToolCallStep(tc: ReplayedToolCall): Step {
+  const name = tc.name || "tool";
+  // Replay payload now carries a server-resolved `display` string, just
+  // like the live SSE event does. Prefer that over the raw uuid args.
+  const label = tc.display
+    ? `calling ${tc.display}`
+    : `calling ${formatToolCall(name, tc.arguments)}`;
+  return {
+    kind: "tool_call",
+    label,
+    toolName: name,
+    args: tc.arguments,
+    result: tc.ok ? "ok" : "failed",
+    durationMs: tc.duration_ms ?? undefined,
+    error: tc.error ?? undefined,
+    resultPreview: tc.preview ?? undefined,
+  };
 }
 
 function formatToolCall(name: string, args: Record<string, unknown>): string {
