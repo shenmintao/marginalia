@@ -136,7 +136,7 @@ async def handle_mine_corpus_evidence(payload: Mapping[str, Any]) -> None:
                 object_kind=GLOBAL_OBJECT_KIND, object_id=GLOBAL_OBJECT_ID,
                 outcome="rejected",
                 detail={"candidates": len(candidates),
-                        "reason": "LLM returned no parseable JSON"},
+                        "reason": "LLM returned no parseable <decisions> block"},
             )
             await session.commit()
         return

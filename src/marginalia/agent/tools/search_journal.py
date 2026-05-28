@@ -1,18 +1,19 @@
-"""search_journal — DESIGN.md §10.1.
+"""search_journal - DESIGN.md section 10.1.
 
 The investigator's first move: "did I work on something like this before?"
 
 The journal is two tiers in one table (see [[journal-tiers]]):
-  - `insight`: durable cross-session distillations (default kind).
+  - `insight`: durable cross-session distillations.
   - `reflect_turn`: per-turn bullets from one specific session.
 
-Defaults to `kinds=["insight"]` so a fresh user message goes straight to
-durable memory. Pass `kinds=["reflect_turn"]` together with a
-`conversation_id` to skim the per-turn bullets of one session.
+Defaults to `kinds=["insight", "reflect_turn"]` so a fresh user message can
+see both durable memory and recent per-turn breadcrumbs. Pass
+`kinds=["insight"]` for durable-only recall, or `kinds=["reflect_turn"]`
+together with a `conversation_id` to skim one session.
 
-Superseded insight rows (whose `superseded_by_id IS NOT NULL`) are hidden
-by default — the chain replacement IS the answer. Set
-`include_superseded=true` to see history.
+Superseded insight rows (whose `superseded_by_id IS NOT NULL`) are hidden by
+default; the chain replacement is the answer. Set `include_superseded=true`
+to see history.
 """
 from __future__ import annotations
 
@@ -23,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from marginalia.agent.tools import ToolContext, tool
 from marginalia.db.models import Journal
+from marginalia.repositories import entries as entries_repo
 from marginalia.repositories import journal as journal_repo
 
 
@@ -39,8 +41,7 @@ SCHEMA: dict[str, Any] = {
             "type": "string",
             "description": (
                 "Only return notes whose entry_ids list includes this id. "
-                "Must be a UUID or short hex prefix (≥ 8 chars), NOT a "
-                "file name."
+                "Must be a UUID or short hex prefix (>= 8 chars), NOT a file name."
             ),
         },
         "tags": {
@@ -65,8 +66,8 @@ SCHEMA: dict[str, Any] = {
             "type": "boolean",
             "description": (
                 "If true, include insight rows that have been replaced by a "
-                "newer version. Default false — only the current version "
-                "of each chain is returned."
+                "newer version. Default false; only the current version of "
+                "each chain is returned."
             ),
         },
         "since_days": {
@@ -103,7 +104,7 @@ SCHEMA: dict[str, Any] = {
     name="search_journal",
     description=(
         "Skim your investigator's notebook for past insights. Always your "
-        "first move on a fresh user message — before reading any file. "
+        "first move on a fresh user message - before reading any file. "
         "Searches both durable cross-session insights and per-turn "
         "reflect_turn notes by default."
     ),
@@ -124,6 +125,19 @@ async def search_journal(
     limit = min(int(args.get("limit") or 10), 50)
     offset = max(0, int(args.get("offset") or 0))
     order = args.get("order") or "recent_first"
+
+    resolved_entry_id = str(entry_id).strip() if entry_id else None
+    if resolved_entry_id:
+        resolved_entry_id, err = await entries_repo.resolve_entry_id_prefix(
+            db, resolved_entry_id,
+        )
+        if err:
+            return {
+                "notes": [],
+                "count": 0,
+                "has_more": False,
+                "entry_id_error": err,
+            }
 
     cutoff = datetime.now(timezone.utc) - timedelta(days=since_days)
 
@@ -152,7 +166,7 @@ async def search_journal(
             exhausted = True
             break
         for j in rows:
-            if entry_id and entry_id not in (j.entry_ids or []):
+            if resolved_entry_id and resolved_entry_id not in (j.entry_ids or []):
                 continue
             if tags:
                 note_tags = set(j.tags or [])

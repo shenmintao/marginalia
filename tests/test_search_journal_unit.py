@@ -11,12 +11,12 @@ import pytest
 from marginalia.agent.tools import ToolContext
 
 
-def _row(note: str, tags: list[str]):
+def _row(note: str, tags: list[str], entry_ids: list[str] | None = None):
     return SimpleNamespace(
         id=f"j-{note}",
         conversation_id="c1",
         note=note,
-        entry_ids=[],
+        entry_ids=entry_ids or [],
         tags=tags,
         source_kind="insight",
         superseded_by_id=None,
@@ -51,3 +51,58 @@ async def test_search_journal_tags_are_or(monkeypatch: pytest.MonkeyPatch) -> No
         "beta only",
         "both",
     ]
+
+
+@pytest.mark.asyncio
+async def test_search_journal_entry_id_uses_prefix_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mod = import_module("marginalia.agent.tools.search_journal")
+    full_id = "0123abcd-1111-2222-3333-444455556666"
+    rows = [
+        _row("target", ["alpha"], [full_id]),
+        _row("other", ["alpha"], ["9999abcd-1111-2222-3333-444455556666"]),
+    ]
+
+    async def fake_search(*args: Any, **kwargs: Any) -> list[Any]:
+        return rows
+
+    async def fake_resolve(db: Any, raw: str) -> tuple[str, str | None]:
+        assert raw == "0123abcd"
+        return full_id, None
+
+    monkeypatch.setattr(mod.journal_repo, "search", fake_search)
+    monkeypatch.setattr(mod.entries_repo, "resolve_entry_id_prefix", fake_resolve)
+
+    result = await mod.search_journal(
+        None,
+        ToolContext(session_id="s1", conversation_id="c1"),
+        {"entry_id": "0123abcd", "limit": 10},
+    )
+
+    assert [note["note"] for note in result["notes"]] == ["target"]
+
+
+@pytest.mark.asyncio
+async def test_search_journal_entry_id_resolution_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mod = import_module("marginalia.agent.tools.search_journal")
+
+    async def fake_resolve(db: Any, raw: str) -> tuple[str, str | None]:
+        return raw, "prefix is ambiguous"
+
+    monkeypatch.setattr(mod.entries_repo, "resolve_entry_id_prefix", fake_resolve)
+
+    result = await mod.search_journal(
+        None,
+        ToolContext(session_id="s1", conversation_id="c1"),
+        {"entry_id": "0123abcd", "limit": 10},
+    )
+
+    assert result == {
+        "notes": [],
+        "count": 0,
+        "has_more": False,
+        "entry_id_error": "prefix is ambiguous",
+    }
