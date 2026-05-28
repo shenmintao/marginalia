@@ -17,6 +17,7 @@ import { useNavigate } from "react-router-dom";
 import { MarkdownView } from "@/components/MarkdownView";
 import type { EntryLocator } from "@/components/MarkdownView";
 import { cn } from "@/lib/utils";
+import { useI18n } from "@/lib/i18n";
 
 export type StepKind = "planning" | "plan" | "thinking" | "tool_call";
 
@@ -58,6 +59,7 @@ export interface Turn {
 export function TurnView({ turn }: { turn: Turn }) {
   const [open, setOpen] = useState(false);
   const navigate = useNavigate();
+  const { t } = useI18n();
 
   const inFlight = !turn.done && !turn.error;
   const showSteps = turn.steps.length > 0;
@@ -109,8 +111,8 @@ export function TurnView({ turn }: { turn: Turn }) {
               className={cn("transition-transform", !open && "-rotate-90")}
             />
             <span>
-              {turn.steps.length} step{turn.steps.length === 1 ? "" : "s"}
-              {inFlight && " · in progress"}
+              {t.chat.steps(turn.steps.length)}
+              {inFlight && ` · ${t.chat.inProgress}`}
             </span>
             {inFlight && <Loader2 size={11} className="animate-spin" />}
           </button>
@@ -146,7 +148,7 @@ export function TurnView({ turn }: { turn: Turn }) {
 
       {inFlight && turn.answer === null && !showSteps && (
         <div className="ml-8 flex items-center gap-2 text-sm text-fg-muted">
-          <Loader2 size={13} className="animate-spin" /> waiting…
+          <Loader2 size={13} className="animate-spin" /> {t.chat.waiting}
         </div>
       )}
     </div>
@@ -156,6 +158,7 @@ export function TurnView({ turn }: { turn: Turn }) {
 function StepRow({ step }: { step: Step }) {
   const Icon = ICONS[step.kind];
   const [open, setOpen] = useState(false);
+  const { t } = useI18n();
   const argsAvailable = step.args && Object.keys(step.args).length > 0;
   // Once a tool result has streamed in, prefer showing it in the expander
   // — args are already encoded in the one-line label, so re-printing them
@@ -163,8 +166,8 @@ function StepRow({ step }: { step: Step }) {
   const previewAvailable = !!step.resultPreview;
   const expandable = previewAvailable || argsAvailable;
   const expandTitle = previewAvailable
-    ? "click to expand result"
-    : "click to expand arguments";
+    ? t.chat.expandResult
+    : t.chat.expandArgs;
   const isPlan = step.kind === "plan" && step.plan && step.plan.length > 0;
   return (
     <li className="flex items-start gap-2 text-fg-muted">
@@ -235,20 +238,21 @@ function StepRow({ step }: { step: Step }) {
 }
 
 function MetricsLine({ m }: { m: TurnMetrics }) {
+  const { t } = useI18n();
   const parts: string[] = [];
   if (m.duration_ms != null) parts.push(shortDuration(m.duration_ms / 1000));
   if (m.tokens_in != null || m.tokens_out != null) {
-    parts.push(`↑ ${fmtTokens(m.tokens_in ?? 0)} / ↓ ${fmtTokens(m.tokens_out ?? 0)} tokens`);
+    parts.push(t.chat.tokens(fmtTokens(m.tokens_in ?? 0), fmtTokens(m.tokens_out ?? 0)));
   }
   if (m.cache_read && m.tokens_in) {
     const pct = Math.round((m.cache_read / m.tokens_in) * 100);
-    parts.push(`${pct}% cache`);
+    parts.push(t.activity.cache(pct));
   }
-  if (m.tool_calls != null) parts.push(`${m.tool_calls} tools`);
+  if (m.tool_calls != null) parts.push(t.chat.tools(m.tool_calls));
   if (parts.length === 0) return null;
   return (
     <div className="mt-3 border-t border-border pt-2 font-mono text-[11px] text-fg-subtle">
-      ({parts.join(" · ")}){m.truncated && <span className="ml-2 text-warn">⚠ truncated</span>}
+      ({parts.join(" · ")}){m.truncated && <span className="ml-2 text-warn">⚠ {t.chat.truncated}</span>}
     </div>
   );
 }

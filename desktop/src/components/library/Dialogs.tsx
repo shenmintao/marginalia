@@ -13,6 +13,7 @@ import { X, Upload, FolderPlus, Loader2 } from "lucide-react";
 import { folders as foldersApi, uploads, ApiError, settings as settingsApi } from "@/api/client";
 import type { OnConflict } from "@/types/api";
 import { cn } from "@/lib/utils";
+import { useI18n } from "@/lib/i18n";
 
 export function NewFolderDialog({ parentId, parentName, onClose, onCreated }: {
   parentId: string | null;
@@ -20,6 +21,7 @@ export function NewFolderDialog({ parentId, parentName, onClose, onCreated }: {
   onClose: () => void;
   onCreated: () => void;
 }) {
+  const { t } = useI18n();
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -43,7 +45,7 @@ export function NewFolderDialog({ parentId, parentName, onClose, onCreated }: {
 
   return (
     <ModalShell
-      title={<><FolderPlus size={14} /> New folder in <em className="font-mono">{parentName}</em></>}
+      title={<><FolderPlus size={14} /> {t.library.newFolderIn(parentName)}</>}
       onClose={onClose}
     >
       <input
@@ -51,14 +53,14 @@ export function NewFolderDialog({ parentId, parentName, onClose, onCreated }: {
         value={name}
         onChange={(e) => setName(e.target.value)}
         onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
-        placeholder="Folder name"
+        placeholder={t.dialogs.folderName}
         className="w-full rounded-md border border-border bg-bg-base px-3 py-2 text-sm outline-none focus:border-accent"
       />
       {err && <p className="mt-2 text-xs text-danger">{err}</p>}
       <div className="mt-4 flex justify-end gap-2">
         <button onClick={onClose}
                 className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-bg-muted">
-          Cancel
+          {t.common.cancel}
         </button>
         <button onClick={submit} disabled={busy || !name.trim()}
                 className={cn(
@@ -67,7 +69,7 @@ export function NewFolderDialog({ parentId, parentName, onClose, onCreated }: {
                     ? "cursor-not-allowed bg-bg-muted text-fg-subtle"
                     : "bg-accent text-accent-fg hover:opacity-90",
                 )}>
-          {busy ? "Creating…" : "Create"}
+          {busy ? t.common.creating : t.common.create}
         </button>
       </div>
     </ModalShell>
@@ -91,6 +93,7 @@ export function UploadDialog({ folderId, folderName, onClose, onUploaded }: {
   onClose: () => void;
   onUploaded: () => void;
 }) {
+  const { t } = useI18n();
   const [items, setItems] = useState<UploadItem[]>([]);
   const [conflict, setConflict] = useState<OnConflict>("rename");
   const [running, setRunning] = useState(false);
@@ -197,7 +200,7 @@ export function UploadDialog({ folderId, folderName, onClose, onUploaded }: {
 
   return (
     <ModalShell
-      title={<><Upload size={14} /> Upload to <em className="font-mono">{folderName}</em></>}
+      title={<><Upload size={14} /> {t.library.uploadTo(folderName)}</>}
       onClose={onClose}
       wide
     >
@@ -214,13 +217,13 @@ export function UploadDialog({ folderId, folderName, onClose, onUploaded }: {
         )}
       >
         <Upload size={20} className="mb-2" />
-        <p>{scanning ? "Scanning folder…" : "Drop files or a folder here, or click to browse."}</p>
+        <p>{scanning ? t.dialogs.scanningFolder : t.dialogs.uploadDrop}</p>
         <input ref={fileInput} type="file" multiple className="hidden"
                onChange={(e) => e.target.files && onPickFiles(e.target.files)} />
       </div>
 
       <div className="mt-3 flex items-center gap-2 text-xs">
-        <span className="text-fg-muted">On conflict:</span>
+        <span className="text-fg-muted">{t.dialogs.onConflict}</span>
         {(["rename", "skip", "error"] as OnConflict[]).map((p) => (
           <button key={p}
                   onClick={() => setConflict(p)}
@@ -231,7 +234,7 @@ export function UploadDialog({ folderId, folderName, onClose, onUploaded }: {
                       ? "border-accent bg-accent-subtle text-accent"
                       : "border-border text-fg-muted hover:bg-bg-muted",
                   )}>
-            {p}
+            {t.dialogs.conflict[p]}
           </button>
         ))}
       </div>
@@ -245,7 +248,7 @@ export function UploadDialog({ folderId, folderName, onClose, onUploaded }: {
       <div className="mt-4 flex justify-end gap-2">
         <button onClick={onClose}
                 className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-bg-muted">
-          Close
+          {t.common.close}
         </button>
         <button
           onClick={start}
@@ -258,7 +261,7 @@ export function UploadDialog({ folderId, folderName, onClose, onUploaded }: {
           )}
         >
           {running && <Loader2 size={12} className="animate-spin" />}
-          {running ? "Uploading…" : "Start"}
+          {running ? t.dialogs.uploading : t.dialogs.start}
         </button>
       </div>
     </ModalShell>
@@ -266,6 +269,7 @@ export function UploadDialog({ folderId, folderName, onClose, onUploaded }: {
 }
 
 function UploadRow({ item }: { item: UploadItem }) {
+  const { t } = useI18n();
   const pct = item.file.size > 0 ? Math.round((item.loaded / item.file.size) * 100) : 0;
   const prefix = item.relDirs.length ? item.relDirs.join("/") + "/" : "";
   return (
@@ -281,8 +285,8 @@ function UploadRow({ item }: { item: UploadItem }) {
          : "—"}
       </span>
       {item.renamedTo && (
-        <span className="truncate text-fg-subtle" title={`renamed → ${item.renamedTo}`}>
-          → {item.renamedTo}
+        <span className="truncate text-fg-subtle" title={t.dialogs.renamedTo(item.renamedTo)}>
+          {t.dialogs.renamedTo(item.renamedTo)}
         </span>
       )}
       {item.err && (
@@ -304,6 +308,7 @@ function ModalShell({ title, onClose, children, wide }: {
   children: React.ReactNode;
   wide?: boolean;
 }) {
+  const { t } = useI18n();
   return (
     <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/40"
          onClick={onClose}>
@@ -317,6 +322,7 @@ function ModalShell({ title, onClose, children, wide }: {
         <header className="flex items-center justify-between border-b border-border px-4 py-2.5 text-sm font-medium">
           <span className="flex items-center gap-2">{title}</span>
           <button onClick={onClose}
+                  title={t.common.close}
                   className="rounded-md p-1 text-fg-muted hover:bg-bg-muted">
             <X size={14} />
           </button>

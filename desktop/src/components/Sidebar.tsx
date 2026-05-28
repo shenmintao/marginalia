@@ -4,22 +4,24 @@ import { BookOpen, MessageSquare, Search, Settings, Library } from "lucide-react
 import { APP_VERSION } from "@/lib/appVersion";
 import { cn } from "@/lib/utils";
 import { usePrefs } from "@/lib/prefs";
+import { useI18n } from "@/lib/i18n";
 
 interface Item {
   to: string;
-  label: string;
+  labelKey: "chat" | "library" | "search" | "settings";
   icon: typeof MessageSquare;
 }
 
 const ITEMS: Item[] = [
-  { to: "/chat", label: "Chat", icon: MessageSquare },
-  { to: "/library", label: "Library", icon: BookOpen },
-  { to: "/search", label: "Search", icon: Search },
-  { to: "/settings", label: "Settings", icon: Settings },
+  { to: "/chat", labelKey: "chat", icon: MessageSquare },
+  { to: "/library", labelKey: "library", icon: BookOpen },
+  { to: "/search", labelKey: "search", icon: Search },
+  { to: "/settings", labelKey: "settings", icon: Settings },
 ];
 
 export function Sidebar() {
   const compact = usePrefs((s) => s.compactSidebar);
+  const { t } = useI18n();
   return (
     <aside
       className={cn(
@@ -33,8 +35,8 @@ export function Sidebar() {
         </div>
         {!compact && (
           <div className="flex flex-col leading-tight">
-            <span className="text-sm font-semibold tracking-tight">Marginalia</span>
-            <span className="text-[11px] text-fg-subtle">personal library</span>
+            <span className="text-sm font-semibold tracking-tight">{t.common.appName}</span>
+            <span className="text-[11px] text-fg-subtle">{t.common.personalLibrary}</span>
           </div>
         )}
       </div>
@@ -42,11 +44,12 @@ export function Sidebar() {
       <nav className="flex flex-col gap-0.5 px-2">
         {ITEMS.map((it) => {
           const Icon = it.icon;
+          const label = t.nav[it.labelKey];
           return (
             <NavLink
               key={it.to}
               to={it.to}
-              title={compact ? it.label : undefined}
+              title={compact ? label : undefined}
               className={({ isActive }) =>
                 cn(
                   "flex items-center rounded-md text-sm transition-colors",
@@ -61,7 +64,7 @@ export function Sidebar() {
               }
             >
               <Icon size={16} strokeWidth={2} />
-              {!compact && <span>{it.label}</span>}
+              {!compact && <span>{label}</span>}
             </NavLink>
           );
         })}

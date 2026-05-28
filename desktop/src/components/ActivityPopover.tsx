@@ -14,6 +14,7 @@ import { CheckCircle2, XCircle, Loader2 } from "lucide-react";
 import { tasks } from "@/api/client";
 import type { ActiveTask, RecentTask } from "@/types/api";
 import { cn } from "@/lib/utils";
+import { useI18n, type I18nStrings } from "@/lib/i18n";
 
 interface Props {
   open: boolean;
@@ -26,6 +27,7 @@ export function ActivityPopover({ open, pollMs }: Props) {
   );
   const [recent, setRecent] = useState<RecentTask[]>([]);
   const [loading, setLoading] = useState(false);
+  const { t } = useI18n();
 
   useEffect(() => {
     if (!open) return;
@@ -78,21 +80,26 @@ export function ActivityPopover({ open, pollMs }: Props) {
     >
       <div className="border-b border-border bg-bg-subtle px-3 py-2">
         <div className="flex items-center justify-between">
-          <span className="font-medium text-fg-base">Activity</span>
+          <span className="font-medium text-fg-base">{t.activity.title}</span>
           {loading && <Loader2 size={11} className="animate-spin text-fg-subtle" />}
         </div>
         {recent.length > 0 && (
           <div className="mt-1 font-mono text-[10.5px] text-fg-subtle">
-            last {recent.length} · {fmtDuration(totals.duration_ms)} ·{" "}
-            ↑ {fmtTokens(totals.tokens_in)} / ↓ {fmtTokens(totals.tokens_out)} ·{" "}
-            {cachePct}% cache · {totals.llm_calls} llm calls
+            {t.activity.recentSummary(
+              recent.length,
+              fmtDuration(totals.duration_ms),
+              fmtTokens(totals.tokens_in),
+              fmtTokens(totals.tokens_out),
+              cachePct,
+              totals.llm_calls,
+            )}
           </div>
         )}
       </div>
 
       <div className="flex-1 overflow-y-auto">
         {(active.running.length > 0 || active.pending.length > 0) && (
-          <Section title="In flight">
+          <Section title={t.activity.inFlight}>
             {active.running.map((t) => (
               <ActiveRow key={t.id} task={t} state="running" />
             ))}
@@ -102,9 +109,9 @@ export function ActivityPopover({ open, pollMs }: Props) {
           </Section>
         )}
 
-        <Section title="Recent">
+        <Section title={t.activity.recent}>
           {recent.length === 0 ? (
-            <div className="px-3 py-3 text-fg-subtle">No tasks yet.</div>
+            <div className="px-3 py-3 text-fg-subtle">{t.activity.noTasks}</div>
           ) : (
             recent.map((t) => <RecentRow key={t.id} task={t} />)
           )}
@@ -126,12 +133,15 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 }
 
 function ActiveRow({ task, state }: { task: ActiveTask; state: "running" | "pending" }) {
+  const { t } = useI18n();
   return (
     <div className="flex items-center gap-2 border-b border-border px-3 py-1.5">
       {state === "running"
         ? <Loader2 size={11} className="shrink-0 animate-spin text-accent" />
         : <span className="block h-1.5 w-1.5 shrink-0 rounded-full bg-fg-subtle" />}
-      <span className="shrink-0 font-medium text-fg-base">{task.kind}</span>
+      <span className="shrink-0 font-medium text-fg-base" title={task.kind}>
+        {taskKindLabel(task.kind, t)}
+      </span>
       <span className="truncate text-fg-muted">{task.label}</span>
       <span className="ml-auto shrink-0 font-mono text-fg-subtle">{fmtAge(task.age_s)}</span>
     </div>
@@ -139,6 +149,7 @@ function ActiveRow({ task, state }: { task: ActiveTask; state: "running" | "pend
 }
 
 function RecentRow({ task }: { task: RecentTask }) {
+  const { t } = useI18n();
   const ok = task.status === "done";
   const hasUsage = (task.tokens_in ?? 0) > 0 || (task.tokens_out ?? 0) > 0;
   const cachePct = task.tokens_in
@@ -150,7 +161,9 @@ function RecentRow({ task }: { task: RecentTask }) {
         {ok
           ? <CheckCircle2 size={11} className="shrink-0 text-accent" />
           : <XCircle size={11} className="shrink-0 text-danger" />}
-        <span className="shrink-0 font-medium text-fg-base">{task.kind}</span>
+        <span className="shrink-0 font-medium text-fg-base" title={task.kind}>
+          {taskKindLabel(task.kind, t)}
+        </span>
         <span className="min-w-0 flex-1 truncate text-fg-muted">{task.label}</span>
         {task.duration_ms != null && (
           <span className="shrink-0 font-mono text-fg-subtle">
@@ -161,8 +174,8 @@ function RecentRow({ task }: { task: RecentTask }) {
       {hasUsage && (
         <div className="ml-[19px] mt-0.5 font-mono text-[10.5px] text-fg-subtle">
           ↑ {fmtTokens(task.tokens_in ?? 0)} / ↓ {fmtTokens(task.tokens_out ?? 0)}
-          {task.tokens_in ? ` · ${cachePct}% cache` : ""}
-          {task.llm_calls ? ` · ${task.llm_calls} llm` : ""}
+          {task.tokens_in ? ` · ${t.activity.cache(cachePct)}` : ""}
+          {task.llm_calls ? ` · ${t.activity.llm(task.llm_calls)}` : ""}
         </div>
       )}
       {!ok && task.last_error && (
@@ -175,6 +188,10 @@ function RecentRow({ task }: { task: RecentTask }) {
       )}
     </div>
   );
+}
+
+function taskKindLabel(kind: string, t: I18nStrings): string {
+  return (t.activity.taskKind as Record<string, string>)[kind] ?? kind;
 }
 
 function fmtTokens(n: number): string {

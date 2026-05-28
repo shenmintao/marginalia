@@ -16,6 +16,7 @@ import { Save, RotateCcw, Loader2 } from "lucide-react";
 
 import { settings as settingsApi } from "@/api/client";
 import { cn } from "@/lib/utils";
+import { useI18n } from "@/lib/i18n";
 import type { LlmProfileName, LlmSettings } from "@/types/api";
 
 const PROFILES: LlmProfileName[] = ["default", "chat", "reflect", "ingest", "vision"];
@@ -55,6 +56,7 @@ interface RowProps {
 }
 
 function ProfileRow({ name, data, isOpen, onToggle, onChange }: RowProps) {
+  const { t } = useI18n();
   const isDefault = name === "default";
   const profile = isDefault ? null : data.profiles[name];
   const overlay = data.overlay;
@@ -162,28 +164,28 @@ function ProfileRow({ name, data, isOpen, onToggle, onChange }: RowProps) {
           <span className="font-medium capitalize">{name}</span>
           <span className="font-mono text-xs text-fg-subtle">
             {view.provider || view.model
-              ? `${view.provider ?? "(unset)"}/${view.model || "(unset)"}`
-              : "(unset)"}
+              ? `${view.provider ?? t.common.unset}/${view.model || t.common.unset}`
+              : t.common.unset}
           </span>
         </div>
         <span className="text-xs text-fg-subtle">
           {overrideCount > 0
-            ? `${overrideCount} override${overrideCount > 1 ? "s" : ""}`
+            ? t.llm.override(overrideCount)
             : optional
               ? view.model || view.api_key_set
-                ? "from .env"
-                : "not configured"
+                ? t.llm.fromEnv
+                : t.common.notConfigured
               : isDefault
                 ? view.api_key_set
-                  ? "from .env"
-                  : "not configured"
-                : "inherited"}
+                  ? t.llm.fromEnv
+                  : t.common.notConfigured
+                : t.llm.inherited}
         </span>
       </button>
 
       {isOpen && (
         <div className="space-y-3 border-t border-border px-3 py-3 text-sm">
-          <Field label="Provider">
+          <Field label={t.llm.provider}>
             <select
               value={form.provider ?? ""}
               onChange={(e) => setForm({ ...form, provider: e.target.value })}
@@ -192,69 +194,69 @@ function ProfileRow({ name, data, isOpen, onToggle, onChange }: RowProps) {
               <option value="">
                 {isDefault
                   ? view.provider
-                    ? `(from .env: ${view.provider})`
-                    : "(unset)"
+                    ? t.common.fromEnv(view.provider)
+                    : t.common.unset
                   : optional
                     ? view.provider
-                      ? `(from .env: ${view.provider})`
-                      : "(unset)"
-                    : `(inherit: ${data.defaults.provider})`}
+                      ? t.common.fromEnv(view.provider)
+                      : t.common.unset
+                    : t.common.inherit(data.defaults.provider)}
               </option>
               <option value="openai">openai</option>
               <option value="openai-compatible">openai-compatible</option>
               <option value="anthropic">anthropic</option>
             </select>
           </Field>
-          <Field label="Model">
+          <Field label={t.llm.model}>
             <input
               value={form.model ?? ""}
               onChange={(e) => setForm({ ...form, model: e.target.value })}
               placeholder={
                 isDefault
                   ? view.model
-                    ? `(from .env: ${view.model})`
-                    : "(unset)"
+                    ? t.common.fromEnv(view.model)
+                    : t.common.unset
                   : optional
                     ? view.model
-                      ? `(from .env: ${view.model})`
-                      : "(unset)"
-                    : `(inherit: ${data.defaults.model})`
+                      ? t.common.fromEnv(view.model)
+                      : t.common.unset
+                    : t.common.inherit(data.defaults.model)
               }
               className="w-full rounded border border-border bg-bg-base px-2 py-1 font-mono text-sm"
             />
           </Field>
-          <Field label="Base URL">
+          <Field label={t.llm.baseUrl}>
             <input
               value={form.base_url ?? ""}
               onChange={(e) => setForm({ ...form, base_url: e.target.value })}
               placeholder={
                 isDefault
                   ? view.base_url
-                    ? `(from .env: ${view.base_url})`
-                    : "(provider default)"
+                    ? t.common.fromEnv(view.base_url)
+                    : t.common.providerDefault
                   : optional
                     ? view.base_url
-                      ? `(from .env: ${view.base_url})`
-                      : "(unset)"
-                    : data.defaults.base_url || "(provider default)"
+                      ? t.common.fromEnv(view.base_url)
+                      : t.common.unset
+                    : data.defaults.base_url || t.common.providerDefault
               }
               className="w-full rounded border border-border bg-bg-base px-2 py-1 font-mono text-sm"
             />
           </Field>
-          <Field label="API key">
+          <Field label={t.llm.apiKey}>
             <input
               type="password"
               value={form.api_key ?? ""}
               onChange={(e) => setForm({ ...form, api_key: e.target.value })}
               placeholder={
                 view.api_key_set
-                  ? `(set: ${view.api_key ?? ""})`
-                  : "(unset)"
+                  ? t.common.setValue(view.api_key ?? "")
+                  : t.common.unset
               }
               className="w-full rounded border border-border bg-bg-base px-2 py-1 font-mono text-sm"
             />
             <p className="mt-1 text-xs text-fg-subtle">
-              Leave blank to keep the existing key. Type a new key to replace.
+              {t.llm.keepKeyHint}
             </p>
           </Field>
 
@@ -270,7 +272,7 @@ function ProfileRow({ name, data, isOpen, onToggle, onChange }: RowProps) {
               disabled={saving || overrideCount === 0}
               className="flex items-center gap-1 text-xs text-fg-subtle hover:text-fg-base disabled:opacity-40"
             >
-              <RotateCcw size={11} /> Reset to default
+              <RotateCcw size={11} /> {t.llm.reset}
             </button>
             <button
               onClick={save}
@@ -281,12 +283,12 @@ function ProfileRow({ name, data, isOpen, onToggle, onChange }: RowProps) {
               )}
             >
               {saving ? <Loader2 size={11} className="animate-spin" /> : <Save size={11} />}
-              Save
+              {t.common.save}
             </button>
           </div>
           {savedAt && !saving && (
             <p className="text-right text-xs text-fg-subtle">
-              Saved · {new Date(savedAt).toLocaleTimeString()}
+              {t.common.saved} · {new Date(savedAt).toLocaleTimeString()}
             </p>
           )}
         </div>

@@ -2,9 +2,11 @@ import { Moon, Sun, MonitorSmartphone } from "lucide-react";
 
 import { useTheme } from "@/lib/theme";
 import { cn } from "@/lib/utils";
+import { useI18n } from "@/lib/i18n";
 
 export function TopBar() {
   const { mode, setMode } = useTheme();
+  const { t } = useI18n();
 
   return (
     <header className="flex h-12 items-center justify-between border-b border-border bg-bg-base/80 px-4 backdrop-blur">
@@ -13,13 +15,13 @@ export function TopBar() {
       </div>
 
       <div className="flex items-center gap-1 rounded-md border border-border bg-bg-subtle p-0.5">
-        <ThemeBtn current={mode} mode="light" onClick={() => setMode("light")}>
+        <ThemeBtn current={mode} mode="light" title={t.theme.light} onClick={() => setMode("light")}>
           <Sun size={14} />
         </ThemeBtn>
-        <ThemeBtn current={mode} mode="system" onClick={() => setMode("system")}>
+        <ThemeBtn current={mode} mode="system" title={t.theme.system} onClick={() => setMode("system")}>
           <MonitorSmartphone size={14} />
         </ThemeBtn>
-        <ThemeBtn current={mode} mode="dark" onClick={() => setMode("dark")}>
+        <ThemeBtn current={mode} mode="dark" title={t.theme.dark} onClick={() => setMode("dark")}>
           <Moon size={14} />
         </ThemeBtn>
       </div>
@@ -28,9 +30,10 @@ export function TopBar() {
 }
 
 function ThemeBtn({
-  current, mode, onClick, children,
+  current, mode, title, onClick, children,
 }: {
   current: string; mode: string;
+  title: string;
   onClick: () => void; children: React.ReactNode;
 }) {
   const active = current === mode;
@@ -43,7 +46,7 @@ function ThemeBtn({
           ? "bg-bg-elevated text-fg-base shadow-sm"
           : "text-fg-subtle hover:text-fg-base",
       )}
-      title={mode}
+      title={title}
     >
       {children}
     </button>

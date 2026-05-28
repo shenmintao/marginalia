@@ -5,6 +5,7 @@ import { health, tasks } from "@/api/client";
 import { ActivityPopover } from "@/components/ActivityPopover";
 import { usePrefs } from "@/lib/prefs";
 import { cn } from "@/lib/utils";
+import { useI18n } from "@/lib/i18n";
 
 export function StatusBar() {
   const [online, setOnline] = useState<boolean | null>(null);
@@ -13,6 +14,7 @@ export function StatusBar() {
   const [popoverOpen, setPopoverOpen] = useState(false);
   const popoverRef = useRef<HTMLDivElement>(null);
   const pollMs = usePrefs((s) => s.statusPollMs);
+  const { t } = useI18n();
 
   useEffect(() => {
     let cancelled = false;
@@ -69,10 +71,10 @@ export function StatusBar() {
         >
           {online === false ? <WifiOff size={11} /> : <Wifi size={11} />}
           {online === null
-            ? "connecting…"
+            ? t.status.connecting
             : online
-              ? `connected · ${storage}`
-              : "backend offline"}
+              ? t.status.connected(storage)
+              : t.status.backendOffline}
         </span>
       </div>
       <div ref={popoverRef}>
@@ -83,15 +85,15 @@ export function StatusBar() {
             "hover:bg-bg-muted hover:text-fg-base",
             popoverOpen && "bg-bg-muted text-fg-base",
           )}
-          title="Show task activity"
+          title={t.status.showActivity}
         >
           <Activity
             size={11}
             className={cn(totalBusy > 0 && "text-accent animate-pulse-soft")}
           />
           {totalBusy > 0
-            ? `${busy.running} running · ${busy.pending} pending`
-            : "idle"}
+            ? t.status.busy(busy.running, busy.pending)
+            : t.status.idle}
         </button>
         <ActivityPopover open={popoverOpen} pollMs={pollMs} />
       </div>

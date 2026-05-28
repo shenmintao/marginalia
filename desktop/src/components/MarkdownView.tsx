@@ -30,6 +30,7 @@ import { useTheme } from "@/lib/theme";
 import { processLatexBrackets } from "@/lib/markdown";
 import { useTemporaryValue } from "@/hooks/useTemporaryValue";
 import { cn } from "@/lib/utils";
+import { useI18n } from "@/lib/i18n";
 
 /** Deep-link position on top of an `entry:<uuid>` citation. runtime.py
  *  rewrites the agent's footnote definitions into one of three URL shapes:
@@ -197,6 +198,7 @@ function CodeRenderer({
 
 function CodeBlock({ language, text }: { language: string; text: string }) {
   const { effective } = useTheme();
+  const { t } = useI18n();
   const [copied, setCopied] = useTemporaryValue(false, 1500);
   const onCopy = async () => {
     try {
@@ -211,11 +213,11 @@ function CodeBlock({ language, text }: { language: string; text: string }) {
         <button
           onClick={onCopy}
           className="flex items-center gap-1 rounded px-1.5 py-0.5 hover:bg-bg-muted hover:text-fg-base"
-          title="Copy to clipboard"
+          title={t.common.copy}
         >
           {copied
-            ? <><Check size={11} /> copied</>
-            : <><Copy size={11} /> copy</>}
+            ? <><Check size={11} /> {t.common.copied}</>
+            : <><Copy size={11} /> {t.common.copy}</>}
         </button>
       </div>
       <SyntaxHighlighter

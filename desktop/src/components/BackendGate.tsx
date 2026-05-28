@@ -15,6 +15,7 @@
 import { useEffect, useState } from "react";
 
 import { health, resolveTauriBaseUrl } from "@/api/client";
+import { useI18n } from "@/lib/i18n";
 
 const POLL_INTERVAL_MS = 300;
 const PER_ATTEMPT_TIMEOUT_MS = 1500;
@@ -28,6 +29,7 @@ export function BackendGate({ children }: Props) {
   const [ready, setReady] = useState(false);
   const [waitedMs, setWaitedMs] = useState(0);
   const [lastError, setLastError] = useState<string | null>(null);
+  const { t } = useI18n();
 
   useEffect(() => {
     let cancelled = false;
@@ -65,19 +67,18 @@ export function BackendGate({ children }: Props) {
     <div className="flex h-full w-full items-center justify-center bg-bg-base text-fg-base">
       <div className="max-w-md text-center">
         <div className="mx-auto h-8 w-8 animate-spin rounded-full border-2 border-border border-t-accent" />
-        <p className="mt-4 text-sm font-medium">Starting Marginalia…</p>
+        <p className="mt-4 text-sm font-medium">{t.backend.starting}</p>
         {!stale ? (
           <p className="mt-1 text-xs text-fg-subtle">
-            Waiting for the local backend to come up.
+            {t.backend.waiting}
           </p>
         ) : (
           <div className="mt-3 space-y-1 text-xs text-fg-subtle">
             <p>
-              The backend hasn't responded in {Math.round(waitedMs / 1000)}s.
-              It usually starts within a few seconds.
+              {t.backend.slow(Math.round(waitedMs / 1000))}
             </p>
             <p>
-              If this persists, check{" "}
+              {t.backend.checkLog}{" "}
               <span className="font-mono">~/Marginalia/logs/backend.log</span>.
             </p>
             {lastError && (

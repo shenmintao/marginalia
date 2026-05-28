@@ -4,6 +4,7 @@ import { Search as SearchIcon, FileText, Loader2 } from "lucide-react";
 
 import { search } from "@/api/client";
 import type { SearchEntry } from "@/types/api";
+import { useI18n } from "@/lib/i18n";
 
 export function SearchPage() {
   const [q, setQ] = useState("");
@@ -11,6 +12,7 @@ export function SearchPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const { t } = useI18n();
 
   useEffect(() => { inputRef.current?.focus(); }, []);
 
@@ -41,7 +43,7 @@ export function SearchPage() {
             ref={inputRef}
             value={q}
             onChange={(e) => setQ(e.target.value)}
-            placeholder="Search by name, summary, or tag…"
+            placeholder={t.search.placeholder}
             className="flex-1 bg-transparent text-sm outline-none placeholder:text-fg-subtle"
           />
           {loading && <Loader2 size={14} className="animate-spin text-fg-subtle" />}
@@ -56,10 +58,10 @@ export function SearchPage() {
             </div>
           )}
           {results === null && !error && !loading && (
-            <p className="text-sm text-fg-subtle">Type to search the library.</p>
+            <p className="text-sm text-fg-subtle">{t.search.empty}</p>
           )}
           {results && results.length === 0 && !loading && (
-            <p className="text-sm text-fg-subtle">No matches.</p>
+            <p className="text-sm text-fg-subtle">{t.search.noMatches}</p>
           )}
           {results && results.map((e) => (
             <Link

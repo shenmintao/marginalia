@@ -30,6 +30,7 @@ import { fileEntries } from "@/api/client";
 import { MarkdownView } from "@/components/MarkdownView";
 import type { FileMetadata } from "@/types/api";
 import { useTheme } from "@/lib/theme";
+import { useI18n } from "@/lib/i18n";
 
 export interface ViewerLocator {
   kind: "quote" | "line" | "page";
@@ -192,6 +193,7 @@ function parseLineRange(value: string): { start: number; end: number } | null {
 }
 
 export function FileViewer({ entryId, meta, locator, onLocatorConsumed }: Props) {
+  const { t } = useI18n();
   const name = meta?.display_name || "";
   const kind = useMemo<Kind>(() => classifyByName(name), [name]);
   const contentUrl = fileEntries.contentUrl(entryId);
@@ -210,9 +212,9 @@ export function FileViewer({ entryId, meta, locator, onLocatorConsumed }: Props)
     <div className="flex h-full min-w-0 flex-1 flex-col">
       <header className="flex shrink-0 items-center gap-2 border-b border-border bg-bg-subtle px-4 py-2 text-sm">
         <FileText size={14} className="text-fg-muted" />
-        <span className="flex-1 truncate font-medium">{name || "—"}</span>
+        <span className="flex-1 truncate font-medium">{name || t.common.unset}</span>
         <a href={downloadUrl} download className="flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs hover:bg-bg-muted">
-          <Download size={12} /> Download
+          <Download size={12} /> {t.library.download}
         </a>
       </header>
       <div className="flex-1 overflow-hidden">
@@ -589,27 +591,28 @@ function LocatorBanner(
     | { kind: "quote"; quote: string }
     | { kind: "quote-missing"; quote: string },
 ) {
+  const { t } = useI18n();
   if (props.kind === "line") {
     const span = props.range.start === props.range.end
-      ? `line ${props.range.start}`
-      : `lines ${props.range.start}–${props.range.end}`;
+      ? t.library.line(props.range.start)
+      : t.library.lines(props.range.start, props.range.end);
     return (
       <div className="sticky top-0 z-10 border-b border-accent/30 bg-accent/10 px-3 py-1 text-[11px] font-mono text-accent">
-        jumped to {span}
+        {t.library.jumpedLine(span)}
       </div>
     );
   }
-  const head = props.quote.length > 30 ? props.quote.slice(0, 30) + "…" : props.quote;
+  const head = props.quote.length > 30 ? props.quote.slice(0, 30) + "..." : props.quote;
   if (props.kind === "quote-missing") {
     return (
       <div className="sticky top-0 z-10 border-b border-warning/30 bg-warning/10 px-3 py-1 text-[11px] text-warning">
-        未在原文中定位到引文 “{head}” — 请用浏览器搜索 (Ctrl/Cmd-F)
+        {t.library.quoteMissing(head)}
       </div>
     );
   }
   return (
     <div className="sticky top-0 z-10 border-b border-accent/30 bg-accent/10 px-3 py-1 text-[11px] text-accent">
-      jumped to “{head}”
+      {t.library.quoteJumped(head)}
     </div>
   );
 }
@@ -650,22 +653,24 @@ function DocxView({ url, quote, onScrolled }: {
 }
 
 function BinaryView({ url, name }: { url: string; name: string }) {
+  const { t } = useI18n();
   return (
     <div className="flex h-full flex-col items-center justify-center gap-3 p-6 text-center text-sm text-fg-muted">
       <FileText size={32} className="text-fg-subtle" />
-      <p>Preview not available for this file type.</p>
+      <p>{t.library.previewUnavailable}</p>
       <a href={url} download={name}
          className="flex items-center gap-1 rounded-md border border-border bg-bg-subtle px-3 py-1.5 text-xs hover:bg-bg-muted">
-        <Download size={12} /> Download
+        <Download size={12} /> {t.library.download}
       </a>
     </div>
   );
 }
 
 function ViewerLoading() {
+  const { t } = useI18n();
   return (
     <div className="flex h-full items-center justify-center text-sm text-fg-muted">
-      <Loader2 size={14} className="mr-2 animate-spin" /> loading…
+      <Loader2 size={14} className="mr-2 animate-spin" /> {t.common.loading}
     </div>
   );
 }
@@ -677,9 +682,10 @@ function ViewerError({ msg }: { msg: string }) {
   );
 }
 function TruncatedBanner() {
+  const { t } = useI18n();
   return (
     <div className="border-b border-border bg-bg-subtle px-3 py-1 text-[11px] text-fg-subtle">
-      File truncated to first 2 MB for preview. Download for full content.
+      {t.library.truncatedPreview}
     </div>
   );
 }

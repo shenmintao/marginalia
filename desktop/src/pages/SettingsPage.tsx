@@ -15,8 +15,9 @@ import { Save, Sun, Moon, Monitor } from "lucide-react";
 
 import { setBaseUrl, getBaseUrl, settings as settingsApi } from "@/api/client";
 import { LlmProfileEditor } from "@/components/LlmProfileEditor";
-import { usePrefs } from "@/lib/prefs";
+import { usePrefs, type LanguagePreference } from "@/lib/prefs";
 import { useTheme } from "@/lib/theme";
+import { useI18n } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import type { LlmSettings, OnConflict, ServerSettings } from "@/types/api";
 
@@ -41,10 +42,11 @@ interface ServerCtx {
 
 export function SettingsPage() {
   const ctx = useServerCtx();
+  const { t } = useI18n();
   return (
     <div className="h-full overflow-y-auto px-8 py-8">
       <div className="mx-auto max-w-2xl space-y-6">
-        <h1 className="text-xl font-semibold">Settings</h1>
+        <h1 className="text-xl font-semibold">{t.settings.title}</h1>
 
         <ConnectionSection />
         <PreferencesSection ctx={ctx} />
@@ -117,6 +119,7 @@ function useServerCtx(): ServerCtx {
 // ---- Connection ------------------------------------------------------------
 
 function ConnectionSection() {
+  const { t } = useI18n();
   const [base, setBase] = useState(
     () => localStorage.getItem(STORAGE_KEY) || getBaseUrl(),
   );
@@ -131,18 +134,18 @@ function ConnectionSection() {
   };
 
   return (
-    <Section title="Connection" subtitle="How the GUI reaches the Marginalia backend.">
-      <label className="block text-sm font-medium">API base URL</label>
+    <Section title={t.settings.connectionTitle} subtitle={t.settings.connectionSubtitle}>
+      <label className="block text-sm font-medium">{t.settings.apiBaseUrl}</label>
       <p className="mt-1 text-xs text-fg-subtle">
-        Leave empty to use the dev proxy (recommended in browser). Set to
+        {t.settings.apiBaseHelp}
         <span className="mx-1 font-mono">http://host:8000</span>
-        when connecting to a remote server.
+        {t.settings.apiBaseHelpTail}
       </p>
       <div className="mt-3 flex gap-2">
         <input
           value={base}
           onChange={(e) => setBase(e.target.value)}
-          placeholder="(empty = same-origin / proxy)"
+          placeholder={t.settings.apiBasePlaceholder}
           className="flex-1 rounded-md border border-border bg-bg-base px-3 py-1.5 font-mono text-sm outline-none focus:border-accent"
         />
         <button
@@ -151,12 +154,12 @@ function ConnectionSection() {
             "flex items-center gap-1.5 rounded-md bg-accent px-3 text-sm font-medium text-accent-fg hover:opacity-90",
           )}
         >
-          <Save size={13} /> Save
+          <Save size={13} /> {t.common.save}
         </button>
       </div>
       {savedAt && (
         <p className="mt-2 text-xs text-fg-subtle">
-          Saved · {new Date(savedAt).toLocaleTimeString()}
+          {t.common.saved} · {new Date(savedAt).toLocaleTimeString()}
         </p>
       )}
     </Section>
@@ -168,12 +171,25 @@ function ConnectionSection() {
 function PreferencesSection({ ctx }: { ctx: ServerCtx }) {
   const { mode, setMode } = useTheme();
   const prefs = usePrefs();
+  const { t, language, setLanguage } = useI18n();
   const { server, setDefaultConflict, setServerNumber } = ctx;
 
   return (
-    <Section title="Preferences" subtitle="Local appearance and defaults.">
+    <Section title={t.settings.preferencesTitle} subtitle={t.settings.preferencesSubtitle}>
       <div className="space-y-5">
-        <Row label="Theme">
+        <Row label={t.settings.language} hint={t.settings.languageHint}>
+          <select
+            value={language}
+            onChange={(e) => setLanguage(e.target.value as LanguagePreference)}
+            className="rounded border border-border bg-bg-base px-2 py-1 text-sm"
+          >
+            <option value="auto">{t.locale.auto}</option>
+            <option value="en">{t.locale.en}</option>
+            <option value="zh">{t.locale.zh}</option>
+          </select>
+        </Row>
+
+        <Row label={t.settings.theme}>
           <div className="flex gap-1">
             {(["light", "dark", "system"] as const).map((m) => (
               <button
@@ -189,15 +205,15 @@ function PreferencesSection({ ctx }: { ctx: ServerCtx }) {
                 {m === "light" && <Sun size={11} />}
                 {m === "dark" && <Moon size={11} />}
                 {m === "system" && <Monitor size={11} />}
-                {m}
+                {t.theme[m]}
               </button>
             ))}
           </div>
         </Row>
 
         <Row
-          label="Default conflict policy"
-          hint="Used when uploading a file whose name already exists in the target folder. Stored on the server so the CLI and GUI agree."
+          label={t.settings.conflictPolicy}
+          hint={t.settings.conflictHint}
         >
           <select
             value={server?.default_on_conflict ?? "rename"}
@@ -205,15 +221,15 @@ function PreferencesSection({ ctx }: { ctx: ServerCtx }) {
             onChange={(e) => setDefaultConflict(e.target.value as OnConflict)}
             className="rounded border border-border bg-bg-base px-2 py-1 text-sm disabled:opacity-50"
           >
-            <option value="rename">rename (append a suffix)</option>
-            <option value="error">error (reject the upload)</option>
-            <option value="skip">skip (keep existing)</option>
+            <option value="rename">{t.settings.conflictRename}</option>
+            <option value="error">{t.settings.conflictError}</option>
+            <option value="skip">{t.settings.conflictSkip}</option>
           </select>
         </Row>
 
         <Row
-          label="Agent token budget"
-          hint="Max tokens per agent step (plan / execute). Bump these for long-context models that emit large single responses."
+          label={t.settings.agentTokenBudget}
+          hint={t.settings.agentTokenBudgetHint}
         >
           <div className="flex items-center gap-1.5">
             <NumberInput
@@ -239,8 +255,8 @@ function PreferencesSection({ ctx }: { ctx: ServerCtx }) {
         </Row>
 
         <Row
-          label="Agent execute turn budget"
-          hint="Max tool-using rounds per question. Higher = deeper investigations at the cost of more LLM calls. The agent gets a wrap-up nudge when the last 1/3 of the budget is reached."
+          label={t.settings.executeTurnBudget}
+          hint={t.settings.executeTurnBudgetHint}
         >
           <NumberInput
             value={server?.agent_execute_max_turns}
@@ -254,8 +270,8 @@ function PreferencesSection({ ctx }: { ctx: ServerCtx }) {
         </Row>
 
         <Row
-          label="Concurrent ingest tasks"
-          hint="Maximum background tasks the worker runs at once. Lower this when ingesting large scanned PDFs."
+          label={t.settings.concurrentIngest}
+          hint={t.settings.concurrentIngestHint}
         >
           <NumberInput
             value={server?.worker_batch_size}
@@ -269,8 +285,8 @@ function PreferencesSection({ ctx }: { ctx: ServerCtx }) {
         </Row>
 
         <Row
-          label="Ingest LLM concurrency"
-          hint="Parallel LLM calls for long text/PDF chunks and scanned-PDF OCR pages. Lower it if your provider rate-limits."
+          label={t.settings.ingestLlmConcurrency}
+          hint={t.settings.ingestLlmConcurrencyHint}
         >
           <NumberInput
             value={server?.llm_ingest_concurrency}
@@ -284,8 +300,8 @@ function PreferencesSection({ ctx }: { ctx: ServerCtx }) {
         </Row>
 
         <Row
-          label="Status bar refresh"
-          hint="How often the bottom bar polls /health and the running task count."
+          label={t.settings.statusRefresh}
+          hint={t.settings.statusRefreshHint}
         >
           <select
             value={prefs.statusPollMs}
@@ -300,7 +316,7 @@ function PreferencesSection({ ctx }: { ctx: ServerCtx }) {
           </select>
         </Row>
 
-        <Row label="Compact sidebar" hint="Show icon-only navigation on the left.">
+        <Row label={t.settings.compactSidebar} hint={t.settings.compactSidebarHint}>
           <input
             type="checkbox"
             checked={prefs.compactSidebar}
@@ -317,53 +333,54 @@ function PreferencesSection({ ctx }: { ctx: ServerCtx }) {
 
 function ServerSection({ ctx }: { ctx: ServerCtx }) {
   const { server, llm, err, setLlm } = ctx;
+  const { t } = useI18n();
 
   if (err) {
     return (
-      <Section title="Server" subtitle="Live state of the running backend.">
-        <p className="text-sm text-danger">Backend unreachable — {err}</p>
+      <Section title={t.settings.serverTitle} subtitle={t.settings.serverSubtitle}>
+        <p className="text-sm text-danger">{t.settings.backendUnreachable(err)}</p>
       </Section>
     );
   }
 
   if (!server || !llm) {
     return (
-      <Section title="Server" subtitle="Live state of the running backend.">
-        <p className="text-sm text-fg-subtle">Loading…</p>
+      <Section title={t.settings.serverTitle} subtitle={t.settings.serverSubtitle}>
+        <p className="text-sm text-fg-subtle">{t.common.loading}</p>
       </Section>
     );
   }
 
   return (
     <>
-      <Section title="Server status" subtitle="Read-only — set via .env or via Preferences above.">
+      <Section title={t.settings.serverStatusTitle} subtitle={t.settings.serverStatusSubtitle}>
         <dl className="grid grid-cols-[1fr_2fr] gap-x-4 gap-y-2 text-sm">
-          <Kv k="App env" v={server.app_env} />
-          <Kv k="Marginalia home" v={server.marginalia_home} mono />
-          <Kv k="Database backend" v={server.db_backend} />
-          <Kv k="Storage backend" v={server.storage_backend} />
-          <Kv k="Worker enabled" v={server.worker_enabled ? "yes" : "no"} />
+          <Kv k={t.settings.kv.appEnv} v={server.app_env} />
+          <Kv k={t.settings.kv.home} v={server.marginalia_home} mono />
+          <Kv k={t.settings.kv.db} v={server.db_backend} />
+          <Kv k={t.settings.kv.storage} v={server.storage_backend} />
+          <Kv k={t.settings.kv.worker} v={server.worker_enabled ? t.common.yes : t.common.no} />
           {server.worker_batch_size != null && (
-            <Kv k="Concurrent ingest tasks" v={String(server.worker_batch_size)} />
+            <Kv k={t.settings.kv.concurrentIngest} v={String(server.worker_batch_size)} />
           )}
-          <Kv k="Auto lifecycle" v={server.auto_lifecycle_enabled ? "enabled" : "disabled"} />
-          <Kv k="Default conflict policy" v={server.default_on_conflict} />
+          <Kv k={t.settings.kv.autoLifecycle} v={server.auto_lifecycle_enabled ? t.common.enabled : t.common.disabled} />
+          <Kv k={t.settings.kv.conflict} v={server.default_on_conflict} />
           <Kv
-            k="Agent token budget (plan/exec)"
+            k={t.settings.kv.tokenBudget}
             v={`${server.agent_plan_max_tokens.toLocaleString()} / ${server.agent_execute_max_tokens.toLocaleString()}`}
           />
-          <Kv k="Agent execute turns" v={String(server.agent_execute_max_turns)} />
-          <Kv k="Ingest LLM concurrency" v={String(server.llm_ingest_concurrency)} />
+          <Kv k={t.settings.kv.executeTurns} v={String(server.agent_execute_max_turns)} />
+          <Kv k={t.settings.kv.ingestConcurrency} v={String(server.llm_ingest_concurrency)} />
           <Kv
-            k="Vision profile"
-            v={visionConfigured(llm) ? "configured" : "not set (image OCR skipped)"}
+            k={t.settings.kv.vision}
+            v={visionConfigured(llm) ? t.settings.visionConfigured : t.settings.visionMissing}
           />
         </dl>
       </Section>
 
       <Section
-        title="LLM profiles"
-        subtitle="Per-task model overrides. Empty fields inherit the default profile."
+        title={t.settings.llmProfilesTitle}
+        subtitle={t.settings.llmProfilesSubtitle}
       >
         <LlmProfileEditor data={llm} onChange={setLlm} />
       </Section>

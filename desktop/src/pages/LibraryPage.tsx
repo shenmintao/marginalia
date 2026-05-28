@@ -19,6 +19,7 @@ import { FolderTree } from "@/components/library/FolderTree";
 import { FileViewer } from "@/components/library/FileViewer";
 import { MetaPanel } from "@/components/library/MetaPanel";
 import { NewFolderDialog, UploadDialog } from "@/components/library/Dialogs";
+import { useI18n, type I18nStrings } from "@/lib/i18n";
 
 export function LibraryPage() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -42,6 +43,7 @@ export function LibraryPage() {
   const [pendingLocator, setPendingLocator] = useState<
     { kind: "quote" | "line" | "page"; value: string } | null
   >(null);
+  const { t } = useI18n();
 
   const [newFolderUnder, setNewFolderUnder] = useState<{ id: string | null; name: string } | null>(null);
   const [uploadInto, setUploadInto] = useState<{ id: string | null; name: string } | null>(null);
@@ -148,7 +150,7 @@ export function LibraryPage() {
   // when the user has clearly picked a folder is rarely what they want.
   // Bias header actions toward the current selection; fall back to root.
   const headerTargetFolderId = selectedFolder?.id ?? null;
-  const headerTargetName = selectedFolder?.name ?? "root";
+  const headerTargetName = selectedFolder?.name ?? t.library.root;
 
   return (
     <div className="flex h-full">
@@ -164,17 +166,13 @@ export function LibraryPage() {
           expandPath={expandPath}
           pendingEntryId={pendingEntryId}
           onPendingEntryResolved={() => setPendingEntryId(null)}
-          onUploadHere={(id) => setUploadInto({
-            id: id ?? headerTargetFolderId,
-            name: id
-              ? (selectedFolder?.id === id ? selectedFolder.name : "…")
-              : headerTargetName,
+          onUploadHere={(target) => setUploadInto(target ?? {
+            id: headerTargetFolderId,
+            name: headerTargetName,
           })}
-          onNewFolderHere={(id) => setNewFolderUnder({
-            id: id ?? headerTargetFolderId,
-            name: id
-              ? (selectedFolder?.id === id ? selectedFolder.name : "…")
-              : headerTargetName,
+          onNewFolderHere={(target) => setNewFolderUnder(target ?? {
+            id: headerTargetFolderId,
+            name: headerTargetName,
           })}
           onEntryDeleted={(id) => {
             if (selectedEntry?.id === id) {
@@ -201,7 +199,7 @@ export function LibraryPage() {
             onLocatorConsumed={() => setPendingLocator(null)}
           />
         ) : (
-          <EmptyViewer folder={selectedFolder} onClick={clearSelection} />
+          <EmptyViewer folder={selectedFolder} onClick={clearSelection} t={t} />
         )}
         <MetaPanel
           meta={meta}
@@ -231,7 +229,15 @@ export function LibraryPage() {
   );
 }
 
-function EmptyViewer({ folder, onClick }: { folder: Folder | null; onClick: () => void }) {
+function EmptyViewer({
+  folder,
+  onClick,
+  t,
+}: {
+  folder: Folder | null;
+  onClick: () => void;
+  t: I18nStrings;
+}) {
   return (
     <div
       onClick={onClick}
@@ -241,12 +247,12 @@ function EmptyViewer({ folder, onClick }: { folder: Folder | null; onClick: () =
         <Inbox size={20} />
       </div>
       <h2 className="text-base font-medium">
-        {folder ? folder.name : "Library"}
+        {t.library.selectFileTitle(folder?.name ?? null)}
       </h2>
       <p className="mt-1 max-w-md text-sm text-fg-muted">
         {folder
-          ? "Select a file from the tree to preview it. Click here to deselect."
-          : "Select or create a folder to start. Files appear under their folder."}
+          ? t.library.selectFileHint
+          : t.library.emptyHint}
       </p>
     </div>
   );

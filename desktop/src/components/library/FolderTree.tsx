@@ -18,6 +18,7 @@ import {
 import { folders, fileEntries, files, ApiError } from "@/api/client";
 import type { Folder, FileEntrySummary } from "@/types/api";
 import { cn } from "@/lib/utils";
+import { useI18n, type I18nStrings } from "@/lib/i18n";
 
 export interface FileNode {
   kind: "file";
@@ -28,6 +29,10 @@ export interface FolderNode {
   folder: Folder;
 }
 export type Node = FileNode | FolderNode;
+export interface FolderActionTarget {
+  id: string | null;
+  name: string;
+}
 
 interface Props {
   selectedEntryId: string | null;
@@ -47,8 +52,8 @@ interface Props {
    *  doesn't keep re-selecting on subsequent re-renders. */
   pendingEntryId?: string | null;
   onPendingEntryResolved?: () => void;
-  onUploadHere: (folderId: string | null) => void;
-  onNewFolderHere: (parentId: string | null) => void;
+  onUploadHere: (target: FolderActionTarget | null) => void;
+  onNewFolderHere: (target: FolderActionTarget | null) => void;
   onEntryDeleted: (entryId: string) => void;
   onFolderDeleted: (folderId: string) => void;
   onClearSelection: () => void;
@@ -59,6 +64,7 @@ export function FolderTree(props: Props) {
   const [rootEntries, setRootEntries] = useState<FileEntrySummary[]>([]);
   const [err, setErr] = useState<string | null>(null);
   const [reprocessingAll, setReprocessingAll] = useState(false);
+  const { t } = useI18n();
 
   const load = useCallback(() => {
     folders.list(null).then(
@@ -83,13 +89,13 @@ export function FolderTree(props: Props) {
     }
   }, [rootEntries, props.pendingEntryId, props.expandPath, props.onSelectFile, props]);
 
-  const headerTarget = props.selectedFolderName ?? "root";
+  const headerTarget = props.selectedFolderName ?? t.library.root;
   const reprocessScope = props.selectedFolderId
     ? { folder_id: props.selectedFolderId } as const
     : { all: true } as const;
   const reprocessLabel = props.selectedFolderId
-    ? `Re-run AI analysis on every file in "${props.selectedFolderName}" and its subfolders?`
-    : `Re-run AI analysis on EVERY file in the library?\n\nThis clears existing summaries and tags, then re-ingests with the current LLM. Could take a while.`;
+    ? t.library.reprocessFolderConfirm(props.selectedFolderName ?? headerTarget)
+    : t.library.reprocessAllConfirm;
 
   const onReprocessScope = async () => {
     if (reprocessingAll) return;
@@ -98,13 +104,11 @@ export function FolderTree(props: Props) {
     try {
       const r = await files.reprocessBulk(reprocessScope);
       alert(
-        `Queued ${r.task_ids.length} files for reprocessing.` +
-          (r.reused_count ? ` ${r.reused_count} already in the queue.` : "") +
-          (r.skipped_count ? ` ${r.skipped_count} skipped (deleted).` : ""),
+        t.library.queuedReprocess(r.task_ids.length, r.reused_count, r.skipped_count),
       );
     } catch (e) {
       const msg = e instanceof ApiError ? e.message : String(e);
-      alert(`Bulk reprocess failed: ${msg}`);
+      alert(t.library.bulkReprocessFailed(msg));
     } finally {
       setReprocessingAll(false);
     }
@@ -113,14 +117,14 @@ export function FolderTree(props: Props) {
   return (
     <div className="flex h-full flex-col">
       <div className="flex shrink-0 items-center justify-between border-b border-border bg-bg-subtle px-3 py-2">
-        <span className="text-xs font-medium text-fg-muted">Library</span>
+        <span className="text-xs font-medium text-fg-muted">{t.library.title}</span>
         <div className="flex items-center gap-1">
           <button
             onClick={onReprocessScope}
             disabled={reprocessingAll}
             title={props.selectedFolderId
-              ? `Reprocess "${headerTarget}" subtree`
-              : "Reprocess entire library"}
+              ? t.library.reprocessFolderTitle(headerTarget)
+              : t.library.reprocessAllTitle}
             className="rounded p-1 text-fg-muted hover:bg-bg-muted hover:text-fg-base disabled:opacity-50"
           >
             {reprocessingAll
@@ -129,14 +133,14 @@ export function FolderTree(props: Props) {
           </button>
           <button
             onClick={() => props.onNewFolderHere(null)}
-            title={`New folder in ${headerTarget}`}
+            title={t.library.newFolderIn(headerTarget)}
             className="rounded p-1 text-fg-muted hover:bg-bg-muted hover:text-fg-base"
           >
             <Plus size={13} />
           </button>
           <button
             onClick={() => props.onUploadHere(null)}
-            title={`Upload to ${headerTarget}`}
+            title={t.library.uploadTo(headerTarget)}
             className="rounded p-1 text-fg-muted hover:bg-bg-muted hover:text-fg-base"
           >
             <UploadIcon size={13} />
@@ -152,10 +156,10 @@ export function FolderTree(props: Props) {
       >
         {err && <p className="px-2 text-xs text-danger">{err}</p>}
         {roots === null && !err && (
-          <p className="px-2 text-xs text-fg-subtle">loading…</p>
+          <p className="px-2 text-xs text-fg-subtle">{t.common.loading}</p>
         )}
         {roots && roots.length === 0 && rootEntries.length === 0 && (
-          <p className="px-2 text-xs text-fg-subtle">Empty. Use the buttons above to create a folder or upload.</p>
+          <p className="px-2 text-xs text-fg-subtle">{t.library.emptyTree}</p>
         )}
         {roots && roots.map((f) => (
           <FolderRow
@@ -174,6 +178,7 @@ export function FolderTree(props: Props) {
             ingesting={props.ingestingFileIds.has(e.file_id)}
             onClick={() => props.onSelectFile(e)}
             onDeleted={(id) => { load(); props.onEntryDeleted(id); }}
+            t={t}
           />
         ))}
       </div>
@@ -197,6 +202,7 @@ function FolderRow({
   const [entries, setEntries] = useState<FileEntrySummary[] | null>(null);
   const [loading, setLoading] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const { t } = useI18n();
 
   const loadDetail = useCallback(() => {
     setLoading(true);
@@ -240,17 +246,14 @@ function FolderRow({
   const onDeleteFolder = async (e: React.MouseEvent) => {
     e.stopPropagation();
     if (deleting) return;
-    if (!confirm(
-      `Delete folder "${folder.name}" and everything inside it?\n\n` +
-      `Subfolders and files are moved to trash and purged after 7 days.`,
-    )) return;
+    if (!confirm(t.library.deleteFolderConfirm(folder.name))) return;
     setDeleting(true);
     try {
       await folders.delete(folder.id);
       onFolderDeleted(folder.id);
     } catch (err) {
       const msg = err instanceof ApiError ? err.message : String(err);
-      alert(`Delete failed: ${msg}`);
+      alert(t.library.deleteFailed(msg));
       setDeleting(false);
     }
   };
@@ -281,15 +284,21 @@ function FolderRow({
         </button>
         <div className="hidden items-center gap-0.5 group-hover:flex">
           <button
-            onClick={(e) => { e.stopPropagation(); onNewFolderHere(folder.id); }}
-            title="New subfolder"
+            onClick={(e) => {
+              e.stopPropagation();
+              onNewFolderHere({ id: folder.id, name: folder.name });
+            }}
+            title={t.library.newSubfolder}
             className="rounded p-0.5 text-fg-subtle hover:bg-bg-base hover:text-fg-base"
           >
             <Plus size={11} />
           </button>
           <button
-            onClick={(e) => { e.stopPropagation(); onUploadHere(folder.id); }}
-            title="Upload here"
+            onClick={(e) => {
+              e.stopPropagation();
+              onUploadHere({ id: folder.id, name: folder.name });
+            }}
+            title={t.library.uploadHere}
             className="rounded p-0.5 text-fg-subtle hover:bg-bg-base hover:text-fg-base"
           >
             <UploadIcon size={11} />
@@ -297,7 +306,7 @@ function FolderRow({
           <button
             onClick={onDeleteFolder}
             disabled={deleting}
-            title="Delete folder"
+            title={t.library.deleteFolder}
             className="rounded p-0.5 text-fg-subtle hover:bg-bg-base hover:text-danger disabled:opacity-50"
           >
             {deleting
@@ -343,6 +352,7 @@ function FolderRow({
               ingesting={ingestingFileIds.has(e.file_id)}
               onClick={() => onSelectFile(e)}
               onDeleted={(id) => { loadDetail(); onEntryDeleted(id); }}
+              t={t}
             />
           ))}
         </div>
@@ -351,10 +361,11 @@ function FolderRow({
   );
 }
 
-function FileRow({ entry, depth, selected, ingesting, onClick, onDeleted }: {
+function FileRow({ entry, depth, selected, ingesting, onClick, onDeleted, t }: {
   entry: FileEntrySummary; depth: number; selected: boolean;
   ingesting: boolean; onClick: () => void;
   onDeleted: (entryId: string) => void;
+  t: I18nStrings;
 }) {
   const [reprocessing, setReprocessing] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -363,8 +374,8 @@ function FileRow({ entry, depth, selected, ingesting, onClick, onDeleted }: {
     e.stopPropagation();
     if (reprocessing || ingesting) return;
     const prompt = failed
-      ? `Retry AI analysis on "${entry.display_name}"?\n\nThe previous ingest failed. This re-runs with the current LLM.`
-      : `Re-run AI analysis on "${entry.display_name}"?\n\nThis clears the existing summary and tags, then re-ingests with the current LLM.`;
+      ? t.library.retryAnalysisConfirm(entry.display_name)
+      : t.library.reprocessFileConfirm(entry.display_name);
     if (!confirm(prompt)) {
       return;
     }
@@ -373,7 +384,7 @@ function FileRow({ entry, depth, selected, ingesting, onClick, onDeleted }: {
       await files.reprocess(entry.file_id);
     } catch (err) {
       const msg = err instanceof ApiError ? err.message : String(err);
-      alert(`Reprocess failed: ${msg}`);
+      alert(t.library.reprocessFailed(msg));
     } finally {
       setReprocessing(false);
     }
@@ -381,7 +392,7 @@ function FileRow({ entry, depth, selected, ingesting, onClick, onDeleted }: {
   const onDelete = async (e: React.MouseEvent) => {
     e.stopPropagation();
     if (deleting) return;
-    if (!confirm(`Delete "${entry.display_name}"?\n\nThe file is moved to trash and purged after 7 days.`)) {
+    if (!confirm(t.library.deleteFileConfirm(entry.display_name))) {
       return;
     }
     setDeleting(true);
@@ -390,7 +401,7 @@ function FileRow({ entry, depth, selected, ingesting, onClick, onDeleted }: {
       onDeleted(entry.id);
     } catch (err) {
       const msg = err instanceof ApiError ? err.message : String(err);
-      alert(`Delete failed: ${msg}`);
+      alert(t.library.deleteFailed(msg));
       setDeleting(false);
     }
   };
@@ -412,7 +423,7 @@ function FileRow({ entry, depth, selected, ingesting, onClick, onDeleted }: {
           <AlertTriangle
             size={11}
             className="shrink-0 text-danger"
-            aria-label="ingest failed"
+            aria-label={t.library.ingestFailed}
           />
         )}
       </button>
@@ -420,7 +431,7 @@ function FileRow({ entry, depth, selected, ingesting, onClick, onDeleted }: {
       <button
         onClick={onReprocess}
         disabled={reprocessing || ingesting}
-        title={failed ? "Retry AI analysis (previous run failed)" : "Re-run AI analysis"}
+        title={failed ? t.library.retryAnalysisTitle : t.library.reprocessAnalysisTitle}
         className={cn(
           "shrink-0 rounded p-0.5 disabled:opacity-50",
           failed
@@ -436,7 +447,7 @@ function FileRow({ entry, depth, selected, ingesting, onClick, onDeleted }: {
         href={fileEntries.downloadUrl(entry.id)}
         download={entry.display_name}
         onClick={(e) => e.stopPropagation()}
-        title="Download"
+        title={t.library.download}
         className="hidden shrink-0 rounded p-0.5 text-fg-subtle hover:bg-bg-base hover:text-fg-base group-hover:flex"
       >
         <Download size={11} />
@@ -444,7 +455,7 @@ function FileRow({ entry, depth, selected, ingesting, onClick, onDeleted }: {
       <button
         onClick={onDelete}
         disabled={deleting}
-        title="Delete"
+        title={t.common.delete}
         className="hidden shrink-0 rounded p-0.5 text-fg-subtle hover:bg-bg-base hover:text-danger group-hover:flex disabled:opacity-50"
       >
         {deleting

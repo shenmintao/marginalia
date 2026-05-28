@@ -10,6 +10,7 @@ import { Link } from "react-router-dom";
 
 import type { FileMetadata } from "@/types/api";
 import { cn } from "@/lib/utils";
+import { useI18n, type I18nStrings } from "@/lib/i18n";
 
 interface Props {
   meta: FileMetadata | null;
@@ -19,6 +20,7 @@ interface Props {
 }
 
 export function MetaPanel({ meta, loading, open, onToggle }: Props) {
+  const { t } = useI18n();
   return (
     <aside className={cn(
       "flex shrink-0 flex-col border-l border-border bg-bg-subtle transition-[width] duration-150",
@@ -26,37 +28,37 @@ export function MetaPanel({ meta, loading, open, onToggle }: Props) {
     )}>
       <button
         onClick={onToggle}
-        title={open ? "Hide details" : "Show details"}
+        title={open ? t.library.detailsHide : t.library.detailsShow}
         className="flex h-9 items-center justify-center border-b border-border text-fg-muted hover:bg-bg-muted"
       >
         {open ? <ChevronRight size={14} /> : <ChevronLeft size={14} />}
       </button>
       {open && (
         <div className="flex-1 overflow-y-auto p-3 text-xs">
-          {loading && <p className="text-fg-subtle">loading…</p>}
+          {loading && <p className="text-fg-subtle">{t.common.loading}</p>}
           {!loading && !meta && (
-            <p className="text-fg-subtle">Select a file to see its metadata.</p>
+            <p className="text-fg-subtle">{t.library.metadataEmpty}</p>
           )}
-          {meta && <MetaBody meta={meta} />}
+          {meta && <MetaBody meta={meta} t={t} />}
         </div>
       )}
     </aside>
   );
 }
 
-function MetaBody({ meta }: { meta: FileMetadata }) {
+function MetaBody({ meta, t }: { meta: FileMetadata; t: I18nStrings }) {
   return (
     <div className="space-y-3">
-      <Field label="Name" value={meta.display_name} />
-      <Field label="Lifecycle" value={meta.lifecycle} />
-      {meta.mime_type && <Field label="MIME" value={meta.mime_type} mono />}
+      <Field label={t.library.fields.name} value={meta.display_name} />
+      <Field label={t.library.fields.lifecycle} value={meta.lifecycle} />
+      {meta.mime_type && <Field label={t.library.fields.mime} value={meta.mime_type} mono />}
       {typeof meta.size_bytes === "number" && (
-        <Field label="Size" value={formatBytes(meta.size_bytes)} />
+        <Field label={t.library.fields.size} value={formatBytes(meta.size_bytes)} />
       )}
-      {meta.folder_path && <Field label="Folder" value={meta.folder_path} mono />}
+      {meta.folder_path && <Field label={t.library.fields.folder} value={meta.folder_path} mono />}
       {meta.summary && (
         <section>
-          <SectionHeader icon={<Sparkles size={11} />} text="Summary" />
+          <SectionHeader icon={<Sparkles size={11} />} text={t.library.fields.summary} />
           <p className="mt-1 whitespace-pre-wrap leading-relaxed text-fg-muted">
             {meta.summary}
           </p>
@@ -64,7 +66,7 @@ function MetaBody({ meta }: { meta: FileMetadata }) {
       )}
       {meta.extra && (
         <section>
-          <SectionHeader icon={<FileText size={11} />} text="Extra" />
+          <SectionHeader icon={<FileText size={11} />} text={t.library.fields.extra} />
           <p className="mt-1 whitespace-pre-wrap leading-relaxed text-fg-muted">
             {meta.extra}
           </p>
@@ -72,7 +74,7 @@ function MetaBody({ meta }: { meta: FileMetadata }) {
       )}
       {meta.tags && meta.tags.length > 0 && (
         <section>
-          <SectionHeader icon={<Tag size={11} />} text="Tags" />
+          <SectionHeader icon={<Tag size={11} />} text={t.library.fields.tags} />
           <div className="mt-1 flex flex-wrap gap-1">
             {meta.tags.map((t) => (
               <span key={t.name} className="rounded-md border border-border bg-bg-base px-1.5 py-0.5 text-[10px] text-fg-muted">
@@ -84,7 +86,7 @@ function MetaBody({ meta }: { meta: FileMetadata }) {
       )}
       {meta.related_entries && meta.related_entries.length > 0 && (
         <section>
-          <SectionHeader text="Related" />
+          <SectionHeader text={t.library.fields.related} />
           <ul className="mt-1 space-y-1">
             {meta.related_entries.slice(0, 8).map((r) => (
               <li key={r.entry_id}>

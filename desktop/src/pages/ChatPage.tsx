@@ -24,6 +24,7 @@ import { TurnView, type Turn, type Step } from "@/components/TurnView";
 import { SessionList } from "@/components/SessionList";
 import { useChatSession } from "@/lib/chatSession";
 import { cn } from "@/lib/utils";
+import { useI18n, type I18nStrings } from "@/lib/i18n";
 
 /** Module-level in-flight SSE streams.
  *  Not tied to component lifecycle so streams survive navigation and
@@ -51,6 +52,7 @@ export function ChatPage() {
   const [openErr, setOpenErr] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [refreshSignal, setRefreshSignal] = useState(0);
+  const { t: i18n } = useI18n();
 
   const ensureSession = useCallback(
     async (initiatingMessage?: string): Promise<string> => {
@@ -86,10 +88,10 @@ export function ChatPage() {
     let cancelled = false;
     setLoading(true);
     sessions.messages(sessionId)
-      .then((t) => {
+      .then((transcript) => {
         if (cancelled) return;
         if (!useChatSession.getState().streaming) {
-          setTurns(t.turns.map(replayedToTurn));
+          setTurns(transcript.turns.map((rt) => replayedToTurn(rt, i18n)));
         }
       })
       .catch((e) => {
@@ -140,7 +142,7 @@ export function ChatPage() {
         onEvent: (ev) => {
           const cur = liveStreams.get(sid);
           if (!cur || cur.generation !== gen) return;
-          cur.turns = applyEventToTurnList(cur.turns, cur.turnIdx, ev);
+          cur.turns = applyEventToTurnList(cur.turns, cur.turnIdx, ev, i18n);
           if (useChatSession.getState().sessionId === sid) {
             setTurns(cur.turns);
             setStreaming(true);
@@ -172,7 +174,7 @@ export function ChatPage() {
       }
       if (cur && cur.generation === gen && isFirstTurn) setRefreshSignal((n) => n + 1);
     }
-  }, [input, ensureSession, setTurns, setStreaming]);
+  }, [input, ensureSession, setTurns, setStreaming, i18n]);
 
   const stop = useCallback(() => {
     const sid = useChatSession.getState().sessionId;
@@ -201,16 +203,16 @@ export function ChatPage() {
     }
     setStreaming(false);
     try {
-      const t = await sessions.messages(id);
+      const transcript = await sessions.messages(id);
       if (useChatSession.getState().sessionId !== id) return;
-      setTurns(t.turns.map(replayedToTurn));
+      setTurns(transcript.turns.map((rt) => replayedToTurn(rt, i18n)));
     } catch (e) {
       if (useChatSession.getState().sessionId !== id) return;
       setOpenErr(e instanceof Error ? e.message : String(e));
     } finally {
       if (useChatSession.getState().sessionId === id) setLoading(false);
     }
-  }, [setSessionId, setTurns, setStreaming, setLoading]);
+  }, [setSessionId, setTurns, setStreaming, setLoading, i18n]);
 
   const newChat = useCallback(() => {
     const { sessionId: curSessionId } = useChatSession.getState();
@@ -237,9 +239,9 @@ export function ChatPage() {
               </div>
             )}
             {loading && (
-              <div className="mb-4 text-sm text-fg-muted">loading transcript…</div>
+              <div className="mb-4 text-sm text-fg-muted">{i18n.chat.loadingTranscript}</div>
             )}
-            {!loading && turns.length === 0 && <ChatEmpty />}
+            {!loading && turns.length === 0 && <ChatEmpty t={i18n} />}
             {turns.map((t, i) => (
               <TurnView key={i} turn={t} />
             ))}
@@ -257,7 +259,7 @@ export function ChatPage() {
                   send();
                 }
               }}
-              placeholder="Ask the librarian…  (Enter to send · Shift+Enter for newline)"
+              placeholder={i18n.chat.inputPlaceholder}
               rows={1}
               className={cn(
                 "flex-1 resize-none rounded-md border border-border bg-bg-base px-3 py-2 text-sm",
@@ -271,7 +273,7 @@ export function ChatPage() {
                 onClick={stop}
                 className="flex h-9 items-center gap-1 rounded-md border border-border bg-bg-elevated px-3 text-sm hover:bg-bg-muted"
               >
-                <Square size={13} fill="currentColor" /> Stop
+                <Square size={13} fill="currentColor" /> {i18n.chat.stop}
               </button>
             ) : (
               <button
@@ -284,14 +286,14 @@ export function ChatPage() {
                     : "cursor-not-allowed bg-bg-muted text-fg-subtle",
                 )}
               >
-                <Send size={13} /> Send
+                <Send size={13} /> {i18n.chat.send}
               </button>
             )}
           </div>
           <div className="mx-auto mt-1 max-w-3xl text-[11px] text-fg-subtle">
             {sessionId
-              ? <>session <span className="font-mono">{sessionId.slice(0, 8)}…</span></>
-              : "session opens on first message"}
+              ? <>{i18n.chat.session} <span className="font-mono">{sessionId.slice(0, 8)}...</span></>
+              : i18n.chat.sessionOpens}
           </div>
         </div>
       </div>
@@ -299,20 +301,19 @@ export function ChatPage() {
   );
 }
 
-function ChatEmpty() {
+function ChatEmpty({ t }: { t: I18nStrings }) {
   return (
     <div className="flex h-full min-h-[40vh] flex-col items-center justify-center text-center">
       <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-xl bg-accent-subtle text-accent">
         <Sparkles size={22} />
       </div>
-      <h2 className="text-lg font-semibold">Ask the librarian</h2>
+      <h2 className="text-lg font-semibold">{t.chat.emptyTitle}</h2>
       <p className="mt-1 max-w-md text-sm text-fg-muted">
-        The investigator agent reads its journal, gathers context from your
-        library, and answers with citations.
+        {t.chat.emptyBody}
       </p>
       <div className="mt-4 flex flex-wrap justify-center gap-2 text-xs text-fg-subtle">
-        <kbd className="rounded border border-border bg-bg-subtle px-1.5 py-0.5">Enter</kbd> send
-        <kbd className="rounded border border-border bg-bg-subtle px-1.5 py-0.5">Shift+Enter</kbd> newline
+        <kbd className="rounded border border-border bg-bg-subtle px-1.5 py-0.5">{t.chat.enter}</kbd> {t.chat.enterHint}
+        <kbd className="rounded border border-border bg-bg-subtle px-1.5 py-0.5">{t.chat.shiftEnter}</kbd> {t.chat.shiftEnterHint}
       </div>
     </div>
   );
@@ -324,23 +325,28 @@ function updateTurn(prev: Turn[], idx: number, fn: (t: Turn) => Turn): Turn[] {
   return next;
 }
 
-function applyEventToTurnList(prev: Turn[], idx: number, ev: ChatEvent): Turn[] {
-  return updateTurn(prev, idx, (t) => {
+function applyEventToTurnList(
+  prev: Turn[],
+  idx: number,
+  ev: ChatEvent,
+  t: I18nStrings,
+): Turn[] {
+  return updateTurn(prev, idx, (turn) => {
     switch (ev.type) {
       case "conversation":
         return {
-          ...t,
+          ...turn,
           conversationId: typeof ev.data === "string" ? ev.data : extractId(ev.data, "conversation_id"),
         };
       case "planning":
-        return appendStep(t, "planning", "planning the investigation...");
+        return appendStep(turn, "planning", t.chat.planning);
       case "plan": {
         const text = typeof ev.data === "string" ? ev.data : "";
         const steps = text.trim().split("\n").filter(Boolean);
-        return appendStep(t, "plan", "plan ready", { plan: steps });
+        return appendStep(turn, "plan", t.chat.planReady, { plan: steps });
       }
       case "thinking":
-        return appendStep(t, "thinking", "thinking...");
+        return appendStep(turn, "thinking", t.chat.thinking);
       case "tool_call": {
         const d = (ev.data && typeof ev.data === "object")
           ? (ev.data as {
@@ -354,10 +360,10 @@ function applyEventToTurnList(prev: Turn[], idx: number, ev: ChatEvent): Turn[] 
           : {};
         const args = d.arguments || {};
         const label = d.display
-          ? `calling ${d.display}`
-          : formatToolCall(d.name || "tool", args);
+          ? `${t.chat.calling} ${d.display}`
+          : formatToolCall(d.name || t.chat.tool, args, t);
         return appendStep(
-          t, "tool_call", label,
+          turn, "tool_call", label,
           {
             args,
             toolName: d.name,
@@ -378,7 +384,7 @@ function applyEventToTurnList(prev: Turn[], idx: number, ev: ChatEvent): Turn[] 
             })
           : {};
         return markResult(
-          t,
+          turn,
           d.tool_call_id,
           d.ok === false ? "failed" : "ok",
           d.duration_ms,
@@ -387,17 +393,17 @@ function applyEventToTurnList(prev: Turn[], idx: number, ev: ChatEvent): Turn[] 
         );
       }
       case "answer":
-        return { ...t, answer: typeof ev.data === "string" ? ev.data : ev.raw };
+        return { ...turn, answer: typeof ev.data === "string" ? ev.data : ev.raw };
       case "done": {
         const d = (ev.data && typeof ev.data === "object")
           ? (ev.data as Turn["metrics"])
           : undefined;
-        return { ...t, metrics: d, done: true };
+        return { ...turn, metrics: d, done: true };
       }
       case "error":
-        return { ...t, error: typeof ev.data === "string" ? ev.data : ev.raw, done: true };
+        return { ...turn, error: typeof ev.data === "string" ? ev.data : ev.raw, done: true };
       default:
-        return t;
+        return turn;
     }
   });
 }
@@ -406,21 +412,21 @@ function applyEventToTurnList(prev: Turn[], idx: number, ev: ChatEvent): Turn[] 
 // existing TurnView renders historical sessions identically to live
 // ones. Plan_text becomes a synthetic plan step; tool_calls each
 // become tool_call steps with their result already marked.
-function replayedToTurn(rt: ReplayedTurn): Turn {
+function replayedToTurn(rt: ReplayedTurn, t: I18nStrings): Turn {
   const steps: Step[] = [];
   if (rt.plan_text && rt.plan_text.trim()) {
     const text = rt.plan_text.trim();
     if (text.startsWith("NO_PLAN:")) {
       steps.push({
-        kind: "plan", label: "NO_PLAN", plan: [text.slice("NO_PLAN:".length).trim()],
+        kind: "plan", label: t.chat.noPlan, plan: [text.slice("NO_PLAN:".length).trim()],
       });
     } else {
       const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
-      steps.push({ kind: "plan", label: "plan", plan: lines });
+      steps.push({ kind: "plan", label: t.chat.planReady, plan: lines });
     }
   }
   for (const tc of rt.tool_calls) {
-    steps.push(replayedToolCallStep(tc));
+    steps.push(replayedToolCallStep(tc, t));
   }
   return {
     query: rt.user_message,
@@ -433,13 +439,13 @@ function replayedToTurn(rt: ReplayedTurn): Turn {
   };
 }
 
-function replayedToolCallStep(tc: ReplayedToolCall): Step {
-  const name = tc.name || "tool";
+function replayedToolCallStep(tc: ReplayedToolCall, t: I18nStrings): Step {
+  const name = tc.name || t.chat.tool;
   // Replay payload now carries a server-resolved `display` string, just
   // like the live SSE event does. Prefer that over the raw uuid args.
   const label = tc.display
-    ? `calling ${tc.display}`
-    : `calling ${formatToolCall(name, tc.arguments)}`;
+    ? `${t.chat.calling} ${tc.display}`
+    : formatToolCall(name, tc.arguments, t);
   return {
     kind: "tool_call",
     label,
@@ -452,9 +458,13 @@ function replayedToolCallStep(tc: ReplayedToolCall): Step {
   };
 }
 
-function formatToolCall(name: string, args: Record<string, unknown>): string {
+function formatToolCall(
+  name: string,
+  args: Record<string, unknown>,
+  t: I18nStrings,
+): string {
   const keys = Object.keys(args);
-  if (keys.length === 0) return `calling ${name}`;
+  if (keys.length === 0) return `${t.chat.calling} ${name}`;
   const parts: string[] = [];
   for (const k of keys) {
     const v = args[k];
@@ -464,7 +474,7 @@ function formatToolCall(name: string, args: Record<string, unknown>): string {
   }
   let inner = parts.join(", ");
   if (inner.length > 60) inner = inner.slice(0, 57) + "...";
-  return `calling ${name}(${inner})`;
+  return `${t.chat.calling} ${name}(${inner})`;
 }
 
 function extractId(data: unknown, key: string): string | undefined {
