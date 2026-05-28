@@ -46,6 +46,7 @@ from marginalia import llm  # noqa: E402
 from marginalia.db.engine import get_engine, get_session_factory  # noqa: E402
 from marginalia.db.models import Base, File  # noqa: E402
 from marginalia.llm.types import ChatRequest, ChatResponse, TokenUsage  # noqa: E402
+from marginalia.pipelines.pdf import PdfPipeline  # noqa: E402
 from marginalia.storage import get_storage  # noqa: E402
 
 
@@ -192,7 +193,23 @@ async def _main() -> None:
         ocr = f.description["ocr"]
         assert ocr["engine"] == "vlm", f"engine={ocr.get('engine')}"
         assert ocr["pages_processed"] == 1, f"pages_processed={ocr}"
+        assert ocr["document_type"] == "document", ocr
+        ocr_pages = f.description.get("ocr_pages")
+        assert isinstance(ocr_pages, list) and ocr_pages, f.description
+        assert ocr_pages[0]["page"] == 1
+        assert "Leader Election" in ocr_pages[0]["text"]
+        assert ocr_pages[0]["blocks"], ocr_pages[0]
         print(f"[3] description.ocr = {ocr}")
+
+        seg = await PdfPipeline().read_segment(
+            file_row=f,
+            args={"pattern": "Leader Election"},
+            storage=get_storage(),
+        )
+        assert seg.error is None, seg
+        assert "Leader Election" in seg.text
+        assert seg.extras.get("ocr_indexed") is True
+        print("[3b] read_segment searched stored OCR text without VLM")
 
     assert len(VISION_CALLS) == 1, \
         f"expected 1 vision call (1 page), got {len(VISION_CALLS)}"

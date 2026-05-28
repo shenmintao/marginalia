@@ -134,26 +134,24 @@ SCHEMA: dict[str, Any] = {
                                 },
                                 # container
                                 "member_path": {"type": "string"},
-                                # VLM-on-read: required when reading an
-                                # image entry or a PDF flagged as
-                                # OCR-only at ingest. The pipeline sends
-                                # the original image / requested pages
-                                # to the vision model with this question
-                                # and returns the targeted answer.
+                                # VLM-on-read: required for image entries.
+                                # Optional for OCR-indexed PDFs; without it
+                                # the PDF pipeline reads stored OCR text,
+                                # with it the pipeline re-checks rendered
+                                # pages through the vision model.
                                 "question": {
                                     "type": "string",
                                     "minLength": 1,
                                     "description": (
-                                        "REQUIRED for image entries and "
-                                        "OCR-indexed PDFs (those have no "
-                                        "extractable text layer). The "
-                                        "pipeline sends rendered pages to "
-                                        "the vision model and returns a "
-                                        "targeted answer. Combine with "
-                                        "`page_start`/`page_end` to scope "
-                                        "the question to specific pages. "
-                                        "For text-layer files this field "
-                                        "is ignored."
+                                        "REQUIRED for image entries. Optional "
+                                        "for OCR-indexed PDFs: omit it to read "
+                                        "stored OCR text, or include it to "
+                                        "send rendered pages to the vision "
+                                        "model for a targeted re-check. "
+                                        "Combine with `page_start`/`page_end` "
+                                        "to scope the question to specific "
+                                        "pages. For text-layer files this "
+                                        "field is ignored."
                                     ),
                                 },
                             },
@@ -180,12 +178,11 @@ SCHEMA: dict[str, Any] = {
         "spreadsheet heading) to restrict the search to that window — "
         "useful for a long file where the same term appears many times. "
         "Pattern hits are paginated via `match_offset` (use the "
-        "`next_match_offset` from a previous response). For image entries "
-        "and PDFs that were OCR-indexed at ingest, pass `question` — the "
-        "pipeline sends the image / rendered pages to the vision model "
-        "and returns a targeted answer instead of frozen ingest-time "
-        "text. Use AFTER read_entries_metadata identified relevant "
-        "sections."
+        "`next_match_offset` from a previous response). Pass `question` "
+        "for image entries. For OCR-indexed PDFs, omit it to read "
+        "stored OCR text, or pass it to send rendered pages to the vision "
+        "model for a targeted re-check. Use AFTER read_entries_metadata "
+        "identified relevant sections."
     ),
     schema=SCHEMA,
 )

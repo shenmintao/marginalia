@@ -7,9 +7,10 @@ pages; the assembled body then goes through the same tagged-response
 indexing prompt as the text pipeline, but with page anchors in
 `<sections>`.
 
-PDFs without a text layer (scanned images) are flagged via a clean
-error in the pipeline output — the handler marks the file as needing
-OCR. An OCR / vision-per-page pipeline is on the next-cycle list.
+PDFs without a text layer (scanned images) run the VLM OCR fallback.
+The extracted OCR text is indexed like a PDF and stored as page/block
+text so read_segment can serve pattern/page/section reads without
+another vision call.
 
 read_segment supports page_start / page_end ranges, regex pattern
 search across pages, and the generic offset/max_chars chunking.
@@ -74,6 +75,8 @@ OCR_MAX_PAGES = 50                # cap how many pages we OCR per doc
 PDF_READ_MAX_PAGES_PER_CALL = 50
 PDF_PATTERN_UNSCOPED_MAX_PAGES = 200
 PDF_DEFAULT_READ_PAGES = 20
+OCR_STORED_TEXT_SAMPLE_CHARS = 20_000
+OCR_BLOCK_MAX_CHARS = 8_000
 OCR_RENDER_DPI = 200              # JPEG render DPI before VLM (sweet spot)
 OCR_VLM_MAX_LONG_EDGE = 2048      # OCR is glyph-sensitive — keep more
                                   # detail than the caption path's 1568
@@ -195,6 +198,8 @@ class PdfPipeline(Pipeline):
         total_chars = sum(len(t) for t in text_per_page)
         ocr_used = False
         ocr_pages_done = 0
+        ocr_document_type: str | None = None
+        ocr_pages_for_storage: list[str] | None = None
         indexed_pages = len(text_per_page)
         partial_reasons: list[str] = []
         if indexed_pages < total_pages:
@@ -224,6 +229,10 @@ class PdfPipeline(Pipeline):
             total_chars = sum(len(t) for t in text_per_page)
             # OCR is still capped because it bills one VLM call per page.
             indexed_pages = min(total_pages, OCR_MAX_PAGES)
+            ocr_pages_for_storage = text_per_page[:indexed_pages]
+            ocr_document_type = _classify_ocr_document(
+                ocr_pages_for_storage, total_pages=total_pages,
+            )
             partial_reasons = []
             if indexed_pages < total_pages:
                 partial_reasons.append("ocr_page_cap")
@@ -241,16 +250,18 @@ class PdfPipeline(Pipeline):
             images = extract_images(body, max_pages=indexed_pages)
             described = await describe_images(images) if images else []
 
-        if (not ocr_used) and self._needs_chunked_index(text_per_page, described):
+        if self._needs_chunked_index(text_per_page[:indexed_pages], described):
             return await self._run_chunked_index(
                 ctx=ctx,
-                text_per_page=text_per_page,
+                text_per_page=text_per_page[:indexed_pages],
                 described=described,
                 total_pages=total_pages,
                 indexed_pages=indexed_pages,
                 ocr_used=ocr_used,
                 ocr_pages_done=ocr_pages_done,
                 partial_reasons=partial_reasons,
+                ocr_pages=ocr_pages_for_storage,
+                ocr_document_type=ocr_document_type,
             )
 
         return await self._run_single_index(
@@ -262,6 +273,8 @@ class PdfPipeline(Pipeline):
             ocr_used=ocr_used,
             ocr_pages_done=ocr_pages_done,
             partial_reasons=partial_reasons,
+            ocr_pages=ocr_pages_for_storage,
+            ocr_document_type=ocr_document_type,
         )
 
     @staticmethod
@@ -298,6 +311,8 @@ class PdfPipeline(Pipeline):
         ocr_used: bool,
         ocr_pages_done: int,
         partial_reasons: list[str],
+        ocr_pages: list[str] | None = None,
+        ocr_document_type: str | None = None,
     ) -> PipelineResult:
         body_text_raw = render_pages_with_figures(text_per_page, described)
         body_text = self._truncate(body_text_raw)
@@ -324,6 +339,7 @@ class PdfPipeline(Pipeline):
             "figure_count": len(described),
             "ocr_used": ocr_used,
             "ocr_pages_done": ocr_pages_done if ocr_used else 0,
+            "ocr_document_type": ocr_document_type if ocr_used else None,
         }
         stable_prefix = (
             "Index the PDF pages below. Hints are advisory; the provided "
@@ -371,6 +387,8 @@ class PdfPipeline(Pipeline):
             coverage=coverage,
             ocr_used=ocr_used,
             ocr_pages_done=ocr_pages_done,
+            ocr_pages=ocr_pages,
+            ocr_document_type=ocr_document_type,
         )
 
     async def _run_chunked_index(
@@ -384,6 +402,8 @@ class PdfPipeline(Pipeline):
         ocr_used: bool,
         ocr_pages_done: int,
         partial_reasons: list[str],
+        ocr_pages: list[str] | None = None,
+        ocr_document_type: str | None = None,
     ) -> PipelineResult:
         client = get_chat_client("ingest")
         all_sections: list[dict[str, Any]] = []
@@ -405,6 +425,8 @@ class PdfPipeline(Pipeline):
                 "page_start": start,
                 "page_end": end,
                 "chunk_no": chunk_no,
+                "ocr_used": ocr_used,
+                "ocr_document_type": ocr_document_type if ocr_used else None,
             }
             stable_prefix = (
                 "Index this page range from a larger PDF. Use original page "
@@ -473,6 +495,7 @@ class PdfPipeline(Pipeline):
             "tag_vocabulary": ctx.tag_vocabulary,
             "coverage": coverage,
             "chunk_summaries": chunk_summaries,
+            "ocr_document_type": ocr_document_type if ocr_used else None,
         }
         aggregate_content = (
             f"<context>\n{json.dumps(aggregate_payload, ensure_ascii=False)}\n</context>\n\n"
@@ -505,6 +528,8 @@ class PdfPipeline(Pipeline):
             coverage=coverage,
             ocr_used=ocr_used,
             ocr_pages_done=ocr_pages_done,
+            ocr_pages=ocr_pages,
+            ocr_document_type=ocr_document_type,
         )
 
     def _iter_prompt_chunks(
@@ -543,6 +568,8 @@ class PdfPipeline(Pipeline):
         coverage: dict[str, Any],
         ocr_used: bool,
         ocr_pages_done: int,
+        ocr_pages: list[str] | None = None,
+        ocr_document_type: str | None = None,
     ) -> PipelineResult:
         description: dict[str, Any] = {
             "sections": sections,
@@ -551,11 +578,23 @@ class PdfPipeline(Pipeline):
         if fields.description_text:
             description["text"] = fields.description_text
         if ocr_used:
+            stored_pages, block_count = _build_ocr_pages_payload(ocr_pages or [])
             description["ocr"] = {
                 "engine": "vlm",
                 "pages_total": coverage.get("total_pages"),
                 "pages_processed": ocr_pages_done,
+                "document_type": ocr_document_type or "document",
+                "stored_pages": len(stored_pages),
+                "block_count": block_count,
             }
+            description["ocr_pages"] = stored_pages
+        base_extra = fields.extra
+        if ocr_used:
+            base_extra = _ocr_retrieval_extra(
+                base_extra=fields.extra,
+                ocr_pages=ocr_pages or [],
+                document_type=ocr_document_type or "document",
+            )
         return PipelineResult(
             summary=fields.summary,
             description=description,
@@ -563,7 +602,7 @@ class PdfPipeline(Pipeline):
             extra=build_retrieval_extra(
                 sections=sections,
                 coverage=coverage,
-                base_extra=fields.extra,
+                base_extra=base_extra,
             ),
             entry_extra=fields.entry_extra,
             entry_catalog_path=fields.catalog_path,
@@ -621,11 +660,8 @@ class PdfPipeline(Pipeline):
           ingest-time OCR text was lossy by definition; for an actual
           query, sending pixels to the VLM is closer to what was
           originally on the page.
-        * description.ocr present + no question → return a clean error
-          telling the agent to pass `question`. We refuse to fall back
-          to pypdf text extraction here because for OCR PDFs that
-          extraction is empty, and silently returning empty text just
-          wastes a turn.
+        * description.ocr present + no question: read
+          from stored OCR page/block text captured at ingest.
         * otherwise (text-layer PDFs) → existing behaviour: pypdf text
           extraction + page/pattern slicing.
         """
@@ -633,11 +669,7 @@ class PdfPipeline(Pipeline):
         question = (args.get("question") or "").strip() if isinstance(args, dict) else ""
         if is_ocr_pdf:
             if not question:
-                return SegmentResult(error=(
-                    "this PDF was OCR-indexed at ingest; pass `question` "
-                    "to query specific pages via the vision model — text "
-                    "extraction would be empty"
-                ), extras={"kind": "pdf", "ocr_indexed": True})
+                return self._slice_ocr_text(file_row, args)
             return await self._answer_with_vlm(
                 file_row=file_row, question=question, args=args, storage=storage,
             )
@@ -745,6 +777,132 @@ class PdfPipeline(Pipeline):
                 "pages_sent": len(jpegs),
             },
         )
+
+    def _slice_ocr_text(
+        self,
+        file_row: Any,
+        args: dict[str, Any],
+    ) -> SegmentResult:
+        pages, meta = _ocr_pages_from_file(file_row)
+        if not pages:
+            return SegmentResult(error=(
+                "this PDF was OCR-indexed before stored OCR text was available; "
+                "pass `question` to query rendered pages via the vision model, "
+                "or reprocess the file to build OCR blocks"
+            ), extras={"kind": "pdf", "ocr_indexed": True})
+
+        total_indexed_pages = len(pages)
+        labels = [str(i) for i in range(1, total_indexed_pages + 1)]
+        offset = _int_arg(args.get("offset"), default=0, minimum=0)
+        max_chars = _int_arg(
+            args.get("max_chars"), default=self.READ_DEFAULT_MAX_CHARS, minimum=1,
+        )
+
+        pattern = (args.get("pattern") or "").strip()
+        has_page_scope = _has_pdf_page_scope(args)
+        if pattern:
+            if has_page_scope:
+                resolved = _resolve_pdf_page_window(
+                    args,
+                    total_pages=total_indexed_pages,
+                    labels=labels,
+                    default_all=True,
+                    max_pages=PDF_READ_MAX_PAGES_PER_CALL,
+                )
+                if isinstance(resolved, SegmentResult):
+                    _add_ocr_extras(resolved.extras, meta)
+                    return resolved
+                scoped_pages = pages[resolved.page_start - 1: resolved.page_end]
+                result = _pdf_pattern_search(
+                    pages=scoped_pages,
+                    pattern=pattern,
+                    context_lines=int(args.get("context_lines") or 2),
+                    max_matches=int(args.get("max_matches") or 20),
+                    match_offset=max(0, int(args.get("match_offset") or 0)),
+                    page_offset=resolved.page_start - 1,
+                    total_pages_full=total_indexed_pages,
+                    page_labels=labels[resolved.page_start - 1: resolved.page_end],
+                )
+                _add_ocr_window_extras(result.extras, resolved, meta)
+                return result
+            result = _pdf_pattern_search(
+                pages=pages,
+                pattern=pattern,
+                context_lines=int(args.get("context_lines") or 2),
+                max_matches=int(args.get("max_matches") or 20),
+                match_offset=max(0, int(args.get("match_offset") or 0)),
+                total_pages_full=total_indexed_pages,
+                page_labels=labels,
+            )
+            _add_ocr_extras(result.extras, meta)
+            return result
+
+        section_id = (args.get("section_id") or "").strip()
+        heading = (args.get("heading") or "").strip()
+        if section_id or heading:
+            section = _find_pdf_section(file_row, section_id=section_id, heading=heading)
+            if section is None:
+                miss = section_id or f"heading={heading!r}"
+                return SegmentResult(
+                    error=f"section not found: {miss}",
+                    extras=_ocr_base_extras(meta),
+                )
+            window = _page_window_from_section(section, total_pages=total_indexed_pages)
+            if window is None:
+                summary = str(section.get("summary") or "").strip()
+                extras = _ocr_base_extras(meta)
+                extras.update({
+                    "section_id": section.get("id"),
+                    "title": section.get("title"),
+                    "summary": summary,
+                    "note": "section anchor did not resolve to OCR pages",
+                })
+                return SegmentResult(text=summary, extras=extras)
+            body = _render_ocr_pages(
+                pages[window.page_start - 1: window.page_end],
+                start_page=window.page_start,
+            )
+            result = _clamp_pdf(
+                body,
+                offset,
+                max_chars,
+                extras={
+                    "section_id": section.get("id"),
+                    "title": section.get("title"),
+                },
+            )
+            _add_ocr_window_extras(result.extras, window, meta)
+            return result
+
+        if has_page_scope:
+            resolved = _resolve_pdf_page_window(
+                args,
+                total_pages=total_indexed_pages,
+                labels=labels,
+                default_all=False,
+                max_pages=PDF_READ_MAX_PAGES_PER_CALL,
+            )
+            if isinstance(resolved, SegmentResult):
+                _add_ocr_extras(resolved.extras, meta)
+                return resolved
+            body = _render_ocr_pages(
+                pages[resolved.page_start - 1: resolved.page_end],
+                start_page=resolved.page_start,
+            )
+            result = _clamp_pdf(body, offset, max_chars)
+            _add_ocr_window_extras(result.extras, resolved, meta)
+            return result
+
+        body = _render_ocr_pages(pages, start_page=1)
+        ps, pe = _page_range_from_offset(body, offset, max_chars, total_indexed_pages)
+        result = _clamp_pdf(
+            body,
+            offset,
+            max_chars,
+            extras={"page_start": ps, "page_end": pe},
+        )
+        _add_ocr_extras(result.extras, meta)
+        return result
 
     async def read_segment_from_bytes(
         self,
@@ -1008,6 +1166,143 @@ FIGURE_DESCRIBE_SYSTEM = (
 
 # ---- scanned-PDF OCR via VLM ---------------------------------------------
 
+def _build_ocr_pages_payload(pages: list[str]) -> tuple[list[dict[str, Any]], int]:
+    stored: list[dict[str, Any]] = []
+    block_count = 0
+    for page_no, text in enumerate(pages, start=1):
+        clean = (text or "").strip()
+        if not clean:
+            continue
+        blocks = _split_ocr_blocks(clean, page_no=page_no)
+        block_count += len(blocks)
+        stored.append({
+            "page": page_no,
+            "text": clean,
+            "char_count": len(clean),
+            "blocks": blocks,
+        })
+    return stored, block_count
+
+
+def _split_ocr_blocks(text: str, *, page_no: int) -> list[dict[str, Any]]:
+    blocks: list[dict[str, Any]] = []
+    current: list[str] = []
+    current_type = "paragraph"
+
+    def flush() -> None:
+        nonlocal current
+        body = "\n".join(current).strip()
+        current = []
+        if not body:
+            return
+        idx = len(blocks) + 1
+        if len(body) > OCR_BLOCK_MAX_CHARS:
+            body = body[:OCR_BLOCK_MAX_CHARS].rstrip() + "\n[block truncated]"
+        blocks.append({
+            "id": f"p{page_no}b{idx}",
+            "type": current_type,
+            "label": _ocr_block_label(body, current_type),
+            "text": body,
+        })
+
+    for raw in text.splitlines():
+        line = raw.rstrip()
+        stripped = line.strip()
+        if not stripped:
+            flush()
+            current_type = "paragraph"
+            continue
+        line_type = _ocr_line_type(stripped)
+        if line_type == "heading":
+            flush()
+            current_type = "heading"
+            current = [stripped]
+            flush()
+            current_type = "paragraph"
+            continue
+        if line_type != current_type and current:
+            flush()
+        current_type = line_type
+        current.append(line)
+    flush()
+    return blocks
+
+
+def _ocr_line_type(line: str) -> str:
+    if line.startswith("#"):
+        return "heading"
+    if line.count("|") >= 2:
+        return "table"
+    if re.match(r"^\s*(chapter|section|part|appendix)\b", line, re.IGNORECASE):
+        return "heading"
+    if re.match(r"^\s*\d+(\.\d+){0,3}\s+\S+", line) and len(line) <= 120:
+        return "heading"
+    return "paragraph"
+
+
+def _ocr_block_label(text: str, block_type: str) -> str:
+    first = next((ln.strip("# ").strip() for ln in text.splitlines() if ln.strip()), "")
+    if not first:
+        return block_type
+    return first[:80]
+
+
+def _classify_ocr_document(pages: list[str], *, total_pages: int) -> str:
+    text = "\n".join(pages)
+    lower = text.lower()
+    colon_lines = sum(1 for ln in text.splitlines() if ":" in ln or "：" in ln)
+    table_lines = sum(1 for ln in text.splitlines() if ln.count("|") >= 2)
+    heading_hits = len(re.findall(
+        r"(^|\n)\s*#{1,4}\s+|(^|\n)\s*(chapter|part|appendix)\b",
+        lower,
+        flags=re.IGNORECASE,
+    ))
+    if "invoice" in lower or "receipt" in lower or "发票" in text or "收据" in text:
+        return "receipt"
+    if table_lines >= 3:
+        return "table"
+    if colon_lines >= 6 and re.search(
+        r"\b(name|date|address|signature|applicant)\b|姓名|日期|地址|签名|申请人",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        return "form"
+    if total_pages >= 10 and heading_hits >= 2:
+        return "book"
+    if total_pages >= 20:
+        return "long_document"
+    return "document"
+
+
+def _ocr_retrieval_extra(
+    *,
+    base_extra: str | None,
+    ocr_pages: list[str],
+    document_type: str,
+) -> str:
+    lines: list[str] = []
+    if base_extra and base_extra.strip():
+        lines.append(base_extra.strip())
+    lines.append(f"ocr_document_type: {document_type}")
+    sample_parts: list[str] = []
+    total = 0
+    for page_no, text in enumerate(ocr_pages, start=1):
+        clean = (text or "").strip()
+        if not clean:
+            continue
+        part = f"[Page {page_no}]\n{clean}"
+        if total + len(part) + 2 > OCR_STORED_TEXT_SAMPLE_CHARS:
+            remaining = OCR_STORED_TEXT_SAMPLE_CHARS - total
+            if remaining > 0:
+                sample_parts.append(part[:remaining].rstrip())
+            break
+        sample_parts.append(part)
+        total += len(part) + 2
+    if sample_parts:
+        lines.append("ocr_text_sample:\n" + "\n\n".join(sample_parts))
+    return "\n".join(lines)
+
+
 def _file_was_ocr_indexed(file_row: Any) -> bool:
     """True iff the ingest pipeline marked this PDF as OCR-only.
 
@@ -1017,6 +1312,119 @@ def _file_was_ocr_indexed(file_row: Any) -> bool:
     """
     desc = getattr(file_row, "description", None)
     return isinstance(desc, dict) and isinstance(desc.get("ocr"), dict)
+
+
+def _ocr_pages_from_file(file_row: Any) -> tuple[list[str], dict[str, Any]]:
+    desc = getattr(file_row, "description", None)
+    if not isinstance(desc, dict):
+        return [], {}
+    meta = desc.get("ocr") if isinstance(desc.get("ocr"), dict) else {}
+    raw_pages = desc.get("ocr_pages")
+    if not isinstance(raw_pages, list):
+        return [], dict(meta)
+    max_page = 0
+    page_text: dict[int, str] = {}
+    for item in raw_pages:
+        if not isinstance(item, dict):
+            continue
+        try:
+            page_no = int(item.get("page") or 0)
+        except (TypeError, ValueError):
+            continue
+        if page_no <= 0:
+            continue
+        max_page = max(max_page, page_no)
+        page_text[page_no] = str(item.get("text") or "")
+    pages = [page_text.get(i, "") for i in range(1, max_page + 1)]
+    return pages, dict(meta)
+
+
+def _render_ocr_pages(pages: list[str], *, start_page: int) -> str:
+    chunks: list[str] = []
+    for offset, text in enumerate(pages):
+        page_no = start_page + offset
+        body = (text or "").strip() or "(no OCR text on this page)"
+        chunks.append(f"[Page {page_no}]\n{body}")
+    return "\n\n".join(chunks)
+
+
+def _find_pdf_section(
+    file_row: Any, *, section_id: str = "", heading: str = "",
+) -> dict[str, Any] | None:
+    desc = getattr(file_row, "description", None)
+    if not isinstance(desc, dict):
+        return None
+    sections = desc.get("sections")
+    if not isinstance(sections, list):
+        return None
+    for sec in sections:
+        if not isinstance(sec, dict):
+            continue
+        if section_id and str(sec.get("id") or "") == section_id:
+            return sec
+    if heading:
+        needle = heading.strip().casefold()
+        for sec in sections:
+            if not isinstance(sec, dict):
+                continue
+            if str(sec.get("title") or "").strip().casefold() == needle:
+                return sec
+    return None
+
+
+def _page_window_from_section(
+    section: dict[str, Any], *, total_pages: int,
+) -> _PdfPageWindow | None:
+    anchor = section.get("anchor") or {}
+    if isinstance(anchor, dict):
+        value = str(anchor.get("value") or anchor.get("path") or "")
+    else:
+        value = str(anchor)
+    nums = [int(n) for n in re.findall(r"\d+", value)]
+    if not nums:
+        return None
+    start = max(1, min(nums[0], total_pages))
+    end = max(start, min(nums[-1], total_pages))
+    return _PdfPageWindow(
+        page_start=start,
+        page_end=end,
+        requested_page_end=end,
+        truncated=False,
+    )
+
+
+def _ocr_base_extras(meta: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "kind": "pdf",
+        "ocr_indexed": True,
+        "ocr_document_type": meta.get("document_type"),
+        "ocr_pages_total": meta.get("pages_total"),
+        "ocr_pages_processed": meta.get("pages_processed"),
+        "ocr_stored_pages": meta.get("stored_pages"),
+    }
+
+
+def _add_ocr_extras(extras: dict[str, Any], meta: dict[str, Any]) -> None:
+    extras.update(_ocr_base_extras(meta))
+
+
+def _add_ocr_window_extras(
+    extras: dict[str, Any],
+    window: _PdfPageWindow,
+    meta: dict[str, Any],
+) -> None:
+    _add_ocr_extras(extras, meta)
+    extras.update({
+        "page_start": window.page_start,
+        "page_end": window.page_end,
+        "total_pages": meta.get("stored_pages") or window.page_end,
+    })
+    if window.page_label is not None:
+        extras["page_label"] = window.page_label
+        extras["resolved_page"] = window.resolved_page
+    if window.truncated:
+        extras["window_truncated"] = True
+        extras["requested_page_end"] = window.requested_page_end
 
 
 async def _ocr_pdf_pages(pdf_bytes: bytes, total_pages: int) -> list[str]:

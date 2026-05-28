@@ -2,7 +2,7 @@
 
 These do NOT spin up the full app — they construct a pipeline, hand it
 a SimpleNamespace standing in for a File row, and assert that the
-correct branch fired (VLM call vs persisted-text fallback vs error).
+correct branch fired (VLM call vs persisted-text/OCR fallback vs error).
 The vision client is patched to a lambda that returns a canned answer
 without touching the network.
 """
@@ -96,18 +96,34 @@ def test_image_without_question_returns_persisted_description():
     assert result.extras.get("vlm_used") is not True
 
 
-def test_ocr_pdf_without_question_errors_clearly():
+def test_ocr_pdf_without_question_reads_stored_text():
     pipeline = PdfPipeline()
     file_row = SimpleNamespace(
         storage_key="any",
-        description={"ocr": {"engine": "vlm", "pages_total": 3}},
+        description={
+            "ocr": {
+                "engine": "vlm",
+                "pages_total": 3,
+                "pages_processed": 1,
+                "document_type": "book",
+                "stored_pages": 1,
+            },
+            "ocr_pages": [{
+                "page": 1,
+                "text": "Raft Consensus\nLeader election uses randomized timers.",
+                "blocks": [],
+            }],
+        },
     )
     result = asyncio.run(pipeline.read_segment(
-        file_row=file_row, args={}, storage=_FakeStorage(b""),
+        file_row=file_row,
+        args={"pattern": "Leader election"},
+        storage=_FakeStorage(b""),
     ))
-    assert result.error is not None
-    assert "question" in result.error
+    assert result.error is None
+    assert "Leader election" in result.text
     assert result.extras.get("ocr_indexed") is True
+    assert result.extras.get("ocr_document_type") == "book"
 
 
 def test_text_pdf_ignores_ocr_branch():
