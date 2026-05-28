@@ -249,6 +249,12 @@ async def go() -> None:
     assert xlsx_row.ingest_status == "done", xlsx_row.ingest_status
     assert docx_row.kind == "text"
     assert xlsx_row.kind == "table"
+    docx_coverage = (docx_row.description or {}).get("coverage") or {}
+    xlsx_coverage = (xlsx_row.description or {}).get("coverage") or {}
+    assert docx_coverage.get("source_mode") == "docx_extracted_text", docx_coverage
+    assert docx_coverage.get("indexed_partial") is False, docx_coverage
+    assert xlsx_coverage.get("source_mode") == "spreadsheet_row_sample", xlsx_coverage
+    assert xlsx_coverage.get("indexed_partial") is False, xlsx_coverage
     print(f"[2] ingest done: docx kind={docx_row.kind} xlsx kind={xlsx_row.kind}")
 
     # 3a. docx read_segment

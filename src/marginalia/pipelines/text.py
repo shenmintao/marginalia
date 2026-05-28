@@ -4,8 +4,8 @@ Handles `text/markdown`, `text/plain`, and the `.txt` / `.md` / `.rst` extension
 Produces `description.sections` with heading-path / line-range anchors.
 
 Single LLM call:
-  inputs : full text (truncated if huge), folder path, sibling names, catalog
-           sketch, current tag vocabulary
+  inputs : indexed text coverage, folder path, sibling names, catalog sketch,
+           current tag vocabulary
   outputs: tagged text response (see marginalia.llm.tagged_response).
 
 The system prompt is large (>1024 chars) on purpose — Anthropic adapter will
@@ -63,9 +63,11 @@ DEFAULT_MAX_CHARS = 8000
 
 TEXT_PIPELINE_SYSTEM = """You are Marginalia's text-document indexer.
 
-Your job: read a single text document and produce a structured index that lets
-a downstream agent decide whether to retrieve it, and once retrieved, jump to
-the relevant section by anchor.
+Your job: read the indexed text provided for a single document and produce a
+structured index that lets a downstream agent decide whether to retrieve it,
+and once retrieved, jump to the relevant section by anchor. The indexed text
+may be only the first `indexed_bytes` of a larger file; use only the content
+provided and do not infer missing later content.
 
 `summary` is one or two sentences (≤60 中文字 / ≤30 English words) in the
 document's own language — the spine of what the document is and why a
@@ -102,10 +104,12 @@ or logical chunk in this range.
 
 TEXT_AGGREGATE_SYSTEM = """You are Marginalia's aggregate text indexer.
 
-You receive a precomputed section map for an entire text document. Do NOT read
-or invent outside that map. Produce only file-level fields: summary,
-description, extra, entry_extra, catalog_path, and tags. Do not output a
-sections block; the caller will preserve the full section map separately in
+You receive a precomputed section map for the indexed portion of a text
+document. Do NOT read or invent outside that map. If
+`coverage.indexed_partial` is true, make the limited coverage clear and do not
+imply that missing bytes were reviewed. Produce only file-level fields:
+summary, description, extra, entry_extra, catalog_path, and tags. Do not output
+a sections block; the caller will preserve the section map separately in
 `description.sections`.
 
 Make `extra` retrieval-friendly: include important alternate names, recurring
@@ -169,9 +173,11 @@ class TextPipeline(Pipeline):
             "total_bytes": total_bytes,
         }
         stable_prefix = (
-            "Index the document below. Hints are advisory — the document's "
-            "actual content takes precedence. Prefer line-range anchors "
-            "when possible.\n\n"
+            "Index the document text below. Hints are advisory; the provided "
+            "content takes precedence. If indexed_bytes is less than "
+            "total_bytes, cover only the provided text and do not infer "
+            "missing later content. Prefer line-range anchors when possible."
+            "\n\n"
             + render_format_hint() + "\n"
             + render_sections_hint(
                 anchor_unit="lines",
@@ -313,8 +319,8 @@ class TextPipeline(Pipeline):
             system=TEXT_AGGREGATE_SYSTEM,
             messages=[ChatMessage(role="user", content=[
                 TextBlock(text=(
-                    "Summarize the full text document from this section map. "
-                    "The full `description.sections` already exists; produce "
+                    "Summarize the indexed text coverage from this section map. "
+                    "The caller already has `description.sections`; produce "
                     "file-level recall fields only."
                 )),
                 TextBlock(text=aggregate_content),
@@ -371,13 +377,20 @@ class TextPipeline(Pipeline):
         chunk_count: int,
         read_truncated: bool,
     ) -> dict[str, Any]:
+        indexed_partial = read_truncated or indexed_bytes < total_bytes
+        partial_reasons: list[str] = []
+        if indexed_partial:
+            partial_reasons.append("text_index_byte_cap")
         return {
             "unit": "bytes",
+            "source_mode": "text_extracted_bytes",
             "total_units": total_bytes,
             "indexed_units": indexed_bytes,
             "total_bytes": total_bytes,
             "indexed_bytes": indexed_bytes,
-            "indexed_partial": read_truncated or indexed_bytes < total_bytes,
+            "indexed_partial": indexed_partial,
+            "partial_reasons": partial_reasons,
+            "max_index_bytes": MAX_TEXT_INDEX_BYTES,
             "chunked": chunk_count > 1,
             "chunk_count": chunk_count,
             "text_truncated": read_truncated,

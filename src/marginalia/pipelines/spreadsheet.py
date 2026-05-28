@@ -53,8 +53,12 @@ class SpreadsheetPipeline(Pipeline):
         ctx: PipelineContext,
         storage: StorageBackend,
     ) -> PipelineResult:
-        body = await self._extract_text(storage, ctx.storage_key)
-        return await index_extracted_text(body, ctx, kind="table")
+        body, coverage = await self._extract_text_with_coverage(
+            storage, ctx.storage_key,
+        )
+        return await index_extracted_text(
+            body, ctx, kind="table", coverage=coverage,
+        )
 
     async def read_segment(
         self,
@@ -137,6 +141,13 @@ class SpreadsheetPipeline(Pipeline):
 
     @classmethod
     async def _extract_text(cls, storage: StorageBackend, key: str) -> str:
+        body, _coverage = await cls._extract_text_with_coverage(storage, key)
+        return body
+
+    @classmethod
+    async def _extract_text_with_coverage(
+        cls, storage: StorageBackend, key: str,
+    ) -> tuple[str, dict[str, Any]]:
         buf = bytearray()
         async for chunk in storage.get(key):
             buf.extend(chunk)
@@ -144,10 +155,20 @@ class SpreadsheetPipeline(Pipeline):
                 raise ValueError(
                     f"xlsx exceeds {MAX_XLSX_BYTES // (1024*1024)}MB cap"
                 )
-        return cls._render_from_bytes(bytes(buf))
+        text, coverage = cls._render_from_bytes_with_coverage(bytes(buf))
+        coverage["total_bytes"] = len(buf)
+        coverage["indexed_bytes"] = len(buf)
+        return text, coverage
 
     @staticmethod
     def _render_from_bytes(body: bytes) -> str:
+        text, _coverage = SpreadsheetPipeline._render_from_bytes_with_coverage(body)
+        return text
+
+    @staticmethod
+    def _render_from_bytes_with_coverage(
+        body: bytes,
+    ) -> tuple[str, dict[str, Any]]:
         try:
             import openpyxl  # type: ignore
         except ImportError as exc:
@@ -166,12 +187,31 @@ class SpreadsheetPipeline(Pipeline):
             wb.close()
 
 
-def _render_workbook(wb: Any) -> str:
+def _render_workbook(wb: Any) -> tuple[str, dict[str, Any]]:
     parts: list[str] = []
+    sheets: list[dict[str, Any]] = []
+    total_rows_all = 0
+    indexed_rows_all = 0
+    any_partial = False
     for sheet_name in wb.sheetnames:
         ws = wb[sheet_name]
         parts.append(f"# Sheet: {sheet_name}")
         rows = list(_iter_rows(ws, MAX_ROWS_PER_SHEET + MAX_TAIL_PEEK))
+        total_rows_estimate = max(int(getattr(ws, "max_row", 0) or 0), len(rows))
+        indexed_rows = min(len(rows), MAX_ROWS_PER_SHEET)
+        sheet_partial = (
+            len(rows) > MAX_ROWS_PER_SHEET
+            or total_rows_estimate > MAX_ROWS_PER_SHEET
+        )
+        total_rows_all += total_rows_estimate
+        indexed_rows_all += indexed_rows
+        any_partial = any_partial or sheet_partial
+        sheets.append({
+            "name": sheet_name,
+            "total_rows": total_rows_estimate,
+            "indexed_rows": indexed_rows,
+            "indexed_partial": sheet_partial,
+        })
         if not rows:
             parts.append("(empty sheet)")
             continue
@@ -181,11 +221,28 @@ def _render_workbook(wb: Any) -> str:
         else:
             for r in rows[:MAX_ROWS_PER_SHEET]:
                 parts.append(_format_row(r))
+            omitted = max(0, total_rows_estimate - MAX_ROWS_PER_SHEET)
             parts.append(
-                f"\n[…{len(rows) - MAX_ROWS_PER_SHEET}+ more rows omitted…]"
+                f"\n[...{omitted}+ rows omitted from index preview...]"
             )
         parts.append("")
-    return "\n".join(parts).strip()
+    coverage = {
+        "unit": "rows",
+        "source_mode": "spreadsheet_row_sample",
+        "total_units": total_rows_all,
+        "indexed_units": indexed_rows_all,
+        "total_rows": total_rows_all,
+        "indexed_rows": indexed_rows_all,
+        "indexed_partial": any_partial,
+        "partial_reasons": ["sheet_row_cap"] if any_partial else [],
+        "max_rows_per_sheet": MAX_ROWS_PER_SHEET,
+        "sheet_count": len(sheets),
+        "sheets": sheets[:50],
+        "chunked": False,
+        "chunk_count": 1,
+        "text_truncated": any_partial,
+    }
+    return "\n".join(parts).strip(), coverage
 
 
 def _iter_rows(ws: Any, hard_limit: int):

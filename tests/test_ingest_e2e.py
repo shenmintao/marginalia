@@ -200,7 +200,7 @@ async def main() -> None:
             assert len(CALL_LOG) == 1, f"expected 1 LLM call, got {len(CALL_LOG)}"
             req = CALL_LOG[0]
             assert req.json_schema is None
-            assert "Index the document below" in _request_text(req)
+            assert "Index the document text below" in _request_text(req)
             print("[llm] system prompt len:", len(req.system or ""))
             print("[llm] usage path used cache_breakpoints:", req.cache_breakpoints)
 

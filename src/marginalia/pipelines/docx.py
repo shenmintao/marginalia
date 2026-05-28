@@ -53,10 +53,19 @@ class DocxPipeline(Pipeline):
         storage: StorageBackend,
     ) -> PipelineResult:
         paragraphs = await self._extract_paragraphs(storage, ctx.storage_key)
-        body = "\n".join(paragraphs)
-        if len(body) > MAX_OUTPUT_CHARS:
-            body = body[:MAX_OUTPUT_CHARS] + "\n[…document truncated for indexing…]"
-        return await index_extracted_text(body, ctx, kind="text")
+        full_body = "\n".join(paragraphs)
+        indexed_chars = min(len(full_body), MAX_OUTPUT_CHARS)
+        body = full_body
+        if len(full_body) > MAX_OUTPUT_CHARS:
+            body = full_body[:MAX_OUTPUT_CHARS] + "\n[...document truncated for indexing...]"
+        coverage = _docx_coverage(
+            total_chars=len(full_body),
+            indexed_chars=indexed_chars,
+            total_paragraphs=len(paragraphs),
+        )
+        return await index_extracted_text(
+            body, ctx, kind="text", coverage=coverage,
+        )
 
     async def read_segment(
         self,
@@ -252,6 +261,27 @@ def _render_block(block: Any) -> str:
             rows.append(" | ".join(cells))
         return "\n".join(rows)
     return ""
+
+
+def _docx_coverage(
+    *, total_chars: int, indexed_chars: int, total_paragraphs: int,
+) -> dict[str, Any]:
+    indexed_partial = indexed_chars < total_chars
+    return {
+        "unit": "characters",
+        "source_mode": "docx_extracted_text",
+        "total_units": total_chars,
+        "indexed_units": indexed_chars,
+        "total_chars": total_chars,
+        "indexed_chars": indexed_chars,
+        "total_paragraphs": total_paragraphs,
+        "indexed_partial": indexed_partial,
+        "partial_reasons": ["prompt_text_cap"] if indexed_partial else [],
+        "max_index_chars": MAX_OUTPUT_CHARS,
+        "chunked": False,
+        "chunk_count": 1,
+        "text_truncated": indexed_partial,
+    }
 
 
 # ---- read_segment helpers --------------------------------------------------

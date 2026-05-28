@@ -128,7 +128,7 @@ read or invent outside that map. If `coverage.indexed_partial` is true, make
 the limited coverage clear and do not imply that later pages were reviewed.
 Produce only file-level fields: summary, description, extra, entry_extra,
 catalog_path, and tags. Do not output a sections block; the caller will
-preserve the full section map separately in `description.sections`.
+preserve the section map separately in `description.sections`.
 
 Make `extra` retrieval-friendly: include important alternate names, recurring
 technical terms, and high-value page ranges from the section map.
@@ -475,7 +475,7 @@ class PdfPipeline(Pipeline):
             messages=[ChatMessage(role="user", content=[
                 TextBlock(text=(
                     "Summarize the indexed PDF coverage from this section map. "
-                    "The full `description.sections` already exists; "
+                    "The caller already has `description.sections`; "
                     "produce file-level recall fields only."
                 )),
                 TextBlock(text=aggregate_content),

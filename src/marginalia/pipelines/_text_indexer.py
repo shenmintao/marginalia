@@ -30,9 +30,12 @@ log = logging.getLogger(__name__)
 
 INDEXER_SYSTEM = """You are Marginalia's document indexer.
 
-Your job: read a single document and produce a structured index that
-lets a downstream agent decide whether to retrieve it, and once
-retrieved, jump to the relevant section by anchor.
+Your job: read the extracted/indexed view of a single document and produce a
+structured index that lets a downstream agent decide whether to retrieve it,
+and once retrieved, jump to the relevant section by anchor. The view may be a
+truncated prefix, sampled rows, sampled log lines, or otherwise partial. Use
+only the content provided and the supplied coverage metadata; do not infer
+missing content.
 
 `summary` is one or two sentences (≤60 中文字 / ≤30 English words) in the
 document's own language — the spine of what the document is and why a
@@ -58,18 +61,27 @@ def make_schema(kind: str) -> dict[str, Any]:
 
 
 async def index_extracted_text(
-    body: str, ctx: PipelineContext, kind: str
+    body: str,
+    ctx: PipelineContext,
+    kind: str,
+    *,
+    coverage: dict[str, Any] | None = None,
 ) -> PipelineResult:
     """Run the indexing LLM call and return a PipelineResult."""
+    coverage = dict(coverage or {})
     user_payload = {
         "folder_path": ctx.folder_path,
         "sibling_names": ctx.sibling_names,
         "catalog_sketch": ctx.catalog_sketch,
         "tag_vocabulary": ctx.tag_vocabulary,
     }
+    if coverage:
+        user_payload["coverage"] = coverage
     stable_prefix = (
-        f"Index the {kind} document below. Hints are advisory — the "
-        "document's actual content takes precedence.\n\n"
+        f"Index the extracted {kind} view below. Hints are advisory; the "
+        "provided content takes precedence. If coverage.indexed_partial is "
+        "true, describe only the indexed view and do not imply complete "
+        "coverage of omitted content.\n\n"
         + render_format_hint() + "\n"
         + render_sections_hint(
             anchor_unit="heading or lines",
@@ -116,6 +128,8 @@ async def index_extracted_text(
         tagged.get("sections", ""), anchor_unit="heading",
     )
     description: dict[str, Any] = {"sections": sections}
+    if coverage:
+        description["coverage"] = coverage
     description_text = tagged.get("description", "").strip()
     if description_text:
         description["text"] = description_text
