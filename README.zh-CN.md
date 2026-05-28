@@ -282,17 +282,6 @@ agent runtime / agent tools / CLI / image / pdf / pdf-OCR / docx /
 spreadsheet / container / git / archive pipeline / mirror 存储 /
 scan + sync / discovery。
 
-## 状态
-
-v1:端到端可用,尚未对真实世界数据做硬化。
-
-已知缺口:
-
-- 没有语义 / embedding 检索。召回靠文件名 + summary + tags + ingest
-  文本的 FTS5 + entry_relations 上的 random walk discovery。个人知识
-  库够用;不是向量检索的替代品。
-- 音视频文件能上传但没有 pipeline。语音转写是未来的工作。
-
 ## License
 
 Copyright (c) 2026 shenmintao

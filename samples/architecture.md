@@ -1,99 +1,277 @@
-# Marginalia 架构概览
+# Marginalia Architecture Overview
 
-> 这份文档是给开发者看的，不是用户文档。用户文档见 `quickstart.md`。
+This document is a developer-facing architecture sketch. It complements the full design in `DESIGN.md`.
 
-## 五层结构
+## 1. System Shape
 
-```
-┌─────────────────────────────────────────────┐
-│  audit_events    数据变化事件流（仅人类审计）│
-├─────────────────────────────────────────────┤
-│  sessions/conversations    容器 + 累计指标   │
-├─────────────────────────────────────────────┤
-│  AI-internal    catalogs / tags / journal    │
-│                 entry_relations / entry_tags │
-├─────────────────────────────────────────────┤
-│  user-visible   folders / file_entries / files│
-└─────────────────────────────────────────────┘
-┌─────────────────────────────────────────────┐
-│  基础设施    tasks / task_outcomes           │
-└─────────────────────────────────────────────┘
+```text
+CLI / desktop / HTTP client
+        |
+        v
+FastAPI app (`marginalia.main`)
+        |
+        +-- synchronous request handlers
+        |     upload, folders, entries, search, chat, export, settings
+        |
+        +-- TaskRunner
+              ingest, reflect, tag quality, relation mining,
+              catalog maintenance, pruning, lifecycle suggestions
 ```
 
-## 三个 LLM 角色
+Default mode embeds everything in one process:
 
-- 🔍 **investigator** — online agent，处理用户问题。读 journal 找过去
-  思路，用工具组装上下文，回答带引用
-- 🏛️ **librarian** — 离线后台。ingest_file / normalize_tags /
-  enrich_tags / restructure_catalogs / lifecycle suggestions
-- 📋 **reflector** — 每个 conversation 跑完后，把"这一轮学到了什么"
-  写进 journal 供下次 investigator 翻阅
-
-## 任务系统
-
-12 个 task kind 通过 `tasks` 表统一调度，无外部 broker。
-`periodic_tick` (10 分钟一次) 是分发器：根据 `PERIODIC_INTERVALS` 决
-定哪些 kind 该重新入队。
-
-```
-priority   kind                       interval
-─────────────────────────────────────────────
-30         reflect_turn               (event-driven, after each turn)
-50         ingest_file                (event-driven, after upload)
-100        recover_stuck_tasks        10 minutes
-150        purge_deleted_files        1 day
-200        normalize_tags             6 hours
-215        enrich_tags                5 days
-220        restructure_catalogs       7 days
-240        suggest_demotion           7 days
-250        suggest_archival           14 days
-260        prune_audit_events         1 day
-265        prune_task_outcomes        7 days
-300        periodic_tick              10 minutes (self-rearm)
+```text
+marginalia
+  -> CLI REPL
+  -> httpx ASGITransport
+  -> FastAPI app
+  -> in-process TaskRunner
 ```
 
-## 11 个 agent 工具
+Remote mode runs the API separately:
 
-```
-search_journal       翻自己的笔记本（最常用，新对话第一动作）
-list_folder          列单个文件夹（同时返回子文件夹和 entries；支持 path='Papers/2024'）
-list_catalogs        列 AI 内部分类树
-read_catalog         看分类节点详情
-resolve_tag          tag 名 → canonical id
-materialize_view     view filter_spec 实例化为 entry 列表
-search_metadata      复合过滤：text/tags/catalog/lifecycle
-read_entries_metadata 批量读 entry 详情 + 自动附 related
-read_files           按 section/lines/heading/bytes 读原文 + 内文搜索
-query_log            日志 filter（pattern/level/since/until）
-query_table          DuckDB SELECT against CSV/Parquet/XLSX/JSON
+```text
+marginalia --server http://host:8000
+  -> HTTP
+  -> uvicorn marginalia.main:app
 ```
 
-## 3 条 ingest pipeline
+## 2. Layers
 
-- **text** — text/markdown / .txt .md .rst
-- **image** — image/* (用 vision profile)
-- **pdf** — application/pdf (pypdf 直读 + 内嵌图喂 vision)
+```text
+User-visible layer
+  folders
+  file_entries
+  files
 
-## LLM Profile
+AI-internal retrieval layer
+  catalogs
+  views
+  tags
+  tag_aliases
+  entry_tags
+  entry_relations
+  journal
 
-5 个 profile 通过 `.env` 配置，缺失字段回退到 `LLM_DEFAULT_*`：
+Session and audit layer
+  sessions
+  conversations
+  audit_events
 
+Infrastructure layer
+  tasks
+  task_outcomes
 ```
-chat     online agent (用户对话)
-reflect  reflect_turn (强模型 + 长上下文)
-ingest   离线 ingest + 所有 batch 任务
-vision   image_pipeline / pdf 抽图描述
-audio    Whisper 类（V1 框架就位，pipeline 待实现）
+
+Important separation:
+
+- `files` describe immutable bytes.
+- `file_entries` describe a file placement in the user's library.
+- `journal` is the agent's persistent investigation memory.
+- `entry_relations` is the evidence-discovery graph.
+- `audit_events` is operational history, not retrieval memory.
+
+## 3. Request Paths
+
+### Upload and Ingest
+
+```text
+POST /v1/upload
+  -> store bytes in mirror/local/s3
+  -> create/reuse files row
+  -> create file_entries row
+  -> enqueue ingest_file
+
+ingest_file
+  -> resolve pipeline
+  -> extract text/metadata/sections
+  -> call ingest LLM profile where needed
+  -> write files.summary / description / extra / kind
+  -> assign catalog and tags
 ```
 
-支持 OpenAI 和 Anthropic（含 OpenAI-compatible endpoints）。
+Pipelines:
 
-## 不可违反的约定
+```text
+text
+pdf
+image
+docx
+spreadsheet
+log
+archive
+```
 
-- AI 永不删数据，只软删
-- audit_events INSERT-only
-- files 内容字段（summary/description/extra/kind）write-once
-- agent 不读 audit / sessions / conversations（用 journal 回忆过去）
-- 用户不读 AI-internal 表（catalog/tags/journal 等）
-- 离线任务不读 audit/conversations 做业务决策（用 task_outcomes）
-- task_outcomes 只 INSERT，prune_task_outcomes 是唯一删除路径
+### Chat Turn
+
+```text
+POST /v1/chat/{session_id}
+  -> create conversation
+  -> build stable snapshot
+  -> plan LLM call
+  -> execute LLM loop with tools
+  -> stream SSE events
+  -> persist answer and metrics
+  -> enqueue reflect_turn
+```
+
+The execute loop can call:
+
+```text
+search_journal
+list_folder
+list_catalogs
+read_catalog
+resolve_tag
+materialize_view
+search_metadata
+read_entries_metadata
+read_files
+query_log
+query_sql
+analyze_container
+generate_chart
+```
+
+### Reflection
+
+```text
+reflect_turn
+  -> replay same stable prefix shape as execute
+  -> append compact current-turn summary
+  -> ask reflect profile for one <entry> block
+  -> insert journal row
+```
+
+The journal row is what future turns search. Raw conversations are persisted for audit/export, not used as primary retrieval memory.
+
+## 4. Retrieval Funnel
+
+```text
+journal recall
+  -> structured metadata filters
+  -> catalog/tag/view/folder narrowing
+  -> related entry graph
+  -> original source read
+  -> cited answer
+```
+
+The funnel intentionally delays expensive raw-file reads until candidates are plausible.
+
+`read_files` provides targeted source access:
+
+- text sections, headings, line ranges, regex matches;
+- PDF physical page windows, page labels, regex matches;
+- DOCX paragraph ranges;
+- archive member paths;
+- bounded offsets for long documents.
+
+## 5. Evidence Graph
+
+Background relation discovery turns usage and structure into retrieval hints.
+
+```text
+mine_relations
+  -> session co-occurrence
+  -> tag overlap
+  -> citation co-citation
+  -> corpus evidence candidates
+  -> entry_relations
+
+vet_relations
+  -> LLM gate
+  -> vetted=True/False
+
+services.recommend.find_related
+  -> random walk with restart
+  -> related entries in search/metadata/discover
+```
+
+The online agent does not need to understand all mining signals. It receives related entries as compact candidates.
+
+## 6. Long Document Strategy
+
+Long files are never assumed to fit in one prompt.
+
+Text:
+
+- normal reads cap bytes according to requested window;
+- deep reads can scan more for heading, line, section, or pattern lookup.
+
+PDF:
+
+- ingest can chunk or partially index long documents;
+- readback extracts requested page windows;
+- default reads return continuation hints;
+- page labels are supported, but physical pages are the stable viewer locator;
+- citation display tries quote location first.
+
+## 7. Task Scheduling
+
+The task queue is database-backed. No broker is required.
+
+Important mechanics:
+
+- priority controls claim order;
+- leases and heartbeats recover crashed workers;
+- active `dedup_key` uniqueness avoids duplicate background work;
+- `task_outcomes` records idempotent effects and periodic recency.
+
+Task families:
+
+```text
+online-adjacent: reflect_turn, ingest_file
+self-healing:    recover_stuck_tasks
+maintenance:     tag_quality, restructure_catalogs, suggest_lifecycle
+discovery:       mine_relations, vet_relations, propose_views, refresh_entry_extra
+retention:       purge_deleted_files, prune
+dispatcher:      periodic_tick
+```
+
+## 8. Storage
+
+Backends:
+
+```text
+mirror  readable folder tree under <home>/library
+local   UUID object pool under <home>/objects
+s3      remote object storage
+```
+
+Startup checks whether existing `storage_key` shapes match the configured backend. If not, the operator must migrate or restore the previous backend.
+
+## 9. Deployment Choices
+
+Personal library:
+
+```text
+SQLite + mirror + embedded CLI
+```
+
+High-churn local library:
+
+```text
+SQLite + local + embedded CLI
+```
+
+Shared or multi-host library:
+
+```text
+Postgres + S3 + API server + worker
+```
+
+SQLite is appropriate for one writer process. Use Postgres when multiple processes or machines can write.
+
+## 10. Design Boundaries
+
+Marginalia is not a vector search engine, a chat memory database, or a document summarizer that treats summaries as final evidence.
+
+The intended contract is:
+
+```text
+structured narrowing
+  + durable investigation memory
+  + evidence graph
+  + original-source verification
+  = trustworthy private-library retrieval
+```

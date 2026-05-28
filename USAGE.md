@@ -1,15 +1,9 @@
 # Marginalia Operations Manual
 
-> 中文版:[USAGE.zh-CN.md](USAGE.zh-CN.md)
->
-> Written for users who already know their way around a terminal. Install
-> → run one complete flow → know where to look when things break.
->
-> This manual does not explain *why* things are designed this way — that
-> belongs in [`DESIGN.md`](DESIGN.md). The command list and CLI flags
-> live in [`README.md`](README.md).
+> Chinese manual: [USAGE.zh-CN.md](USAGE.zh-CN.md)
+> Design rationale: [DESIGN.md](DESIGN.md)
 
----
+This manual describes how to install, configure, run, and troubleshoot Marginalia as a private heterogeneous knowledge-base retrieval system.
 
 ## 1. Install
 
@@ -17,391 +11,322 @@ Requires Python 3.11+.
 
 ```bash
 git clone <repo>
-cd marginalia
+cd Marginalia
 python -m venv .venv
-source .venv/Scripts/activate         # Windows: .venv\Scripts\activate
+
+# Windows PowerShell
+.\.venv\Scripts\Activate.ps1
+
+# macOS / Linux
+source .venv/bin/activate
+
 pip install -e ".[dev]"
 ```
 
-You're set when `marginalia --help` prints the command list.
-
----
-
-## 2. Initialize a library
-
-A library = one directory holding the db + your files + caches.
+Check the CLI:
 
 ```bash
-mkdir my-library && cd my-library
+marginalia --help
+```
+
+## 2. Initialize a Library
+
+```bash
+mkdir my-library
+cd my-library
 marginalia init
 ```
 
-`init` lays down, in the current directory:
-- `.env` — config file; you'll need to fill in your API key
-- `data/` — where the SQLite database lands
-- `library/` — your uploaded files, stored as a real readable folder tree
-- `.marginalia/` — caches
+`init` creates a starter `.env` and local folders. Runtime state is rooted at `MARGINALIA_HOME`; when unset it defaults to `~/Marginalia`.
 
-To put the library elsewhere, set `MARGINALIA_HOME`:
+Recommended explicit setting:
 
-```bash
-export MARGINALIA_HOME=/some/other/path
-marginalia init
+```ini
+MARGINALIA_HOME=E:/Marginalia
 ```
 
----
+## 3. Configure LLM Profiles
 
-## 3. Configure the LLM (DeepSeek V4 Flash example)
+Minimal `.env`:
 
-Open `.env` and edit these lines:
+```ini
+LLM_DEFAULT_PROVIDER=openai
+LLM_DEFAULT_API_KEY=sk-...
+LLM_DEFAULT_MODEL=gpt-4o-mini
+```
+
+OpenAI-compatible providers such as DeepSeek, Together, Groq, vLLM, or Ollama:
 
 ```ini
 LLM_DEFAULT_PROVIDER=openai-compatible
 LLM_DEFAULT_BASE_URL=https://api.deepseek.com/v1
-LLM_DEFAULT_API_KEY=sk-your-key
-LLM_DEFAULT_MODEL=deepseek-v4-flash
+LLM_DEFAULT_API_KEY=sk-...
+LLM_DEFAULT_MODEL=deepseek-chat
 ```
 
-DeepSeek speaks the OpenAI wire protocol, but it doesn't accept OpenAI's
-strict `json_schema` response format. `openai-compatible` is the right
-provider value — the adapter falls back to plain `json_object` and
-injects the schema as a system-prompt instruction. Use plain `openai`
-only when pointing at OpenAI proper.
-
-`LLM_DEFAULT_*` covers everything by default. Per-task overrides exist
-(`LLM_REFLECT_MODEL`, `LLM_INGEST_MODEL`, etc.) for routing expensive
-but low-frequency stages to a stronger model — say `deepseek-v4-pro` —
-but `v4-flash` is smart enough that you usually don't need to bother.
-
-Vision (image ingest) and audio (transcription) need their own config
-because they typically use a different provider:
+Profiles:
 
 ```ini
-# Leave blank if you have no vision model — images will skip the VLM stage
-LLM_VISION_BASE_URL=https://api.deepseek.com/v1
-LLM_VISION_MODEL=deepseek-vl
+LLM_CHAT_MODEL=              # online investigator
+LLM_REFLECT_MODEL=           # journal reflection after each turn
+LLM_INGEST_MODEL=            # ingest and background maintenance
+LLM_VISION_MODEL=            # images, PDF figures, scanned-PDF OCR
 ```
 
-After editing `.env`, run migrations once:
+Unset profile fields inherit from `LLM_DEFAULT_*`. `chat`, `reflect`, and `ingest` must resolve to an API key. `vision` is optional.
 
-```bash
-alembic upgrade head
-```
+The desktop Settings page can write LLM overrides to `config_overlay.json`; those values take precedence over `.env` LLM fields.
 
----
+## 4. Start Marginalia
 
-## 4. Run one complete flow
+Embedded mode:
 
 ```bash
 marginalia
 ```
 
-Drops you into the REPL. The five steps below are the minimum viable
-flow:
+This starts FastAPI, TaskRunner, and the CLI in one process. Database schema bootstrap runs automatically on startup.
 
+Remote server mode:
+
+```bash
+uvicorn marginalia.main:app --host 0.0.0.0 --port 8000
+marginalia --server http://127.0.0.1:8000
 ```
-marginalia> /upload paper.pdf /
-   ↳ copies paper.pdf into the vault root, queues an ingest task
 
-marginalia> /tree
-   ↳ shows the folder structure — confirm paper.pdf landed
+`alembic upgrade head` is still safe for explicit migration workflows, but a fresh local database does not require a separate migration step before first use.
 
+## 5. First Complete Flow
+
+Upload:
+
+```text
+marginalia> /upload ./papers/raft.pdf /papers/
+```
+
+Watch ingest:
+
+```text
+marginalia> /background
+```
+
+Find the entry:
+
+```text
+marginalia> /search raft
 marginalia> /info <entry_id>
-   ↳ shows ingest status. Only counts as ingested when status reaches
-     pending → processing → done
-   ↳ first run takes ten-ish seconds to a minute (depends on model speed)
+```
 
-marginalia> what is this paper about?
-   ↳ enters the agent flow: planning → tool calls → answer
-   ↳ the answer ends with [^a] [^b] footnotes citing specific passages
+Ask a question:
 
+```text
+marginalia> compare this Raft paper with my Paxos notes
+```
+
+The investigator will plan, search journal, search metadata, inspect candidates, read original file slices, and answer with footnotes.
+
+Export:
+
+```text
 marginalia> /export
-   ↳ packs that conversation (with cited excerpts) into a zip in cwd
 ```
 
-`✓ answer ready` means the turn finished cleanly.
+## 6. CLI Commands
 
----
+### Files and Folders
 
-## 5. Reading the event stream
-
-After you ask a question, lines stream in:
-
-```
-⠋ planning the investigation...      ← Plan phase (no tools, just thinking)
-⠋ calling search_journal(...)         ← Execute phase calls a tool
-⠋ calling read_files(entry_id=...)
-⠋ investigator thinking...            ← LLM is writing the answer
-✓ answer ready
-```
-
-**No `planning` line, jumps straight to `answer ready`**: normal. The
-plan phase classified your input as "small talk" or "trivial lookup" and
-short-circuited.
-
-**`thinking` hangs for a while**: the LLM is generating the final
-answer. Wait it out.
-
-**Same `calling X(...)` repeats**: the agent is looping on the same
-tool. The framework's doom-loop guard forces an end within 6 cycles. If
-this keeps happening, see §8 troubleshooting.
-
-**The trailing `[tokens in=X out=Y tools=N llm_calls=M ...]`**: cost
-breakdown for the turn.
-
----
-
-## 6. Uploading more files
-
-### Single file
-
-```
-marginalia> /upload ~/Downloads/paper.pdf /papers
+```text
+/upload <local> <remote>       upload file or directory into the vault
+/check                         read-only mirror vault diff
+/ingest <vault_path>           sync one existing vault file
+/ingest --all                  apply all /check changes
+/tree [depth]                  folder tree
+/ls [folder_id]                list folders
+/cd <remote_path>              set remote cwd
+/download <id> [dest]          download file or folder zip
 ```
 
-The second arg is a vault-internal path. Leading `/` = absolute (from
-vault root); no leading `/` = relative to the current remote cwd.
+Use `/upload` for files outside the vault. Use `/ingest` for files already inside the mirror vault.
 
-### Switch remote cwd, then bulk upload
+### Search and Read
 
-```
-marginalia> /cd /papers/2024
-marginalia> /upload ~/Downloads/p1.pdf
-marginalia> /upload ~/Downloads/p2.pdf
-   ↳ both land under /papers/2024/
-```
-
-### Copy a whole directory at once
-
-```
-marginalia> /upload ~/Downloads/notes /
-   ↳ copies the entire notes/ directory into the vault root
+```text
+/search <query>                metadata recall
+/info <entry_id>               metadata and preview
+/discover <entry_id> [N]       vetted related entries
+/discover <entry_id> --all     include unvetted relation signals
 ```
 
-### Name conflicts
+Any non-slash input is sent to the agent.
 
-```
-marginalia> /on-conflict rename     # auto-suffix (1) (2)
-marginalia> /on-conflict skip       # skip
-marginalia> /on-conflict error      # raise (default)
-```
+### Sessions and Export
 
-Setting only applies to the current session.
-
-### When you've edited files outside marginalia
-
-```
-marginalia> /check
-   ↳ diffs disk vs db, read-only
-marginalia> /ingest --all
-   ↳ syncs changes into the db (think: git add -A)
+```text
+/new                           open a new session
+/clear                         close current session
+/export [conversation_id]      export latest or selected conversation
+/quit                          exit
 ```
 
-Single-file sync:
+### Background Maintenance
 
+```text
+/background                    active and pending tasks
+/tend                          trigger one maintenance chain
+/tend <run_id>                 inspect a maintenance run
 ```
-marginalia> /ingest /papers/edited.md
+
+Maintenance includes tag quality, catalog restructuring, lifecycle suggestions, relation mining, relation vetting, view proposals, entry-extra refresh, and pruning.
+
+## 7. Asking Effective Questions
+
+Marginalia works best for questions that need evidence from your library:
+
+```text
+Which saved contracts make the bonus discretionary?
+Which papers discuss Byzantine fault tolerance?
+Group my observability notes by product risk.
 ```
 
----
+The agent is prompted to:
 
-## 7. How to ask questions
+1. start substantive turns with `search_journal`;
+2. for multi-keyword journal recall, try `search_journal(tags=[...])` first;
+3. fall back to `search_journal(text=...)` when tag recall is weak;
+4. read original files before making source-backed claims.
 
-### One-shot Q&A (no REPL)
+PDF citations prefer exact `quote` lookup over page-only lookup, because printed page labels can differ from physical PDF pages.
+
+## 8. Read Granularity
+
+`read_files` supports:
+
+- generic byte/character windows: `offset`, `max_chars`;
+- text: `section_id`, `heading`, `line_start`, `line_end`, `pattern`;
+- PDF: `page_start`, `page_end`, `page_label`, `pattern`;
+- DOCX: `paragraph_start`, `paragraph_end`;
+- archive: `member_path`.
+
+Long documents are windowed. Default PDF reads do not extract an entire thousand-page document; results include continuation hints such as `next_page_start`. For long text, default reads are proportional to the requested window, while deep reads can scan more when searching by heading, section, line, or pattern.
+
+## 9. Storage Backends
+
+### mirror
+
+Default. Files live in a readable tree:
+
+```text
+<MARGINALIA_HOME>/library/papers/raft.pdf
+```
+
+If you edit files outside Marginalia:
+
+```text
+/check
+/ingest --all
+```
+
+### local
+
+UUID-addressed object pool. Faster for high-churn workloads, less friendly for direct browsing.
+
+Migration:
 
 ```bash
-marg ask "Which of my saved diffusion-model papers cover score-based methods?"
+marginalia storage migrate --from mirror --to local
+marginalia storage migrate --from local --to mirror
 ```
 
-Prints the answer to stdout, no session opened. Good for quick lookups.
+### s3
 
-### Open a chat session (multi-turn)
+Remote object storage for multi-host deployments. Use Postgres with S3; SQLite is not suitable for multiple writer processes.
 
-```bash
-marg chat
-   or in REPL: marginalia> /new
-```
+## 10. Lifecycle
 
-Each follow-up carries the prior context. End with `/clear` (marks the
-session cleared) or `/quit`.
+Entries can be:
 
-### Export a conversation
+- `active`
+- `demoted`
+- `archived`
+- `manual_active`
+- `manual_archived`
 
-```bash
-# single markdown file (with citation list)
-marg export <conv_id> -o answer.md
-
-# zip bundle (with cited source excerpts)
-marg export <conv_id> --bundle -o report.zip
-
-# every conversation in a session
-marg export <session_id> --all --bundle -o session.zip
-```
-
-`<conv_id>` shows up in the trailing `[...]` line after each answer.
-`$LAST` aliases the most recent turn.
-
----
-
-## 8. Troubleshooting
-
-### File stuck on `processing`
-
-```
-marginalia> /info <entry_id>
-   ↳ check ingest_status. No movement for 5+ minutes = actually stuck
-```
-
-`recover_stuck_tasks` runs every 10 minutes and resets timed-out tasks
-back to `pending`. Trigger a full maintenance cycle by hand:
-
-```
-marginalia> /tend
-```
-
-### Ingest fails repeatedly
-
-```
-marginalia> /info <entry_id>
-   ↳ check last_error. The prefix tells you which stage: Parse: / LLM: / Route:
-```
-
-- `Parse:` — file parsing failed. Likely corrupt or unsupported format.
-- `LLM:` — LLM call failed. 99% of the time it's API key / quota / network.
-- `Route:` — auto-cataloging failed. Rare; usually the LLM emitted
-  schema-invalid output. The next recover cycle will retry.
-
-### LLM API key is dead
-
-Tasks will fail until they go `dead`. Fix `.env`, restart marginalia,
-and `recover_stuck_tasks` gives dead tasks one more shot.
-
-### Force-reingest a file
-
-No dedicated command. Most direct route:
-
-```
-marginalia> /info <entry_id>
-   ↳ note the file_id
-```
-
-Then via API or SQL, set the corresponding `files` row's `ingested_at`
-to NULL and `ingest_status` back to `pending`. The next recover cycle
-re-queues it.
-
-> Heads up: this bypasses the write-once contract. Use only when ingest
-> has a real bug and needs a do-over. Not part of normal use.
-
----
-
-## 9. Backup and migration
-
-### Single-machine backup (SQLite + local / mirror storage)
-
-`cp -r` the entire `MARGINALIA_HOME` directory. The db file, library,
-and objects are all under it.
-
-You can copy while marginalia runs, but `/quit` first is safer.
-
-### Migrate SQLite → Postgres
-
-1. Cleanly stop the SQLite library (`/quit`)
-2. Stand up Postgres, edit `.env`:
+Automatic lifecycle transitions are off by default:
 
 ```ini
-DB_BACKEND=postgres
-POSTGRES_DSN=postgresql+asyncpg://user:pass@localhost:5432/marginalia
+AUTO_LIFECYCLE_ENABLED=false
 ```
 
-3. Run migrations:
+This is deliberate for personal libraries. Shared deployments can enable it to let background tasks demote or archive inactive material.
+
+## 11. Troubleshooting
+
+### Missing LLM API key
+
+Set `LLM_DEFAULT_API_KEY`, or per-profile keys:
+
+```ini
+LLM_CHAT_API_KEY=...
+LLM_REFLECT_API_KEY=...
+LLM_INGEST_API_KEY=...
+```
+
+### File stuck in `processing`
+
+```text
+/info <entry_id>
+/background
+```
+
+`recover_stuck_tasks` runs periodically. You can also trigger maintenance:
+
+```text
+/tend
+```
+
+### Scanned PDF has no text
+
+Configure a vision profile:
+
+```ini
+LLM_VISION_PROVIDER=openai
+LLM_VISION_API_KEY=...
+LLM_VISION_MODEL=gpt-4o
+```
+
+Without vision, scanned PDFs are marked as needing OCR instead of producing misleading empty text.
+
+### Storage backend mismatch
+
+If startup reports that existing `storage_key` values do not match the configured backend, either restore the previous backend or migrate:
 
 ```bash
-alembic upgrade head
+marginalia storage migrate --from local --to mirror
 ```
 
-4. Data migration is not yet automated — v1 assumes the library is
-   small enough that "re-ingest from scratch" is acceptable. To preserve
-   history, write your own dump-from-SQLite, INSERT-into-Postgres script.
+### Re-index a changed file
 
-### Migrate mirror / local → S3
+For mirror storage:
+
+```text
+/check
+/ingest <path>
+```
+
+## 12. Backup
+
+For SQLite + mirror/local storage, stop Marginalia and copy the whole `MARGINALIA_HOME` directory.
+
+Windows:
 
 ```bash
-marginalia storage migrate --to s3
+robocopy E:\Marginalia D:\backup\Marginalia /MIR
 ```
 
-Rewrites every `files.storage_key` to point at S3, bulk-PUTs the
-physical files. S3 config in `.env` must already be filled in before
-running this.
-
----
-
-## 10. Sharing one library across machines
-
-SQLite does not support multi-process writes — multi-machine requires
-Postgres + S3.
-
-**Machine A (server)**:
+macOS/Linux:
 
 ```bash
-# .env: DB_BACKEND=postgres, STORAGE_BACKEND=s3, WORKER_ENABLED=true
-uvicorn marginalia.main:app --host 0.0.0.0 --port 8000
+rsync -a ~/Marginalia/ /backup/Marginalia/
 ```
 
-**Machine B (client)**:
-
-```bash
-marginalia --server http://A.lan:8000
-```
-
-Or write `MARGINALIA_SERVER=http://A.lan:8000` into machine B's
-`~/.marginalia/.env`, then plain `marginalia` works.
-
-### Docker compose, full stack in one shot
-
-```bash
-echo "LLM_DEFAULT_API_KEY=sk-..." > .env
-docker compose up -d
-```
-
-Brings up api + worker + Postgres + MinIO. `alembic upgrade head` runs
-on api startup; the MinIO bucket is created by a one-shot init container.
-
-```bash
-marginalia --server http://localhost:8000
-```
-
----
-
-## 11. Watching what the background is doing
-
-```
-marginalia> /tend
-   ↳ kicks off one full offline maintenance cycle (normalize_tags /
-     enrich_tags / restructure / suggest_demotion etc.) and prints
-     each task's output as it runs
-```
-
-Demoted / archived entries are excluded from new query recall by
-default. To see what got auto-demoted:
-
-```
-marginalia> /search <keyword>
-   ↳ defaults to active only. Add --include-archived to see everything
-```
-
-Restore an auto-archived entry:
-
-```
-marginalia> /restore <entry_id>
-```
-
----
-
-## 12. Quitting
-
-```
-marginalia> /quit
-```
-
-Or just Ctrl+D. In embedded mode this stops the server + worker too.
-Tasks mid-flight are resumed by `recover_stuck_tasks` on next launch.
+For Postgres/S3 deployments, back up the database and object storage separately.
