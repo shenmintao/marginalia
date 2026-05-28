@@ -13,6 +13,10 @@ from marginalia.config import (
 )
 from marginalia.llm.anthropic_adapter import AnthropicChatClient
 from marginalia.llm.base import AudioClient, ChatClient
+from marginalia.llm.model_controls import (
+    should_disable_thinking_by_default,
+    with_disabled_thinking,
+)
 from marginalia.llm.openai_adapter import OpenAIAudioClient, OpenAIChatClient
 from marginalia.llm.types import ChatRequest, ChatResponse
 
@@ -26,12 +30,21 @@ class _UsageRecordingChatClient:
     Kept as a thin proxy so `isinstance(c, ChatClient)` still holds and
     test code that monkeypatches `complete` keeps working."""
 
-    def __init__(self, inner: ChatClient) -> None:
+    def __init__(
+        self,
+        inner: ChatClient,
+        *,
+        disable_thinking_by_default: bool = False,
+    ) -> None:
         self._inner = inner
         self.profile_name = inner.profile_name
+        self.provider = inner.provider
         self.model = inner.model
+        self._disable_thinking_by_default = disable_thinking_by_default
 
     async def complete(self, request: ChatRequest) -> ChatResponse:
+        if self._disable_thinking_by_default:
+            request = with_disabled_thinking(request)
         # Import here to avoid a circular dep at module import time
         # (tasks.usage doesn't import llm, but tasks.runner does, and
         # tasks.runner imports through this factory).
@@ -48,7 +61,10 @@ def _build_chat(profile: LlmProfile) -> ChatClient:
         inner = AnthropicChatClient(profile)
     else:
         raise ValueError(f"unknown provider for profile {profile.name}: {profile.provider}")
-    return _UsageRecordingChatClient(inner)
+    return _UsageRecordingChatClient(
+        inner,
+        disable_thinking_by_default=should_disable_thinking_by_default(profile),
+    )
 
 
 @lru_cache(maxsize=8)

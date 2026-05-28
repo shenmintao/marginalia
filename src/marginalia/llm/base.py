@@ -13,6 +13,7 @@ class ChatClient(Protocol):
     (api_key, base_url, model) — call-site only chooses what to send."""
 
     profile_name: str
+    provider: str
     model: str
 
     async def complete(self, request: ChatRequest) -> ChatResponse: ...
