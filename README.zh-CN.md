@@ -6,6 +6,8 @@
 图书馆学风格的个人知识库系统。AI 在后台编目、归类、交叉引用;你提问,
 调查员 agent 翻自己的笔记本(journal)、收集上下文,给出带引用的回答。
 
+![Marginalia 桌面端界面](docs/images/desktop-gui.jpg)
+
 **不用向量库、不嵌入、不切块。** 检索靠结构化访问点(分类树 / tags /
 views)+ metadata 搜索 + agent 直接读原文。LLM 提供语义理解,schema
 负责账本。
