@@ -1,6 +1,6 @@
 [project]
 name = "marginalia"
-version = "0.1.1"
+version = "0.1.0"
 description = "A library-science-inspired personal knowledge management system with LLM agents."
 requires-python = ">=3.11"
 license = "AGPL-3.0-or-later"
