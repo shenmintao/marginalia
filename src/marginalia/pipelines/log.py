@@ -83,18 +83,30 @@ class LogPipeline(Pipeline):
         ctx: PipelineContext,
         storage: StorageBackend,
     ) -> PipelineResult:
-        lines = await self._read_lines(storage, ctx.storage_key)
+        lines, indexed_bytes, read_truncated = await self._read_lines_with_meta(
+            storage, ctx.storage_key,
+        )
         stats = _summarize(lines)
         sampled = _sample_for_indexer(lines, stats)
+        coverage = _log_coverage(
+            total_bytes=ctx.size_bytes,
+            indexed_bytes=indexed_bytes,
+            loaded_lines=len(lines),
+            sampled_lines=_sampled_line_count(sampled),
+            read_truncated=read_truncated,
+            sample_truncated=any("sample truncated" in line for line in sampled),
+        )
         body = (
-            f"Log file summary:\n"
-            f"  total lines: {stats['line_count']}\n"
-            f"  time range:  {stats['first_ts'] or '?'} → {stats['last_ts'] or '?'}\n"
-            f"  levels:      {stats['level_counts']}\n"
+            f"Log file extracted view:\n"
+            f"  loaded lines: {stats['line_count']}\n"
+            f"  time range:   {stats['first_ts'] or '?'} -> {stats['last_ts'] or '?'}\n"
+            f"  levels:       {stats['level_counts']}\n"
             f"\n--- sampled lines ---\n"
             + "\n".join(sampled)
         )
-        return await index_extracted_text(body, ctx, kind="log")
+        return await index_extracted_text(
+            body, ctx, kind="log", coverage=coverage,
+        )
 
     async def read_segment(
         self,
@@ -219,13 +231,24 @@ class LogPipeline(Pipeline):
     async def _read_lines(
         storage: StorageBackend, key: str,
     ) -> list[str]:
+        lines, _indexed_bytes, _read_truncated = (
+            await LogPipeline._read_lines_with_meta(storage, key)
+        )
+        return lines
+
+    @staticmethod
+    async def _read_lines_with_meta(
+        storage: StorageBackend, key: str,
+    ) -> tuple[list[str], int, bool]:
         buf = bytearray()
+        truncated = False
         async for chunk in storage.get(key):
             buf.extend(chunk)
             if len(buf) > MAX_LOG_BYTES:
                 buf = bytearray(buf[:MAX_LOG_BYTES])
+                truncated = True
                 break
-        return _decode_log_bytes(bytes(buf)).splitlines()
+        return _decode_log_bytes(bytes(buf)).splitlines(), len(buf), truncated
 
 
 # ---- parsing & summary helpers --------------------------------------------
@@ -305,6 +328,47 @@ def _sample_for_indexer(
     if len(out) > MAX_INGEST_LINES:
         out = out[:MAX_INGEST_LINES] + ["[... sample truncated ...]"]
     return out
+
+
+def _sampled_line_count(sampled: list[str]) -> int:
+    return sum(1 for line in sampled if line.startswith("L"))
+
+
+def _log_coverage(
+    *,
+    total_bytes: int,
+    indexed_bytes: int,
+    loaded_lines: int,
+    sampled_lines: int,
+    read_truncated: bool,
+    sample_truncated: bool,
+) -> dict[str, Any]:
+    byte_partial = read_truncated or indexed_bytes < total_bytes
+    sample_partial = sampled_lines < loaded_lines or sample_truncated
+    partial_reasons: list[str] = []
+    if byte_partial:
+        partial_reasons.append("byte_cap")
+    if sample_partial:
+        partial_reasons.append("log_sample")
+    indexed_partial = bool(partial_reasons)
+    return {
+        "unit": "lines",
+        "source_mode": "log_sample",
+        "total_units": loaded_lines,
+        "indexed_units": sampled_lines,
+        "total_lines": loaded_lines,
+        "indexed_lines": sampled_lines,
+        "total_bytes": total_bytes,
+        "indexed_bytes": indexed_bytes,
+        "indexed_partial": indexed_partial,
+        "partial_reasons": partial_reasons,
+        "max_index_bytes": MAX_LOG_BYTES,
+        "max_sample_lines": MAX_INGEST_LINES,
+        "sampled": True,
+        "chunked": False,
+        "chunk_count": 1,
+        "text_truncated": byte_partial or sample_truncated,
+    }
 
 
 # ---- read_segment helpers --------------------------------------------------

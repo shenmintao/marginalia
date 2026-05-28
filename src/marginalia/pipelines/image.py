@@ -100,13 +100,18 @@ def downscale_for_vlm(
 IMAGE_PIPELINE_SYSTEM = """You are Marginalia's image indexer.
 
 Your job: look at one image and produce a structured index that lets a
-downstream agent decide whether to retrieve it.
+downstream agent decide whether to retrieve it. Describe only visible image
+content and visible text. Do not infer identity, location, source, date,
+intent, or surrounding context unless it is directly visible in the image or
+provided in context. If something is uncertain, say it is unclear rather than
+guessing.
 
 `summary` is one or two sentences (≤60 中文字 / ≤30 English words) in the
 user's likely language — the spine of what the image is. Keep it tight;
 detail belongs in `description`. `description` is a free-text walk-through of what the
-image shows — visible text, key objects, layout — multi-paragraph if
-useful. `extra` carries machine-friendly insights as `key: value` lines
+image shows — visible text, key objects, layout — multi-paragraph if useful.
+Do not include unverifiable backstory or hidden context. `extra` carries
+machine-friendly insights as `key: value` lines
 (one per line; keys like `primary_color`, `detected_text_lang`,
 `dominant_subject`, `quality`, `notable`); leave the block empty if
 there is nothing notable. `entry_extra` is the same shape but for
@@ -149,8 +154,9 @@ class ImagePipeline(Pipeline):
         b64 = base64.b64encode(scaled).decode("ascii")
 
         stable_prefix = (
-            "Index the image below. Hints are advisory; the image's actual "
-            "content takes precedence.\n\n"
+            "Index the image below. Hints are advisory; visible image content "
+            "takes precedence. Do not infer facts that are not visible or "
+            "provided in context.\n\n"
             + render_format_hint(kinds=("image",))
         )
         file_context = (

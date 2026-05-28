@@ -220,6 +220,22 @@ async def _check_log_gz_ingest() -> None:
     print("[2] .log.gz → archive(1 member, log peek with real lines)")
 
 
+async def _check_plain_log_ingest_coverage() -> None:
+    file_id, _entry = await _seed_file(
+        body=LOG_BODY.encode("utf-8"), mime="text/plain", name="access.log",
+    )
+    await _ingest(file_id)
+    factory = get_session_factory()
+    async with factory() as s:
+        f = await s.get(File, file_id)
+        assert f.kind == "log", f"expected kind=log, got {f.kind!r}"
+        coverage = (f.description or {}).get("coverage") or {}
+        assert coverage.get("source_mode") == "log_sample", coverage
+        assert coverage.get("total_lines") == len(LOG_LINES), coverage
+        assert coverage.get("indexed_partial") is False, coverage
+    print("[2b] plain .log ingest records log_sample coverage")
+
+
 async def _check_tar_gz_with_members() -> None:
     body = _build_tar_gz_with_md_and_log()
     file_id, _entry = await _seed_file(
@@ -282,6 +298,7 @@ async def _main() -> None:
     await _create_schema()
     _check_routing()
     await _check_log_gz_ingest()
+    await _check_plain_log_ingest_coverage()
     await _check_tar_gz_with_members()
     await _check_archive_read_segment_dispatch()
     print("ALL COMPRESSION E2E CHECKS PASSED")
