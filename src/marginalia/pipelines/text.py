@@ -14,6 +14,7 @@ ingests reuse the cache → most input tokens are charged once.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -39,6 +40,7 @@ from marginalia.pipelines.base import (
 from marginalia.pipelines._long_index import (
     build_retrieval_extra,
     fallback_section,
+    llm_ingest_concurrency,
     parse_index_response,
     render_sections_digest,
     renumber_sections,
@@ -240,44 +242,53 @@ class TextPipeline(Pipeline):
         client = get_chat_client("ingest")
         sections: list[dict[str, Any]] = []
         chunk_summaries: list[dict[str, Any]] = []
-        for chunk_no, (line_start, line_end, text) in enumerate(
+        chunks = list(enumerate(
             _iter_line_chunks(body, max_chars=TEXT_CHUNK_CHARS),
             start=1,
-        ):
-            payload = {
-                "folder_path": ctx.folder_path,
-                "sibling_names": ctx.sibling_names,
-                "catalog_sketch": ctx.catalog_sketch,
-                "tag_vocabulary": ctx.tag_vocabulary,
-                "line_start": line_start,
-                "line_end": line_end,
-                "chunk_no": chunk_no,
-                "indexed_bytes": indexed_bytes,
-                "total_bytes": total_bytes,
-            }
-            stable_prefix = (
-                "Index this line range from a larger text document. Use "
-                "line-range anchors.\n\n"
-                + render_format_hint() + "\n"
-                + render_sections_hint(
-                    anchor_unit="lines",
-                    anchor_example=f"lines {line_start}-{line_end}",
+        ))
+        sem = asyncio.Semaphore(llm_ingest_concurrency())
+
+        async def _index_chunk(
+            chunk_no: int,
+            line_start: int,
+            line_end: int,
+            text: str,
+        ) -> dict[str, Any]:
+            async with sem:
+                payload = {
+                    "folder_path": ctx.folder_path,
+                    "sibling_names": ctx.sibling_names,
+                    "catalog_sketch": ctx.catalog_sketch,
+                    "tag_vocabulary": ctx.tag_vocabulary,
+                    "line_start": line_start,
+                    "line_end": line_end,
+                    "chunk_no": chunk_no,
+                    "indexed_bytes": indexed_bytes,
+                    "total_bytes": total_bytes,
+                }
+                stable_prefix = (
+                    "Index this line range from a larger text document. Use "
+                    "line-range anchors.\n\n"
+                    + render_format_hint() + "\n"
+                    + render_sections_hint(
+                        anchor_unit="lines",
+                        anchor_example=f"lines {line_start}-{line_end}",
+                    )
                 )
-            )
-            file_content = (
-                f"<context>\n{json.dumps(payload, ensure_ascii=False)}\n</context>\n\n"
-                f"<document>\n{text}\n</document>"
-            )
-            resp = await client.complete(ChatRequest(
-                system=TEXT_CHUNK_SYSTEM,
-                messages=[ChatMessage(role="user", content=[
-                    TextBlock(text=stable_prefix),
-                    TextBlock(text=file_content),
-                ])],
-                max_tokens=min(8192, max(2048, len(text) // 8)),
-                temperature=0.2,
-                cache_breakpoints=[0],
-            ))
+                file_content = (
+                    f"<context>\n{json.dumps(payload, ensure_ascii=False)}\n</context>\n\n"
+                    f"<document>\n{text}\n</document>"
+                )
+                resp = await client.complete(ChatRequest(
+                    system=TEXT_CHUNK_SYSTEM,
+                    messages=[ChatMessage(role="user", content=[
+                        TextBlock(text=stable_prefix),
+                        TextBlock(text=file_content),
+                    ])],
+                    max_tokens=min(8192, max(2048, len(text) // 8)),
+                    temperature=0.2,
+                    cache_breakpoints=[0],
+                ))
             fields = parse_index_response(resp, anchor_unit="lines")
             summary = fields.summary or fields.description_text or f"Lines {line_start}-{line_end}"
             local_sections = fields.sections or [
@@ -288,13 +299,23 @@ class TextPipeline(Pipeline):
                     summary=summary,
                 )
             ]
-            sections.extend(local_sections)
-            chunk_summaries.append({
-                "line_start": line_start,
-                "line_end": line_end,
-                "summary": summary,
-                "description": fields.description_text or "",
-            })
+            return {
+                "sections": local_sections,
+                "summary": {
+                    "line_start": line_start,
+                    "line_end": line_end,
+                    "summary": summary,
+                    "description": fields.description_text or "",
+                },
+            }
+
+        chunk_results = await asyncio.gather(*(
+            _index_chunk(chunk_no, line_start, line_end, text)
+            for chunk_no, (line_start, line_end, text) in chunks
+        ))
+        for result in chunk_results:
+            sections.extend(result["sections"])
+            chunk_summaries.append(result["summary"])
 
         sections = renumber_sections(sections)
         coverage = self._coverage(

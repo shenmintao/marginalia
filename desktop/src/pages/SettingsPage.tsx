@@ -28,7 +28,13 @@ interface ServerCtx {
   err: string | null;
   setLlm: (next: LlmSettings) => void;
   setDefaultConflict: (v: OnConflict) => Promise<void>;
-  setAgentBudget: (field: "agent_plan_max_tokens" | "agent_execute_max_tokens", v: number) => Promise<void>;
+  setServerNumber: (
+    field:
+      | "agent_plan_max_tokens"
+      | "agent_execute_max_tokens"
+      | "llm_ingest_concurrency",
+    v: number,
+  ) => Promise<void>;
 }
 
 export function SettingsPage() {
@@ -84,8 +90,11 @@ function useServerCtx(): ServerCtx {
     }
   };
 
-  const setAgentBudget = async (
-    field: "agent_plan_max_tokens" | "agent_execute_max_tokens",
+  const setServerNumber = async (
+    field:
+      | "agent_plan_max_tokens"
+      | "agent_execute_max_tokens"
+      | "llm_ingest_concurrency",
     v: number,
   ) => {
     if (!server || server[field] === v) return;
@@ -98,7 +107,7 @@ function useServerCtx(): ServerCtx {
     }
   };
 
-  return { server, llm, err, setLlm, setDefaultConflict, setAgentBudget };
+  return { server, llm, err, setLlm, setDefaultConflict, setServerNumber };
 }
 
 // ---- Connection ------------------------------------------------------------
@@ -155,7 +164,7 @@ function ConnectionSection() {
 function PreferencesSection({ ctx }: { ctx: ServerCtx }) {
   const { mode, setMode } = useTheme();
   const prefs = usePrefs();
-  const { server, setDefaultConflict, setAgentBudget } = ctx;
+  const { server, setDefaultConflict, setServerNumber } = ctx;
 
   return (
     <Section title="Preferences" subtitle="Local appearance and defaults.">
@@ -203,18 +212,41 @@ function PreferencesSection({ ctx }: { ctx: ServerCtx }) {
           hint="Max tokens per agent step (plan / execute). Bump these for long-context models that emit large single responses."
         >
           <div className="flex items-center gap-1.5">
-            <TokenInput
+            <NumberInput
               value={server?.agent_plan_max_tokens}
               disabled={!server}
-              onCommit={(v) => setAgentBudget("agent_plan_max_tokens", v)}
+              min={1}
+              max={200000}
+              step={128}
+              className="w-20"
+              onCommit={(v) => setServerNumber("agent_plan_max_tokens", v)}
             />
             <span className="text-xs text-fg-subtle">/</span>
-            <TokenInput
+            <NumberInput
               value={server?.agent_execute_max_tokens}
               disabled={!server}
-              onCommit={(v) => setAgentBudget("agent_execute_max_tokens", v)}
+              min={1}
+              max={200000}
+              step={128}
+              className="w-20"
+              onCommit={(v) => setServerNumber("agent_execute_max_tokens", v)}
             />
           </div>
+        </Row>
+
+        <Row
+          label="Ingest LLM concurrency"
+          hint="Parallel LLM calls for long text/PDF chunks and scanned-PDF OCR pages. Lower it if your provider rate-limits."
+        >
+          <NumberInput
+            value={server?.llm_ingest_concurrency}
+            disabled={!server}
+            min={1}
+            max={32}
+            step={1}
+            className="w-16"
+            onCommit={(v) => setServerNumber("llm_ingest_concurrency", v)}
+          />
         </Row>
 
         <Row
@@ -286,6 +318,7 @@ function ServerSection({ ctx }: { ctx: ServerCtx }) {
             k="Agent token budget (plan/exec)"
             v={`${server.agent_plan_max_tokens.toLocaleString()} / ${server.agent_execute_max_tokens.toLocaleString()}`}
           />
+          <Kv k="Ingest LLM concurrency" v={String(server.llm_ingest_concurrency)} />
           <Kv
             k="Vision profile"
             v={visionConfigured(llm) ? "configured" : "not set (image OCR skipped)"}
@@ -356,13 +389,21 @@ function Kv({ k, v, mono }: { k: string; v: string; mono?: boolean }) {
 // only sees the final value (PUT per keystroke would spam the overlay
 // with intermediate junk like 1, 12, 124, ...). Out-of-range values
 // roll back to the last accepted server value.
-function TokenInput({
+function NumberInput({
   value,
   disabled,
+  min,
+  max,
+  step,
+  className,
   onCommit,
 }: {
   value: number | undefined;
   disabled?: boolean;
+  min: number;
+  max: number;
+  step: number;
+  className?: string;
   onCommit: (v: number) => void;
 }) {
   const [draft, setDraft] = useState<string>(value != null ? String(value) : "");
@@ -372,7 +413,7 @@ function TokenInput({
 
   const commit = () => {
     const n = parseInt(draft, 10);
-    if (!Number.isFinite(n) || n < 1 || n > 200000 || n === value) {
+    if (!Number.isFinite(n) || n < min || n > max || n === value) {
       setDraft(value != null ? String(value) : "");
       return;
     }
@@ -382,9 +423,9 @@ function TokenInput({
   return (
     <input
       type="number"
-      min={1}
-      max={200000}
-      step={128}
+      min={min}
+      max={max}
+      step={step}
       value={draft}
       disabled={disabled}
       onChange={(e) => setDraft(e.target.value)}
@@ -392,7 +433,10 @@ function TokenInput({
       onKeyDown={(e) => {
         if (e.key === "Enter") (e.target as HTMLInputElement).blur();
       }}
-      className="w-20 rounded border border-border bg-bg-base px-2 py-1 text-right font-mono text-xs disabled:opacity-50"
+      className={cn(
+        "rounded border border-border bg-bg-base px-2 py-1 text-right font-mono text-xs disabled:opacity-50",
+        className,
+      )}
     />
   );
 }

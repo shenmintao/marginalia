@@ -23,6 +23,14 @@ from marginalia.llm.tagged_response import (
 from marginalia.pipelines.base import TagSuggestion
 
 
+def llm_ingest_concurrency() -> int:
+    """Runtime-configured fan-out for independent ingest LLM calls."""
+    from marginalia.config import get_settings
+
+    value = int(get_settings().llm_ingest_concurrency or 1)
+    return max(1, min(32, value))
+
+
 @dataclass(slots=True)
 class IndexFields:
     summary: str

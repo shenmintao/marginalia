@@ -111,6 +111,11 @@ class Settings(BaseSettings):
     agent_final_answer_continue_turns: int = 3
     agent_final_answer_max_chars: int = 120_000
 
+    # Bounded fan-out for ingest-time LLM work: long text/PDF chunk
+    # indexing and scanned-PDF OCR page calls. Keep this conservative;
+    # provider rate limits and local network bandwidth are the real cap.
+    llm_ingest_concurrency: int = 10
+
     @property
     def database_url(self) -> str:
         if self.db_backend == "sqlite":

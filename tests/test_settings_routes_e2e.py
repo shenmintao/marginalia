@@ -116,6 +116,7 @@ async def test_server_snapshot_no_secrets() -> None:
             assert body["worker_enabled"] is False
             assert body["auto_lifecycle_enabled"] is False
             assert body["default_on_conflict"] in ("rename", "error", "skip")
+            assert body["llm_ingest_concurrency"] >= 1
             # Sanity: no secret keys / DSN-shaped fields snuck in.
             for k, v in body.items():
                 if isinstance(v, str):
@@ -166,6 +167,7 @@ async def test_put_writes_overlay_and_invalidates_cache() -> None:
                         "llm_chat_base_url": "https://example.test/v1",
                         "agent_final_answer_continue_turns": 5,
                         "agent_final_answer_max_chars": 180000,
+                        "llm_ingest_concurrency": 6,
                     },
                 },
             )
@@ -175,6 +177,7 @@ async def test_put_writes_overlay_and_invalidates_cache() -> None:
             assert body["profiles"]["chat"]["base_url"] == "https://example.test/v1"
             assert body["overlay"]["agent_final_answer_continue_turns"] == 5
             assert body["overlay"]["agent_final_answer_max_chars"] == 180000
+            assert body["overlay"]["llm_ingest_concurrency"] == 6
             # Other profiles still resolve from default.
             assert body["profiles"]["ingest"]["model"] == "settings-default-model"
 
@@ -192,6 +195,7 @@ async def test_put_writes_overlay_and_invalidates_cache() -> None:
             assert s.llm_chat_model == "gpt-4o-2026"
             assert s.agent_final_answer_continue_turns == 5
             assert s.agent_final_answer_max_chars == 180000
+            assert s.llm_ingest_concurrency == 6
             print("[3] PUT /v1/settings/llm: overlay written, cache invalidated")
 
 

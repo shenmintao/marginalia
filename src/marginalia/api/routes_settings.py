@@ -68,6 +68,7 @@ def server_settings() -> dict[str, Any]:
         "agent_execute_max_tokens": s.agent_execute_max_tokens,
         "agent_final_answer_continue_turns": s.agent_final_answer_continue_turns,
         "agent_final_answer_max_chars": s.agent_final_answer_max_chars,
+        "llm_ingest_concurrency": s.llm_ingest_concurrency,
         "vision_profile_configured": has_vision_profile(s),
     }
 

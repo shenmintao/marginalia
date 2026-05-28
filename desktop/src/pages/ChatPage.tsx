@@ -119,6 +119,9 @@ export function ChatPage() {
         onEvent: (ev) => {
           if (useChatSession.getState().sessionId !== sid || streamGeneration !== gen) return;
           applyEvent(setTurns, turnIdx, ev);
+          if (ev.type === "plan" && extractSessionNameFromPlan(ev.data)) {
+            setRefreshSignal((n) => n + 1);
+          }
         },
       });
     } catch (e) {
@@ -428,6 +431,19 @@ function extractId(data: unknown, key: string): string | undefined {
     return typeof v === "string" ? v : undefined;
   }
   return undefined;
+}
+
+function extractSessionNameFromPlan(data: unknown): string | null {
+  const text = typeof data === "string" ? data : "";
+  for (const line of text.split("\n").reverse()) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const prefix = "Session name:";
+    if (!trimmed.toLowerCase().startsWith(prefix.toLowerCase())) return null;
+    const name = trimmed.slice(prefix.length).trim().replace(/^["'`]+|["'`]+$/g, "");
+    return name || null;
+  }
+  return null;
 }
 
 function appendStep(

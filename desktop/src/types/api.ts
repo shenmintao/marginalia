@@ -292,6 +292,9 @@ export interface ServerSettings {
   default_on_conflict: string;
   agent_plan_max_tokens: number;
   agent_execute_max_tokens: number;
+  agent_final_answer_continue_turns: number;
+  agent_final_answer_max_chars: number;
+  llm_ingest_concurrency: number;
   vision_profile_configured: boolean;
 }
 

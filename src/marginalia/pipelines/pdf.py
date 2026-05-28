@@ -47,6 +47,7 @@ from marginalia.pipelines.base import (
 from marginalia.pipelines._long_index import (
     build_retrieval_extra,
     fallback_section,
+    llm_ingest_concurrency,
     parse_index_response,
     render_sections_digest,
     renumber_sections,
@@ -410,47 +411,55 @@ class PdfPipeline(Pipeline):
         chunk_summaries: list[dict[str, Any]] = []
         truncated_chunks = 0
 
-        for chunk_no, (start, end, rendered, text_truncated) in enumerate(
+        chunks = list(enumerate(
             self._iter_prompt_chunks(text_per_page, described),
             start=1,
-        ):
-            if text_truncated:
-                truncated_chunks += 1
-            user_payload = {
-                "folder_path": ctx.folder_path,
-                "sibling_names": ctx.sibling_names,
-                "catalog_sketch": ctx.catalog_sketch,
-                "tag_vocabulary": ctx.tag_vocabulary,
-                "page_count": total_pages,
-                "page_start": start,
-                "page_end": end,
-                "chunk_no": chunk_no,
-                "ocr_used": ocr_used,
-                "ocr_document_type": ocr_document_type if ocr_used else None,
-            }
-            stable_prefix = (
-                "Index this page range from a larger PDF. Use original page "
-                "numbers from the page markers.\n\n"
-                + render_format_hint() + "\n"
-                + render_sections_hint(
-                    anchor_unit="pages",
-                    anchor_example=f"pages {start}-{end}",
+        ))
+        sem = asyncio.Semaphore(llm_ingest_concurrency())
+
+        async def _index_chunk(
+            chunk_no: int,
+            start: int,
+            end: int,
+            rendered: str,
+            text_truncated: bool,
+        ) -> dict[str, Any]:
+            async with sem:
+                user_payload = {
+                    "folder_path": ctx.folder_path,
+                    "sibling_names": ctx.sibling_names,
+                    "catalog_sketch": ctx.catalog_sketch,
+                    "tag_vocabulary": ctx.tag_vocabulary,
+                    "page_count": total_pages,
+                    "page_start": start,
+                    "page_end": end,
+                    "chunk_no": chunk_no,
+                    "ocr_used": ocr_used,
+                    "ocr_document_type": ocr_document_type if ocr_used else None,
+                }
+                stable_prefix = (
+                    "Index this page range from a larger PDF. Use original page "
+                    "numbers from the page markers.\n\n"
+                    + render_format_hint() + "\n"
+                    + render_sections_hint(
+                        anchor_unit="pages",
+                        anchor_example=f"pages {start}-{end}",
+                    )
                 )
-            )
-            file_content = (
-                f"<context>\n{json.dumps(user_payload, ensure_ascii=False)}\n</context>\n\n"
-                f"<document>\n{rendered}\n</document>"
-            )
-            resp = await client.complete(ChatRequest(
-                system=PDF_CHUNK_SYSTEM,
-                messages=[ChatMessage(role="user", content=[
-                    TextBlock(text=stable_prefix),
-                    TextBlock(text=file_content),
-                ])],
-                max_tokens=min(8192, max(2048, len(rendered) // 8)),
-                temperature=0.2,
-                cache_breakpoints=[0],
-            ))
+                file_content = (
+                    f"<context>\n{json.dumps(user_payload, ensure_ascii=False)}\n</context>\n\n"
+                    f"<document>\n{rendered}\n</document>"
+                )
+                resp = await client.complete(ChatRequest(
+                    system=PDF_CHUNK_SYSTEM,
+                    messages=[ChatMessage(role="user", content=[
+                        TextBlock(text=stable_prefix),
+                        TextBlock(text=file_content),
+                    ])],
+                    max_tokens=min(8192, max(2048, len(rendered) // 8)),
+                    temperature=0.2,
+                    cache_breakpoints=[0],
+                ))
             fields = parse_index_response(resp, anchor_unit="pages")
             summary = fields.summary or fields.description_text or f"Pages {start}-{end}"
             sections = fields.sections or [
@@ -461,13 +470,26 @@ class PdfPipeline(Pipeline):
                     summary=summary,
                 )
             ]
-            all_sections.extend(sections)
-            chunk_summaries.append({
-                "page_start": start,
-                "page_end": end,
-                "summary": summary,
-                "description": fields.description_text or "",
-            })
+            return {
+                "sections": sections,
+                "text_truncated": text_truncated,
+                "summary": {
+                    "page_start": start,
+                    "page_end": end,
+                    "summary": summary,
+                    "description": fields.description_text or "",
+                },
+            }
+
+        chunk_results = await asyncio.gather(*(
+            _index_chunk(chunk_no, start, end, rendered, text_truncated)
+            for chunk_no, (start, end, rendered, text_truncated) in chunks
+        ))
+        for result in chunk_results:
+            if result["text_truncated"]:
+                truncated_chunks += 1
+            all_sections.extend(result["sections"])
+            chunk_summaries.append(result["summary"])
 
         sections = renumber_sections(all_sections)
         coverage = self._coverage(
@@ -1441,34 +1463,40 @@ async def _ocr_pdf_pages(pdf_bytes: bytes, total_pages: int) -> list[str]:
         _render_pdf_pages_to_jpeg, pdf_bytes, pages_to_ocr,
     )
     client = get_chat_client("vision")
-    out: list[str] = []
-    for i, jpeg_bytes in enumerate(page_jpegs):
-        # OCR is more sensitive to fine glyph detail than image caption,
-        # so use a higher long-edge cap than the caption path. 200-DPI A4
-        # renders to ~2200px and only loses ~7% at 2048; 8pt footnotes
-        # in dense layouts stay readable.
-        scaled, media_type = downscale_for_vlm(
-            jpeg_bytes, max_long_edge=OCR_VLM_MAX_LONG_EDGE,
-        )
-        b64 = base64.b64encode(scaled).decode("ascii")
+    out: list[str] = [""] * len(page_jpegs)
+    sem = asyncio.Semaphore(llm_ingest_concurrency())
+
+    async def _ocr_one(i: int, jpeg_bytes: bytes) -> None:
         try:
-            resp = await client.complete(ChatRequest(
-                system=PDF_OCR_PROMPT,
-                messages=[ChatMessage(role="user", content=[
-                    TextBlock(text=f"Page {i + 1} of {pages_to_ocr}."),
-                    ImageBlock(media_type=media_type, data_b64=b64),
-                ])],
-                max_tokens=4096,
-                temperature=0.0,
-            ))
+            async with sem:
+                # OCR is more sensitive to fine glyph detail than image
+                # caption, so use a higher long-edge cap than the caption
+                # path. 200-DPI A4 renders to ~2200px and only loses ~7%
+                # at 2048; 8pt footnotes in dense layouts stay readable.
+                scaled, media_type = downscale_for_vlm(
+                    jpeg_bytes, max_long_edge=OCR_VLM_MAX_LONG_EDGE,
+                )
+                b64 = base64.b64encode(scaled).decode("ascii")
+                resp = await client.complete(ChatRequest(
+                    system=PDF_OCR_PROMPT,
+                    messages=[ChatMessage(role="user", content=[
+                        TextBlock(text=f"Page {i + 1} of {pages_to_ocr}."),
+                        ImageBlock(media_type=media_type, data_b64=b64),
+                    ])],
+                    max_tokens=4096,
+                    temperature=0.0,
+                ))
         except Exception as exc:  # noqa: BLE001
             log.warning("OCR call failed for page %d: %s", i + 1, exc)
-            out.append("")
-            continue
+            return
         text = (resp.text or "").strip()
         if text.lower() in ("no text content", "no text content."):
             text = ""
-        out.append(text)
+        out[i] = text
+
+    await asyncio.gather(*(
+        _ocr_one(i, jpeg_bytes) for i, jpeg_bytes in enumerate(page_jpegs)
+    ))
     # Pad with empties for pages we skipped past the cap, so caller's
     # page indexing stays aligned with total_pages.
     while len(out) < total_pages:
