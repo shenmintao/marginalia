@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
@@ -49,3 +50,13 @@ async def test_worker_batch_size_limits_inflight_tasks() -> None:
     assert max_active <= 2
     assert claim_limits
     assert all(1 <= limit <= 2 for limit in claim_limits)
+
+
+def test_dynamic_runner_reads_current_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = SimpleNamespace(worker_batch_size=4, worker_poll_interval_seconds=0.005)
+    monkeypatch.setattr("marginalia.tasks.runner.get_settings", lambda: settings)
+
+    runner = TaskRunner()
+    settings.worker_batch_size = 10
+
+    assert runner._current_settings().worker_batch_size == 10  # type: ignore[attr-defined]

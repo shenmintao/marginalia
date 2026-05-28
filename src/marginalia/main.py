@@ -45,7 +45,9 @@ async def lifespan(app: FastAPI):
     await _check_storage_consistency(settings)
     runner: TaskRunner | None = None
     if settings.worker_enabled:
-        runner = TaskRunner(settings)
+        # Keep the in-process runner on live settings so GUI changes to
+        # WORKER_BATCH_SIZE affect new task claims without a restart.
+        runner = TaskRunner()
         await runner.start()
         log.info("task runner started in-process")
     try:
