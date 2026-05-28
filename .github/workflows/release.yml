@@ -173,7 +173,8 @@ jobs:
           images: ghcr.io/${{ github.repository_owner }}/marginalia
           tags: |
             type=ref,event=tag
-            type=raw,value=latest,enable=${{ github.event_name == 'push' }}
+            type=raw,value=${{ github.event.inputs.tag }},enable=${{ github.event_name == 'workflow_dispatch' }}
+            type=raw,value=latest,enable=${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
 
       # Override the in-Dockerfile mainland-China mirrors with upstream
       # Debian / PyPI for public release builds. The Dockerfile keeps the
