@@ -117,6 +117,12 @@ def _check_regex():
             f"[^l]: entry_id={eid}, page=3 (table 2) - r",
             ("l", eid, None, "3", "r"),
         ),
+        # page=N/A is tolerated and treated as no page. The prompt forbids
+        # this, but older/live turns may contain it.
+        (
+            f'[^n]: entry_id={eid}, quote="abc", page=N/A - r',
+            ("n", eid, "abc", None, "r"),
+        ),
         # full-width comma as field separator (LLM occasionally writes 中文 comma).
         (
             f"[^m]: entry_id={eid}，page=7 - r",
@@ -196,6 +202,15 @@ async def _check_rewrite():
         )
         expected_q = urllib.parse.quote_plus('he said "yes"')
         assert f"entry:{eid}?q={expected_q}" in out, out
+
+        # 4. text + quote + page=N/A: tolerate placeholder page and still use
+        # the quote locator.
+        out = await rt._rewrite_footnotes_for_display(
+            f'body[^a]\n\n[^a]: entry_id={eid}, quote="abc", page=N/A - r',
+        )
+        assert f"[my-doc.md](entry:{eid}?q=abc)" in out, out
+        assert "entry_id=" not in out, out
+        assert "page=N/A" not in out, out
 
         # 4. legacy lines= → no query string (link opens file without jump)
         set_file(mime_type="text/markdown", original_ext="md", kind="text")

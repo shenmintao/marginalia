@@ -124,6 +124,10 @@ def test_ocr_pdf_without_question_reads_stored_text():
     assert "Leader election" in result.text
     assert result.extras.get("ocr_indexed") is True
     assert result.extras.get("ocr_document_type") == "book"
+    assert result.extras.get("ocr_pages_total") == 3
+    assert result.extras.get("ocr_pages_processed") == 1
+    assert result.extras.get("ocr_stored_pages") == 1
+    assert result.extras.get("total_pages") == 3
 
 
 def test_text_pdf_ignores_ocr_branch():

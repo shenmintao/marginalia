@@ -7,7 +7,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Sequence
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from marginalia.db.models import Conversation, Journal
@@ -20,7 +20,7 @@ async def search(
     kinds: Sequence[str],
     conversation_id: str | None,
     include_superseded: bool,
-    text: str | None,
+    text: str | Sequence[str] | None,
     order: str,
     limit: int,
     offset: int = 0,
@@ -36,8 +36,11 @@ async def search(
         stmt = stmt.where(Journal.conversation_id == conversation_id)
     if not include_superseded:
         stmt = stmt.where(Journal.superseded_by_id.is_(None))
-    if text:
-        stmt = stmt.where(Journal.note.ilike(f"%{text}%"))
+    text_terms = _text_terms(text)
+    if text_terms:
+        stmt = stmt.where(or_(
+            *(Journal.note.ilike(f"%{term}%") for term in text_terms)
+        ))
     if order == "oldest_first":
         stmt = stmt.order_by(Journal.created_at.asc())
     else:
@@ -46,6 +49,15 @@ async def search(
         stmt = stmt.offset(offset)
     rows = (await db.execute(stmt.limit(limit))).scalars().all()
     return list(rows)
+
+
+def _text_terms(text: str | Sequence[str] | None) -> list[str]:
+    if text is None:
+        return []
+    if isinstance(text, str):
+        item = text.strip()
+        return [item] if item else []
+    return [str(item).strip() for item in text if str(item).strip()]
 
 
 async def recent_journal_for_snapshot(

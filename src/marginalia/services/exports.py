@@ -34,7 +34,7 @@ _FOOTNOTE_RE = re.compile(
     r"([0-9a-fA-F][0-9a-fA-F\-]{6,35})`?"
     r"(?:\s*,\s*(?:"
     r'quote\s*=\s*"((?:[^"\\]|\\.)*)"'                  # group 3: quote
-    r"|page\s*=\s*`?([0-9]+(?:-[0-9]+)?)`?"             # group 4: page
+    r"|page\s*=\s*`?(?:([0-9]+(?:-[0-9]+)?)|(?:N/?A|n/?a|NA|na|none|null|unknown))`?"
     r"|section_id\s*=\s*`?([^\s,`\-]+)`?"               # group 5: legacy section_id
     r"|lines?\s*=\s*`?\S+`?"                             # legacy lines: tolerated (no capture)
     r"))*"

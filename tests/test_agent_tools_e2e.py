@@ -11,7 +11,7 @@ Tools covered:
   2. read_catalog (full detail + children + entries)
   3. resolve_tag (direct + alias_of + tag_aliases fallback + facet filter)
   4. materialize_view (catalog_subtree + tags_all + lifecycle)
-  5. search_metadata (text + tags_all + catalog_subtree + lifecycle + view_id)
+  5. search_metadata (text OR array + tags_all + catalog_subtree + lifecycle + view_id)
   6. read_entries_metadata (full hydration + related_entries)
   7. read_files (section_id / heading / line_start-line_end / offset+max_chars / pattern)
 """
@@ -228,6 +228,10 @@ async def main():
           [(c["name"], c["doc_count"]) for c in roots["catalogs"]])
     names = {c["name"] for c in roots["catalogs"]}
     assert names == {"Research"}, names
+    roots_omitted = await _call("list_catalogs", {})
+    assert {c["name"] for c in roots_omitted["catalogs"]} == {"Research"}
+    roots_string_null = await _call("list_catalogs", {"parent_id": "null"})
+    assert {c["name"] for c in roots_string_null["catalogs"]} == {"Research"}
     children = await _call("list_catalogs", {"parent_id": seeded["c_research"]})
     child_names = {c["name"] for c in children["catalogs"]}
     print("[1] children of Research:", child_names)
@@ -286,6 +290,20 @@ async def main():
     sm_coverage = {e["display_name"]: e.get("coverage") for e in sm["entries"]}
     assert sm_coverage["paper-a.md"]["indexed_partial"] is True, sm_coverage
     assert "text_page_cap" in sm_coverage["paper-b.md"]["partial_reasons"], sm_coverage
+
+    sm_or = await _call("search_metadata", {
+        "text": ["paper-a", "paper-b"],
+        "limit": 50,
+    })
+    sm_or_names = {e["display_name"] for e in sm_or["entries"]}
+    assert sm_or_names == {"paper-a.md", "paper-b.md"}, sm_or_names
+
+    sm_split = await _call("search_metadata", {
+        "text": "paper-a paper-b",
+        "limit": 50,
+    })
+    sm_split_names = {e["display_name"] for e in sm_split["entries"]}
+    assert sm_split_names == {"paper-a.md", "paper-b.md"}, sm_split_names
 
     # search_metadata with mutually-exclusive args → error
     bad = await _call("search_metadata", {

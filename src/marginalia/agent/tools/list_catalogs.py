@@ -50,7 +50,7 @@ async def list_catalogs(
     ctx: ToolContext,
     args: Mapping[str, Any],
 ) -> dict[str, Any]:
-    parent_id = args.get("parent_id")
+    parent_id = _coerce_parent_id(args.get("parent_id"))
     limit = min(int(args.get("limit") or 100), 500)
     offset = max(0, int(args.get("offset") or 0))
 
@@ -80,3 +80,12 @@ async def list_catalogs(
     if has_more:
         out["next_offset"] = offset + len(cats)
     return out
+
+
+def _coerce_parent_id(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or text.lower() in {"null", "none", "root"}:
+        return None
+    return text

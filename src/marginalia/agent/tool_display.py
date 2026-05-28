@@ -23,6 +23,8 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
+from marginalia.agent.text_query import normalize_text_queries
+
 NameResolver = Callable[[str], str | None]
 
 
@@ -48,6 +50,14 @@ def _looks_like_id(s: Any) -> bool:
     return all(c in "0123456789abcdef" for c in cleaned)
 
 
+def _is_rootish(value: Any) -> bool:
+    if value is None:
+        return True
+    if not isinstance(value, str):
+        return False
+    return value.strip().lower() in {"", "null", "none", "root"}
+
+
 def _name(eid: str | None, resolver: NameResolver | None) -> str:
     if not eid:
         return ""
@@ -70,6 +80,10 @@ def _tag_label(t: Any, resolver: NameResolver | None) -> str:
             return n
         return s[:8]
     return s
+
+
+def _query_labels(value: Any) -> list[str]:
+    return normalize_text_queries(value)
 
 
 def _entry_ids_from_args(args: Mapping[str, Any]) -> list[str]:
@@ -249,8 +263,7 @@ def format_tool_call(
         return " ".join(parts)
 
     if name == "search_metadata":
-        text = args.get("text")
-        if text:
+        for text in _query_labels(args.get("text")):
             parts.append(f'"{text}"')
         for key, prefix in (("tags_all", "tags"), ("tags_any", "any-tags"), ("tags_none", "no-tags")):
             v = args.get(key)
@@ -265,8 +278,8 @@ def format_tool_call(
 
     if name == "search_journal":
         q = args.get("text") or args.get("query") or args.get("q")
-        if q:
-            parts.append(f'"{q}"')
+        for text in _query_labels(q):
+            parts.append(f'"{text}"')
         kinds = args.get("kinds") or []
         if kinds and kinds != ["insight"]:
             parts.append(f"kinds={kinds}")
@@ -288,6 +301,8 @@ def format_tool_call(
 
     if name == "list_catalogs":
         v = args.get("parent_id")
+        if _is_rootish(v):
+            return " ".join(parts)
         if v:
             label = _name(str(v), catalog_resolver) if _looks_like_id(v) else str(v)
             parts.append(label)

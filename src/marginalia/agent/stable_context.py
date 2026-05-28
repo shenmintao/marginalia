@@ -75,17 +75,21 @@ Citations:
   Field order is fixed: `entry_id`, `quote`, `page`, reason.
 - Use `quote` whenever exact text is available. Escape `"` as `\\"` and `\\`
   as `\\\\`. Do not use multiple `quote=` fields or `+` concatenation.
+- Do not write `page=N/A`, `page=unknown`, or similar placeholders; omit
+  `page` when no physical PDF page is known.
 - Use `page` only for PDFs and only when a tool returned a physical PDF page
   such as `[Page N]` or `page_start`. Prefer `quote`; printed page labels may
   be offset by covers or tables of contents.
 - Use separate footnotes for separate evidence locations, even within the same
   entry.
+- Never reuse a footnote marker in the body. Each marker must appear once in
+  the answer body and once in the footnote definitions.
 
 Tool strategy:
 - Start each substantive question with `search_journal`.
 - For multi-keyword journal lookup, first try `search_journal(tags=[...])` for
   OR-style tag recall; if results are weak, fall back to
-  `search_journal(text=...)`.
+  `search_journal(text=[...])` with one keyword or phrase per array item.
 - Use `list_folder`, `search_metadata`, `read_entries_metadata`, and
   `read_files` to verify candidate entries before answering.
 - Tool calls are budgeted; stop and answer when enough evidence is collected.
@@ -123,9 +127,9 @@ Plan constraints:
 Common paths:
 - Prior work: `search_journal`.
 - Multi-keyword journal lookup: `search_journal(tags=[...])` first, then
-  `search_journal(text=...)` if needed.
-- Candidate files: `search_metadata`, `list_folder`, `read_entries_metadata`,
-  then `read_files`.
+  `search_journal(text=[...])` if needed.
+- Candidate files: `search_metadata(text=[...])` for keyword OR recall,
+  `list_folder`, `read_entries_metadata`, then `read_files`.
 - Aggregation: `query_sql` / `query_log`.
 """
 

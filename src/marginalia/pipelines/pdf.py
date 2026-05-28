@@ -814,6 +814,7 @@ class PdfPipeline(Pipeline):
             ), extras={"kind": "pdf", "ocr_indexed": True})
 
         total_indexed_pages = len(pages)
+        total_pages = _ocr_total_pages(meta, fallback=total_indexed_pages)
         labels = [str(i) for i in range(1, total_indexed_pages + 1)]
         offset = _int_arg(args.get("offset"), default=0, minimum=0)
         max_chars = _int_arg(
@@ -842,7 +843,7 @@ class PdfPipeline(Pipeline):
                     max_matches=int(args.get("max_matches") or 20),
                     match_offset=max(0, int(args.get("match_offset") or 0)),
                     page_offset=resolved.page_start - 1,
-                    total_pages_full=total_indexed_pages,
+                    total_pages_full=total_pages,
                     page_labels=labels[resolved.page_start - 1: resolved.page_end],
                 )
                 _add_ocr_window_extras(result.extras, resolved, meta)
@@ -853,7 +854,7 @@ class PdfPipeline(Pipeline):
                 context_lines=int(args.get("context_lines") or 2),
                 max_matches=int(args.get("max_matches") or 20),
                 match_offset=max(0, int(args.get("match_offset") or 0)),
-                total_pages_full=total_indexed_pages,
+                total_pages_full=total_pages,
                 page_labels=labels,
             )
             _add_ocr_extras(result.extras, meta)
@@ -1430,16 +1431,29 @@ def _add_ocr_extras(extras: dict[str, Any], meta: dict[str, Any]) -> None:
     extras.update(_ocr_base_extras(meta))
 
 
+def _positive_int(value: Any) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _ocr_total_pages(meta: dict[str, Any], *, fallback: int) -> int:
+    return _positive_int(meta.get("pages_total")) or fallback
+
+
 def _add_ocr_window_extras(
     extras: dict[str, Any],
     window: _PdfPageWindow,
     meta: dict[str, Any],
 ) -> None:
     _add_ocr_extras(extras, meta)
+    fallback_total = _positive_int(meta.get("stored_pages")) or window.page_end
     extras.update({
         "page_start": window.page_start,
         "page_end": window.page_end,
-        "total_pages": meta.get("stored_pages") or window.page_end,
+        "total_pages": _ocr_total_pages(meta, fallback=fallback_total),
     })
     if window.page_label is not None:
         extras["page_label"] = window.page_label

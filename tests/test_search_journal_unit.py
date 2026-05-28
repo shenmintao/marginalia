@@ -54,6 +54,72 @@ async def test_search_journal_tags_are_or(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 @pytest.mark.asyncio
+async def test_search_journal_text_string_splits_to_or(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mod = import_module("marginalia.agent.tools.search_journal")
+    rows = [
+        _row("道路交通事故责任", []),
+        _row("司法解释适用", []),
+        _row("unrelated", []),
+    ]
+
+    async def fake_search(*args: Any, **kwargs: Any) -> list[Any]:
+        terms = kwargs["text"]
+        assert terms == ["道路交通", "法规", "赔偿", "司法解释"]
+        return [
+            row for row in rows
+            if any(term in row.note for term in terms)
+        ]
+
+    monkeypatch.setattr(mod.journal_repo, "search", fake_search)
+
+    result = await mod.search_journal(
+        None,
+        ToolContext(session_id="s1", conversation_id="c1"),
+        {"text": "道路交通 法规 赔偿 司法解释", "limit": 10},
+    )
+
+    assert [note["note"] for note in result["notes"]] == [
+        "道路交通事故责任",
+        "司法解释适用",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_search_journal_text_array_is_or(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mod = import_module("marginalia.agent.tools.search_journal")
+    rows = [
+        _row("alpha only", []),
+        _row("beta only", []),
+        _row("gamma only", []),
+    ]
+
+    async def fake_search(*args: Any, **kwargs: Any) -> list[Any]:
+        terms = kwargs["text"]
+        assert terms == ["alpha", "beta"]
+        return [
+            row for row in rows
+            if any(term in row.note for term in terms)
+        ]
+
+    monkeypatch.setattr(mod.journal_repo, "search", fake_search)
+
+    result = await mod.search_journal(
+        None,
+        ToolContext(session_id="s1", conversation_id="c1"),
+        {"text": ["alpha", "beta"], "limit": 10},
+    )
+
+    assert [note["note"] for note in result["notes"]] == [
+        "alpha only",
+        "beta only",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_search_journal_entry_id_uses_prefix_resolution(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

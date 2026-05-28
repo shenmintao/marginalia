@@ -175,9 +175,11 @@ async def main():
         "quote=\"first quote\" - quoted doc\n"
         "[^d]: entry_id=019e5493-fca4-7524-b8d0-3c36885b1244, "
         "page=54 - page doc\n"
+        "[^e]: entry_id=019e5493-fca4-7524-b8d0-3c36885b1245, "
+        "quote=\"no page quote\", page=N/A - no page placeholder\n"
     )
     cites = parse_citations(sample)
-    assert len(cites) == 4
+    assert len(cites) == 5
     assert cites[0].marker == "a"
     assert cites[0].section_id == "s2"
     assert cites[0].reason and "election" in cites[0].reason
@@ -187,6 +189,9 @@ async def main():
     assert cites[2].reason == "quoted doc"
     assert cites[3].page == "54"
     assert cites[3].reason == "page doc"
+    assert cites[4].quote == "no page quote"
+    assert cites[4].page is None
+    assert cites[4].reason == "no page placeholder"
     non_contract = (
         "[^x]: entry_id=019e5493-fca4-7524-b8d0-3c36885b1245，page=7 - bad\n"
         "[^y]: entry_id=019e5493-fca4-7524-b8d0-3c36885b1246, "

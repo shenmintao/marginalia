@@ -1,11 +1,11 @@
 """search_metadata — DESIGN.md §10.1.
 
-Filters entries by combinations of text (ILIKE on display name, summary, and
-extras), tags, catalog scope, folder scope, view, kind, lifecycle. Catalog
-filters (`catalog_id` / `catalog_subtree`) are mutually exclusive; folder
-filters (`folder_id` / `folder_subtree`) are mutually exclusive. Catalog and
-folder filters can be combined (AND). Returns minimal entry rows + pagination
-metadata (`total`, `has_more`, `next_offset`).
+Filters entries by text terms (OR across display name, summary, and extras),
+tags, catalog scope, folder scope, view, kind, and lifecycle. Catalog filters
+(`catalog_id` / `catalog_subtree`) are mutually exclusive; folder filters
+(`folder_id` / `folder_subtree`) are mutually exclusive. Catalog and folder
+filters can be combined (AND). Returns minimal entry rows + pagination metadata
+(`total`, `has_more`, `next_offset`).
 """
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from typing import Any, Mapping
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from marginalia.agent.text_query import normalize_text_queries
 from marginalia.agent.tools import ToolContext, tool
 from marginalia.db.models import View
 from marginalia.repositories import catalogs as catalogs_repo
@@ -26,10 +27,15 @@ SCHEMA: dict[str, Any] = {
     "required": [],
     "properties": {
         "text": {
-            "type": "string",
+            "anyOf": [
+                {"type": "string"},
+                {"type": "array", "items": {"type": "string"}},
+            ],
             "description": (
-                "Free text matched against display_name, files.summary, "
-                "files.extra, and entry.extra (ILIKE)."
+                "One query string or an array of query terms/phrases. Array "
+                "items are ORed against display_name, files.summary, "
+                "files.extra, and entry.extra. For multi-keyword recall, "
+                "prefer an array instead of one space-joined string."
             ),
         },
         "tags_all": {"type": "array", "items": {"type": "string"}},
@@ -77,8 +83,11 @@ SCHEMA: dict[str, Any] = {
     name="search_metadata",
     description=(
         "Narrow down candidate entries via filters. Tag ids must be already "
-        "resolved (use resolve_tag). Catalog filters: catalog_id picks one "
-        "node only; catalog_subtree picks the node and all descendants — "
+        "resolved (use resolve_tag). For multi-keyword text recall, pass "
+        "`text` as an array; text terms are ORed, then combined with tags, "
+        "catalog, folder, lifecycle, and kind filters by AND. Catalog "
+        "filters: catalog_id picks one node only; catalog_subtree picks the "
+        "node and all descendants — "
         "mutually exclusive. Folder filters work the same way "
         "(folder_id / folder_subtree, mutually exclusive). Catalog and "
         "folder filters AND together. Pass `offset` (with the previous "
@@ -93,7 +102,7 @@ async def search_metadata(
     ctx: ToolContext,
     args: Mapping[str, Any],
 ) -> dict[str, Any]:
-    text_q = (args.get("text") or "").strip() or None
+    text_q = normalize_text_queries(args.get("text")) or None
     tags_all = args.get("tags_all") or []
     tags_any = args.get("tags_any") or []
     tags_none = args.get("tags_none") or []

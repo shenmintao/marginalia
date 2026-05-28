@@ -619,7 +619,7 @@ _LIVE_FOOTNOTE_RE = re.compile(
     r"(?:\s*[,，]\s*(?:"
     r'quote\s*=\s*"((?:[^"\\]|\\.)*)"'                  # group 3: quote
     r'(?:\s*\+\s*"(?:[^"\\]|\\.)*")*'                   # extra `+ "..."` segments: tolerated, ignored
-    r"|page\s*=\s*`?([0-9]+(?:-[0-9]+)?)`?"             # group 4: page
+    r"|page\s*=\s*`?(?:([0-9]+(?:-[0-9]+)?)|(?:N/?A|n/?a|NA|na|none|null|unknown))`?"
     r"|lines?\s*=\s*`?\S+`?"                             # legacy lines: tolerated
     r"|section_id\s*=\s*`?[^\s,`]+`?"                   # legacy section_id: tolerated
     r")"

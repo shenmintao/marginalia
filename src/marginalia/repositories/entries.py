@@ -6,6 +6,7 @@ instead of writing inline `select()` statements.
 """
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime
 from typing import Any
 
@@ -52,6 +53,15 @@ def _apply_tag_filters(
         sub = select(EntryTag.entry_id).where(EntryTag.tag_id.in_(tags_none))
         stmt = stmt.where(not_(FileEntry.id.in_(sub)))
     return stmt
+
+
+def _text_terms(text: str | Sequence[str] | None) -> list[str]:
+    if text is None:
+        return []
+    if isinstance(text, str):
+        item = text.strip()
+        return [item] if item else []
+    return [str(item).strip() for item in text if str(item).strip()]
 
 
 async def list_live_in_folder(
@@ -213,7 +223,7 @@ async def list_live_with_file_in_folders(
 
 def _build_filtered_stmt(
     *,
-    text: str | None,
+    text: str | Sequence[str] | None,
     lifecycle: list[str] | None,
     kind: str | None,
     catalog_one: str | None,
@@ -238,14 +248,18 @@ def _build_filtered_stmt(
         stmt = stmt.where(FileEntry.lifecycle.in_(lifecycle))
     if kind:
         stmt = stmt.where(File.kind == kind)
-    if text:
-        like = f"%{text}%"
-        stmt = stmt.where(or_(
-            File.summary.ilike(like),
-            File.extra.ilike(like),
-            FileEntry.extra.ilike(like),
-            FileEntry.display_name.ilike(like),
-        ))
+    text_terms = _text_terms(text)
+    if text_terms:
+        clauses = []
+        for term in text_terms:
+            like = f"%{term}%"
+            clauses.extend((
+                File.summary.ilike(like),
+                File.extra.ilike(like),
+                FileEntry.extra.ilike(like),
+                FileEntry.display_name.ilike(like),
+            ))
+        stmt = stmt.where(or_(*clauses))
     if catalog_one is not None:
         stmt = stmt.where(FileEntry.catalog_id == catalog_one)
     elif catalog_in is not None:
@@ -271,7 +285,7 @@ def _build_filtered_stmt(
 async def search_filtered(
     db: AsyncSession,
     *,
-    text: str | None = None,
+    text: str | Sequence[str] | None = None,
     lifecycle: list[str] | None = None,
     kind: str | None = None,
     catalog_one: str | None = None,
@@ -311,7 +325,7 @@ async def search_filtered(
 async def count_filtered(
     db: AsyncSession,
     *,
-    text: str | None = None,
+    text: str | Sequence[str] | None = None,
     lifecycle: list[str] | None = None,
     kind: str | None = None,
     catalog_one: str | None = None,

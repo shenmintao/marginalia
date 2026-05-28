@@ -10,7 +10,10 @@ Run:
 """
 from __future__ import annotations
 
-from marginalia.agent.tool_display import format_tool_result_preview
+from marginalia.agent.tool_display import (
+    format_tool_call,
+    format_tool_result_preview,
+)
 
 
 def _check(name: str, result: dict, *needles: str) -> None:
@@ -87,6 +90,26 @@ def test_error_shape() -> None:
     print(f"  error path                       -> {out}")
 
 
+def test_list_catalogs_root_call_display() -> None:
+    assert format_tool_call("list_catalogs", {}) == "list_catalogs"
+    assert format_tool_call("list_catalogs", {"parent_id": None}) == "list_catalogs"
+    assert format_tool_call("list_catalogs", {"parent_id": "null"}) == "list_catalogs"
+    print("  list_catalogs root display       -> list_catalogs")
+
+
+def test_search_text_array_call_display() -> None:
+    assert format_tool_call(
+        "search_metadata", {"text": ["道路交通", "法规"], "limit": 10},
+    ) == 'search_metadata "道路交通" "法规" (limit 10)'
+    assert format_tool_call(
+        "search_journal", {"text": ["道路交通", "法规"], "limit": 10},
+    ) == 'search_journal "道路交通" "法规" (limit 10)'
+    assert format_tool_call(
+        "search_metadata", {"text": "道路交通 法规", "limit": 10},
+    ) == 'search_metadata "道路交通" "法规" (limit 10)'
+    print("  text array call display          -> two quoted terms")
+
+
 def test_unknown_tool_falls_back() -> None:
     out = format_tool_result_preview("brand_new_tool", {
         "count": 5, "details": []
@@ -102,6 +125,8 @@ def test_unknown_tool_falls_back() -> None:
 def main() -> None:
     test_known_shapes()
     test_error_shape()
+    test_list_catalogs_root_call_display()
+    test_search_text_array_call_display()
     test_unknown_tool_falls_back()
     print("\nALL PREVIEW-FORMATTER CHECKS PASSED")
 

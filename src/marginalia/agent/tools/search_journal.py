@@ -14,6 +14,9 @@ together with a `conversation_id` to skim one session.
 Superseded insight rows (whose `superseded_by_id IS NOT NULL`) are hidden by
 default; the chain replacement is the answer. Set `include_superseded=true`
 to see history.
+
+Text lookup accepts a string or an array. Multi-term text is ORed, so broad
+recall should use `text=["term1", "term2"]` instead of one packed phrase.
 """
 from __future__ import annotations
 
@@ -22,6 +25,7 @@ from typing import Any, Mapping
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from marginalia.agent.text_query import normalize_text_queries
 from marginalia.agent.tools import ToolContext, tool
 from marginalia.db.models import Journal
 from marginalia.repositories import entries as entries_repo
@@ -34,8 +38,15 @@ SCHEMA: dict[str, Any] = {
     "required": [],
     "properties": {
         "text": {
-            "type": "string",
-            "description": "Free-text fragment to match in journal notes.",
+            "anyOf": [
+                {"type": "string"},
+                {"type": "array", "items": {"type": "string"}},
+            ],
+            "description": (
+                "One query string or an array of query terms/phrases. Array "
+                "items are ORed against journal notes. For multi-keyword "
+                "fallback after tags, prefer an array."
+            ),
         },
         "entry_id": {
             "type": "string",
@@ -106,7 +117,9 @@ SCHEMA: dict[str, Any] = {
         "Skim your investigator's notebook for past insights. Always your "
         "first move on a fresh user message - before reading any file. "
         "Searches both durable cross-session insights and per-turn "
-        "reflect_turn notes by default."
+        "reflect_turn notes by default. For multi-keyword recall, try tags "
+        "first; when falling back to text, pass `text` as an array so terms "
+        "are ORed."
     ),
     schema=SCHEMA,
 )
@@ -115,7 +128,7 @@ async def search_journal(
     ctx: ToolContext,
     args: Mapping[str, Any],
 ) -> dict[str, Any]:
-    text_q = args.get("text")
+    text_q = normalize_text_queries(args.get("text")) or None
     entry_id = args.get("entry_id")
     tags = args.get("tags") or []
     kinds = list(args.get("kinds") or ["insight", "reflect_turn"])
