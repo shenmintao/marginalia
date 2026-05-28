@@ -43,7 +43,7 @@ from typing import Any, Literal, Mapping
 from marginalia.repositories import audit_events as audit_events_repo
 from marginalia.db.session import session_scope
 from marginalia.llm import (
-    ChatMessage, ChatRequest, TextBlock, get_chat_client,
+    ChatRequest, cacheable_prompt_messages, get_chat_client,
 )
 from marginalia.llm.tagged_response import parse_kv, parse_tagged
 from marginalia.repositories import entry_relations as relations_repo
@@ -334,10 +334,7 @@ async def _ask_llm(
     try:
         resp = await client.complete(ChatRequest(
             system=VET_RELATIONS_SYSTEM,
-            messages=[ChatMessage(role="user", content=[
-                TextBlock(text=stable_prefix),
-                TextBlock(text=file_content),
-            ])],
+            messages=cacheable_prompt_messages(stable_prefix, file_content),
             max_tokens=4096,
             temperature=0.1,
             cache_breakpoints=[0],

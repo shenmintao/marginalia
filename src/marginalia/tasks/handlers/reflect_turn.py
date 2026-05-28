@@ -8,7 +8,7 @@ returns.
 
 **Prefix-cache reuse (2026-05-27):** The handler now replays the
 session's conversation history using the same `build_resumed_messages`
-+ `render_system_prompt(snapshot, phase="execute")` that the agent
++ execute-phase system prompt and cacheable snapshot messages that the agent
 runtime uses for its execute phase. This gives the reflect LLM call
 the identical prefix (system prompt + resumed history) that was
 already sent to the chat model, so DeepSeek / OpenAI automatic
@@ -22,6 +22,11 @@ prefix overlap with the execute phase → 0% cache hit rate and
 ~35k input tokens per reflect call. After the change, the shared
 prefix is cached → reflect input drops to ~3-5k (the new message
 only).
+
+Current layout keeps the execute-phase system prompt static and sends the
+snapshot as a complete cacheable message prefix before resumed history. That
+matches DeepSeek's complete-prefix cache-unit rule more closely than putting
+the snapshot after phase-specific system text.
 
 Scope (intentionally narrow):
   - The ONLY write this handler performs is INSERT INTO journal.
@@ -48,7 +53,8 @@ from typing import Any, Mapping
 from marginalia.agent.stable_context import (
     build_resumed_messages,
     build_stable_snapshot,
-    render_system_prompt,
+    build_snapshot_messages,
+    render_phase_system_prompt,
 )
 from marginalia.db.models import (
     Conversation,
@@ -153,7 +159,8 @@ async def handle_reflect_turn(payload: Mapping[str, Any]) -> None:
         await session.commit()
 
     # --- Build messages: reuse execute-phase prefix for cache hit ---
-    system_prompt = render_system_prompt(snapshot, phase="execute")
+    system_prompt = render_phase_system_prompt(phase="execute")
+    snapshot_messages = build_snapshot_messages(snapshot)
     resumed = await build_resumed_messages(
         conversation.session_id,
         current_conversation_id=conversation_id,
@@ -186,7 +193,7 @@ async def handle_reflect_turn(payload: Mapping[str, Any]) -> None:
         )
     reflect_tail += REFLECT_INSTRUCTIONS
 
-    reflect_messages = list(resumed) + [
+    reflect_messages = list(snapshot_messages) + list(resumed) + [
         ChatMessage(role="user", content=reflect_tail),
     ]
 
@@ -195,6 +202,7 @@ async def handle_reflect_turn(payload: Mapping[str, Any]) -> None:
         system=system_prompt,
         messages=reflect_messages,
         max_tokens=1024,
+        cache_breakpoints=[0],
         temperature=0.3,
     ))
     tagged = parse_tagged(resp.text or "")

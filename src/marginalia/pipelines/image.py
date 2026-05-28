@@ -29,6 +29,7 @@ from marginalia.llm import (
     ChatRequest,
     ImageBlock,
     TextBlock,
+    cacheable_prompt_messages,
     get_chat_client,
 )
 from marginalia.llm.model_controls import DISABLE_THINKING_EXTRA_BODY
@@ -171,11 +172,13 @@ class ImagePipeline(Pipeline):
         extra_body = _disable_thinking_for_vlm(client)
         resp = await client.complete(ChatRequest(
             system=IMAGE_PIPELINE_SYSTEM,
-            messages=[ChatMessage(role="user", content=[
-                TextBlock(text=stable_prefix),
-                TextBlock(text=file_context),
-                ImageBlock(media_type=media_type, data_b64=b64),
-            ])],
+            messages=cacheable_prompt_messages(
+                stable_prefix,
+                [
+                    TextBlock(text=file_context),
+                    ImageBlock(media_type=media_type, data_b64=b64),
+                ],
+            ),
             max_tokens=4096,
             temperature=0.2,
             cache_breakpoints=[0],

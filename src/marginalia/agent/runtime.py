@@ -56,7 +56,8 @@ from typing import Any, AsyncIterator
 from marginalia.agent.stable_context import (
     build_resumed_messages,
     build_stable_snapshot,
-    render_system_prompt,
+    build_snapshot_messages,
+    render_phase_system_prompt,
 )
 from marginalia.agent.tools import ToolContext, all_tool_defs, get_tool
 from marginalia.agent.types import AgentEvent, AgentTurnError, TurnUsage
@@ -348,14 +349,16 @@ async def run_turn(
     # Two disjoint prompts (kb-lite-style). Each phase only sees the rules
     # that apply to it, so plan can't be tempted to write a markdown answer
     # under "must always use [^a] footnotes" instructions.
-    plan_system = render_system_prompt(snapshot, phase="plan")
-    execute_system = render_system_prompt(snapshot, phase="execute")
+    plan_system = render_phase_system_prompt(phase="plan")
+    execute_system = render_phase_system_prompt(phase="execute")
+    snapshot_messages = build_snapshot_messages(snapshot)
     chat = get_chat_client("chat")
 
     yield AgentEvent(event_type="planning")
     plan_text = await _run_plan_phase(
         chat=chat,
         system_prompt=plan_system,
+        prefix_messages=snapshot_messages,
         user_message=user_message,
         conversation_id=conversation_id,
     )
@@ -387,6 +390,7 @@ async def run_turn(
         async for ev in _run_execute_phase(
             chat=chat,
             system_prompt=execute_system,
+            prefix_messages=snapshot_messages,
             plan_text=plan_for_execute,
             user_message=user_message,
             conversation_id=conversation_id,
@@ -557,14 +561,19 @@ async def _run_plan_phase(
     system_prompt: str,
     user_message: str,
     conversation_id: str,
+    prefix_messages: list[ChatMessage] | None = None,
 ) -> str:
     started = time.monotonic()
+    messages = list(prefix_messages or []) + [
+        ChatMessage(role="user", content=user_message),
+    ]
     resp = await chat.complete(ChatRequest(
         system=system_prompt,
-        messages=[ChatMessage(role="user", content=user_message)],
+        messages=messages,
         max_tokens=get_settings().agent_plan_max_tokens,
         tools=None,            # Plan phase: zero tools (design §10.2).
         json_schema=None,
+        cache_breakpoints=[0] if prefix_messages else [],
         temperature=0.3,
     ))
     duration_ms = int((time.monotonic() - started) * 1000)
@@ -829,6 +838,7 @@ async def _run_execute_phase(
     conversation_id: str,
     session_id: str,
     outcome: _ExecuteOutcome,
+    prefix_messages: list[ChatMessage] | None = None,
     resumed_history: list[ChatMessage] | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Execute loop as event stream.
@@ -848,12 +858,17 @@ async def _run_execute_phase(
     ctx = ToolContext(session_id=session_id, conversation_id=conversation_id)
     guard = _CallGuard()
 
-    messages: list[ChatMessage] = list(resumed_history or []) + [
-        ChatMessage(role="user", content=user_message),
-        ChatMessage(role="assistant", content=(
-            "Plan prepared:\n" + (plan_text or "(no specific plan; answer directly)")
-        )),
-    ]
+    messages: list[ChatMessage] = (
+        list(prefix_messages or [])
+        + list(resumed_history or [])
+        + [
+            ChatMessage(role="user", content=user_message),
+            ChatMessage(role="assistant", content=(
+                "Plan prepared:\n"
+                + (plan_text or "(no specific plan; answer directly)")
+            )),
+        ]
+    )
 
     settings = get_settings()
     max_execute_turns = max(3, settings.agent_execute_max_turns)
@@ -890,6 +905,7 @@ async def _run_execute_phase(
             tools=request_tools,
             tool_choice="none" if continuing_final_answer else "auto",
             json_schema=None,
+            cache_breakpoints=[0] if prefix_messages else [],
             temperature=0.3,
         ))
         duration_ms = int((time.monotonic() - started) * 1000)

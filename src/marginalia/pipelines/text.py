@@ -22,9 +22,8 @@ from typing import Any
 
 from marginalia.config import get_settings, resolve_profile
 from marginalia.llm import (
-    ChatMessage,
     ChatRequest,
-    TextBlock,
+    cacheable_prompt_messages,
     get_chat_client,
 )
 from marginalia.llm.tagged_response import (
@@ -194,10 +193,7 @@ class TextPipeline(Pipeline):
         client = get_chat_client("ingest")
         resp = await client.complete(ChatRequest(
             system=TEXT_PIPELINE_SYSTEM,
-            messages=[ChatMessage(role="user", content=[
-                TextBlock(text=stable_prefix),
-                TextBlock(text=file_content),
-            ])],
+            messages=cacheable_prompt_messages(stable_prefix, file_content),
             max_tokens=min(8192, max(2048, len(body) // 8)),
             temperature=0.2,
             cache_breakpoints=[0],
@@ -281,10 +277,7 @@ class TextPipeline(Pipeline):
                 )
                 resp = await client.complete(ChatRequest(
                     system=TEXT_CHUNK_SYSTEM,
-                    messages=[ChatMessage(role="user", content=[
-                        TextBlock(text=stable_prefix),
-                        TextBlock(text=file_content),
-                    ])],
+                    messages=cacheable_prompt_messages(stable_prefix, file_content),
                     max_tokens=min(8192, max(2048, len(text) // 8)),
                     temperature=0.2,
                     cache_breakpoints=[0],
@@ -338,14 +331,14 @@ class TextPipeline(Pipeline):
         )
         resp = await client.complete(ChatRequest(
             system=TEXT_AGGREGATE_SYSTEM,
-            messages=[ChatMessage(role="user", content=[
-                TextBlock(text=(
+            messages=cacheable_prompt_messages(
+                (
                     "Summarize the indexed text coverage from this section map. "
                     "The caller already has `description.sections`; produce "
                     "file-level recall fields only."
-                )),
-                TextBlock(text=aggregate_content),
-            ])],
+                ),
+                aggregate_content,
+            ),
             max_tokens=8192,
             temperature=0.2,
             cache_breakpoints=[0],

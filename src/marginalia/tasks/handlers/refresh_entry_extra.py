@@ -28,9 +28,8 @@ from typing import Any, Mapping
 from marginalia.repositories import audit_events as audit_events_repo
 from marginalia.db.session import session_scope
 from marginalia.llm import (
-    ChatMessage,
     ChatRequest,
-    TextBlock,
+    cacheable_prompt_messages,
     get_chat_client,
 )
 from marginalia.llm.tagged_response import parse_tagged
@@ -325,10 +324,7 @@ async def _ask_llm(cand: dict[str, Any]) -> str | None:
     client = get_chat_client("ingest")
     resp = await client.complete(ChatRequest(
         system=REFRESH_SYSTEM,
-        messages=[ChatMessage(role="user", content=[
-            TextBlock(text=stable_prefix),
-            TextBlock(text=file_content),
-        ])],
+        messages=cacheable_prompt_messages(stable_prefix, file_content),
         max_tokens=2048,
         temperature=0.2,
         cache_breakpoints=[0],

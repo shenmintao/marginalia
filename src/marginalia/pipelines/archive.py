@@ -27,7 +27,7 @@ import re
 from typing import Any
 
 from marginalia.llm import (
-    ChatMessage, ChatRequest, TextBlock, get_chat_client,
+    ChatRequest, cacheable_prompt_messages, get_chat_client,
 )
 from marginalia.llm.tagged_response import (
     parse_kv,
@@ -211,10 +211,7 @@ class ArchivePipeline(Pipeline):
             client = get_chat_client("ingest")
             resp = await client.complete(ChatRequest(
                 system=ARCHIVE_PIPELINE_SYSTEM,
-                messages=[ChatMessage(role="user", content=[
-                    TextBlock(text=stable_prefix),
-                    TextBlock(text=file_content),
-                ])],
+                messages=cacheable_prompt_messages(stable_prefix, file_content),
                 max_tokens=4096,
                 temperature=0.2,
                 cache_breakpoints=[0],

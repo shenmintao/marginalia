@@ -11,6 +11,11 @@ from marginalia.llm.factory import (
     get_chat_client,
     reset_clients_cache,
 )
+from marginalia.llm.prompt_cache import (
+    CACHE_PREFIX_ACK,
+    cacheable_prefix_messages,
+    cacheable_prompt_messages,
+)
 from marginalia.llm.types import (
     ChatMessage,
     ChatRequest,
@@ -33,6 +38,7 @@ __all__ = [
     "ChatRequest",
     "ChatResponse",
     "ContentBlock",
+    "CACHE_PREFIX_ACK",
     "ImageBlock",
     "StopReason",
     "TextBlock",
@@ -41,6 +47,8 @@ __all__ = [
     "ToolDef",
     "ToolResultBlock",
     "ToolUseBlock",
+    "cacheable_prefix_messages",
+    "cacheable_prompt_messages",
     "get_audio_client",
     "get_chat_client",
     "reset_clients_cache",

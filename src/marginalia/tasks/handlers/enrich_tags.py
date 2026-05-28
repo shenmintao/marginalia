@@ -42,7 +42,7 @@ from typing import Any, Mapping
 
 from marginalia.db.models import EntryTag
 from marginalia.db.session import session_scope
-from marginalia.llm import ChatMessage, ChatRequest, TextBlock, get_chat_client
+from marginalia.llm import ChatRequest, cacheable_prompt_messages, get_chat_client
 from marginalia.llm.tagged_response import parse_kv, parse_tagged
 from marginalia.repositories import entries as entries_repo
 from marginalia.repositories import entry_tags as entry_tags_repo
@@ -249,10 +249,7 @@ async def _ask_llm_for_batch(
     client = get_chat_client("ingest")
     resp = await client.complete(ChatRequest(
         system=ENRICH_SYSTEM,
-        messages=[ChatMessage(role="user", content=[
-            TextBlock(text=stable_prefix),
-            TextBlock(text=file_content),
-        ])],
+        messages=cacheable_prompt_messages(stable_prefix, file_content),
         max_tokens=4096,
         temperature=0.1,
         cache_breakpoints=[0],

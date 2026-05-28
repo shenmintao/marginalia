@@ -203,13 +203,13 @@ async def main():
     assert req.extra_body == {"thinking": {"type": "disabled"}}
 
     # ---- 2. Inspect the user message blocks ------------------------------
-    user_msg = req.messages[0]
-    assert user_msg.role == "user"
-    blocks = user_msg.content
-    assert isinstance(blocks, list), "user content should be block list, not str"
+    user_blocks = []
+    for msg in req.messages:
+        if msg.role == "user" and isinstance(msg.content, list):
+            user_blocks.extend(msg.content)
 
-    text_blocks = [b for b in blocks if isinstance(b, TextBlock)]
-    image_blocks = [b for b in blocks if isinstance(b, ImageBlock)]
+    text_blocks = [b for b in user_blocks if isinstance(b, TextBlock)]
+    image_blocks = [b for b in user_blocks if isinstance(b, ImageBlock)]
     print("[blocks] text:", len(text_blocks), " image:", len(image_blocks))
     assert len(text_blocks) == 2
     assert len(image_blocks) == 1

@@ -218,9 +218,13 @@ async def _main() -> None:
     assert len(INGEST_CALLS) == 1, \
         f"expected 1 ingest call, got {len(INGEST_CALLS)}"
     ingest_prompt = ""
-    for content in INGEST_CALLS[0].messages[0].content:
-        if hasattr(content, "text"):
-            ingest_prompt += content.text
+    for msg in INGEST_CALLS[0].messages:
+        if isinstance(msg.content, str):
+            ingest_prompt += msg.content
+        else:
+            for content in msg.content:
+                if hasattr(content, "text"):
+                    ingest_prompt += content.text
     assert "Leader Election" in ingest_prompt or "Raft" in ingest_prompt, \
         "ingest prompt did not include OCR text"
     print("[5] OCR text propagated into ingest prompt")

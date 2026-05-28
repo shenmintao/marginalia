@@ -40,9 +40,8 @@ from marginalia.db.models import (
 from marginalia.repositories import audit_events as audit_events_repo
 from marginalia.db.session import session_scope
 from marginalia.llm import (
-    ChatMessage,
     ChatRequest,
-    TextBlock,
+    cacheable_prompt_messages,
     get_chat_client,
 )
 from marginalia.llm.tagged_response import parse_kv, parse_tagged
@@ -352,10 +351,7 @@ async def _ask_llm_for_decisions(
     client = get_chat_client("ingest")
     resp = await client.complete(ChatRequest(
         system=CORPUS_MINE_SYSTEM,
-        messages=[ChatMessage(role="user", content=[
-            TextBlock(text=stable_prefix),
-            TextBlock(text=file_content),
-        ])],
+        messages=cacheable_prompt_messages(stable_prefix, file_content),
         max_tokens=4096,
         temperature=0.1,
         cache_breakpoints=[0],

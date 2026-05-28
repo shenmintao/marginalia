@@ -32,6 +32,7 @@ from marginalia.llm import (
     ChatRequest,
     ImageBlock,
     TextBlock,
+    cacheable_prompt_messages,
     get_chat_client,
 )
 from marginalia.llm.model_controls import DISABLE_THINKING_EXTRA_BODY
@@ -361,10 +362,7 @@ class PdfPipeline(Pipeline):
         max_out = min(8192, max(2048, len(body_text) // 8))
         resp = await client.complete(ChatRequest(
             system=PDF_PIPELINE_SYSTEM,
-            messages=[ChatMessage(role="user", content=[
-                TextBlock(text=stable_prefix),
-                TextBlock(text=file_content),
-            ])],
+            messages=cacheable_prompt_messages(stable_prefix, file_content),
             max_tokens=max_out,
             temperature=0.2,
             cache_breakpoints=[0],
@@ -454,10 +452,7 @@ class PdfPipeline(Pipeline):
                 )
                 resp = await client.complete(ChatRequest(
                     system=PDF_CHUNK_SYSTEM,
-                    messages=[ChatMessage(role="user", content=[
-                        TextBlock(text=stable_prefix),
-                        TextBlock(text=file_content),
-                    ])],
+                    messages=cacheable_prompt_messages(stable_prefix, file_content),
                     max_tokens=min(8192, max(2048, len(rendered) // 8)),
                     temperature=0.2,
                     cache_breakpoints=[0],
@@ -528,14 +523,14 @@ class PdfPipeline(Pipeline):
         )
         resp = await client.complete(ChatRequest(
             system=PDF_AGGREGATE_SYSTEM,
-            messages=[ChatMessage(role="user", content=[
-                TextBlock(text=(
+            messages=cacheable_prompt_messages(
+                (
                     "Summarize the indexed PDF coverage from this section map. "
                     "The caller already has `description.sections`; "
                     "produce file-level recall fields only."
-                )),
-                TextBlock(text=aggregate_content),
-            ])],
+                ),
+                aggregate_content,
+            ),
             max_tokens=8192,
             temperature=0.2,
             cache_breakpoints=[0],

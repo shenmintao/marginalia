@@ -1,10 +1,14 @@
 """Stable context for the agent — DESIGN.md §10.2.
 
-The two LLM phases of a turn use **two independent system prompts**, both
-followed by the same snapshot block:
+The two LLM phases of a turn use **two independent system prompts**:
 
-  - plan phase:    PLAN_PHASE_PROMPT  + snapshot
-  - execute phase: EXECUTE_PHASE_PROMPT + snapshot
+  - plan phase:    PLAN_PHASE_PROMPT
+  - execute phase: EXECUTE_PHASE_PROMPT
+
+Both phases then prepend the same snapshot as a complete user-message prefix
+with a fixed assistant acknowledgement. This keeps the phase rules disjoint
+while giving DeepSeek/OpenAI-compatible automatic prefix caches a stable,
+complete unit to detect and store.
 
 Mirrors kb-lite's split (PLANNING_PROMPT vs SYSTEM_PROMPT). Keeping the
 phases' prompts disjoint prevents cross-contamination — the answer-shaped
@@ -14,10 +18,9 @@ applies in plan. Earlier the two were fused into one `AGENT_IDENTITY`,
 which let the planner write a full markdown answer in the plan slot and
 let the executor inherit phantom plan-phase rules.
 
-The snapshot suffix is identical between phases so cache hits still work
-within a phase across turns; the divergent prefix means the two phases
-each have their own cache budget — acceptable, both phases are short and
-this is far cheaper than the leakage failure mode it replaces.
+The snapshot is a message prefix rather than a system-prompt suffix, so
+providers whose cache units depend on complete request prefixes can detect it
+more reliably across repeated turns and background reflection calls.
 
 Journal recall is logically frozen for the duration of one session by
 filtering `created_at < session.started_at`. This both:
@@ -41,6 +44,7 @@ from typing import Any, Literal
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from marginalia.db.session import session_scope
+from marginalia.llm.prompt_cache import cacheable_prefix_messages
 from marginalia.llm.types import ChatMessage, ToolResultBlock, ToolUseBlock
 from marginalia.repositories import sessions as session_service
 
@@ -207,24 +211,39 @@ async def build_stable_snapshot(
     }
 
 
+def render_phase_system_prompt(
+    *,
+    phase: Literal["plan", "execute"] = "execute",
+) -> str:
+    """Return the phase-specific system prompt without the snapshot."""
+    return PLAN_PHASE_PROMPT if phase == "plan" else EXECUTE_PHASE_PROMPT
+
+
+def render_snapshot_prompt(snapshot: dict[str, Any]) -> str:
+    """Render the current KB snapshot as a stable cache prefix."""
+    return (
+        "# Current Knowledge Base Snapshot\n\n"
+        + "```json\n"
+        + json.dumps(snapshot, ensure_ascii=False, indent=2)
+        + "\n```\n"
+    )
+
+
+def build_snapshot_messages(snapshot: dict[str, Any]) -> list[ChatMessage]:
+    """Return the snapshot as a complete cacheable message prefix."""
+    return cacheable_prefix_messages(render_snapshot_prompt(snapshot))
+
+
 def render_system_prompt(
     snapshot: dict[str, Any],
     *,
     phase: Literal["plan", "execute"] = "execute",
 ) -> str:
-    """Combine phase-specific identity + snapshot into one system prompt.
-
-    Plan and execute use disjoint identity bodies (PLAN_PHASE_PROMPT vs
-    EXECUTE_PHASE_PROMPT) so neither phase contaminates the other's
-    instructions. The snapshot suffix is identical between phases.
-    """
-    head = PLAN_PHASE_PROMPT if phase == "plan" else EXECUTE_PHASE_PROMPT
+    """Backward-compatible combined system prompt for legacy callers."""
     return (
-        head
-        + "\n\n# Current Knowledge Base Snapshot\n\n"
-        + "```json\n"
-        + json.dumps(snapshot, ensure_ascii=False, indent=2)
-        + "\n```\n"
+        render_phase_system_prompt(phase=phase)
+        + "\n\n"
+        + render_snapshot_prompt(snapshot)
     )
 
 

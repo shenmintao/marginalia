@@ -48,7 +48,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Any, Mapping
 
 from marginalia.db.session import session_scope
-from marginalia.llm import ChatMessage, ChatRequest, TextBlock, get_chat_client
+from marginalia.llm import ChatRequest, cacheable_prompt_messages, get_chat_client
 from marginalia.llm.tagged_response import parse_tagged
 from marginalia.repositories import catalogs as catalogs_repo
 from marginalia.repositories import entries as entries_repo
@@ -225,10 +225,7 @@ async def _ask_llm_for_operations(snapshot: dict[str, Any]) -> list[dict[str, An
     client = get_chat_client("ingest")
     resp = await client.complete(ChatRequest(
         system=RESTRUCTURE_SYSTEM,
-        messages=[ChatMessage(role="user", content=[
-            TextBlock(text=stable_prefix),
-            TextBlock(text=file_content),
-        ])],
+        messages=cacheable_prompt_messages(stable_prefix, file_content),
         max_tokens=4096,
         temperature=0.2,
         cache_breakpoints=[0],

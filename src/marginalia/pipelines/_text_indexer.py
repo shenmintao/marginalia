@@ -15,7 +15,7 @@ import json
 import logging
 from typing import Any
 
-from marginalia.llm import ChatMessage, ChatRequest, TextBlock, get_chat_client
+from marginalia.llm import ChatRequest, cacheable_prompt_messages, get_chat_client
 from marginalia.llm.tagged_response import (
     parse_path,
     parse_sections,
@@ -104,12 +104,7 @@ async def index_extracted_text(
 
     resp = await client.complete(ChatRequest(
         system=INDEXER_SYSTEM,
-        messages=[ChatMessage(
-            role="user", content=[
-                TextBlock(text=stable_prefix),
-                TextBlock(text=file_content),
-            ],
-        )],
+        messages=cacheable_prompt_messages(stable_prefix, file_content),
         max_tokens=max_out,
         temperature=0.2,
         cache_breakpoints=[0],

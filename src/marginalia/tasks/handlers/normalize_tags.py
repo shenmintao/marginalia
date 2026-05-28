@@ -31,7 +31,7 @@ from typing import Any, Iterable, Mapping
 from marginalia.db.models import Tag, TagAlias
 from marginalia.repositories import audit_events as audit_events_repo
 from marginalia.db.session import session_scope
-from marginalia.llm import ChatMessage, ChatRequest, TextBlock, get_chat_client
+from marginalia.llm import ChatRequest, cacheable_prompt_messages, get_chat_client
 from marginalia.llm.tagged_response import parse_kv, parse_tagged
 from marginalia.repositories import tags as tags_repo
 from marginalia.repositories.task_outcomes import (
@@ -143,10 +143,7 @@ async def _normalize_one_facet(facet: str) -> dict[str, int] | None:
     client = get_chat_client("ingest")
     resp = await client.complete(ChatRequest(
         system=NORMALIZE_SYSTEM,
-        messages=[ChatMessage(role="user", content=[
-            TextBlock(text=stable_prefix),
-            TextBlock(text=file_content),
-        ])],
+        messages=cacheable_prompt_messages(stable_prefix, file_content),
         max_tokens=4096,
         temperature=0.1,
         cache_breakpoints=[0],

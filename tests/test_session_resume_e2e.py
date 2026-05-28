@@ -160,8 +160,9 @@ async def test_resume_replays_history() -> None:
     # The plan request must carry just the new user message — plan stays
     # history-free.
     plan_req = chat.requests[0]
-    assert len(plan_req.messages) == 1, len(plan_req.messages)
-    assert plan_req.messages[0].content == "第三轮：再总结一下要点。"
+    assert len(plan_req.messages) == 3, len(plan_req.messages)
+    assert plan_req.cache_breakpoints == [0]
+    assert plan_req.messages[-1].content == "第三轮：再总结一下要点。"
 
     # The execute request must contain replayed history + boundary note +
     # current user message + plan-echo assistant.

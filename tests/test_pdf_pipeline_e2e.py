@@ -58,10 +58,13 @@ CALL_LOG: list[ChatRequest] = []
 
 
 def _request_text(request: ChatRequest) -> str:
-    return "\n".join(
-        getattr(block, "text", "")
-        for block in request.messages[0].content
-    )
+    parts: list[str] = []
+    for msg in request.messages:
+        if isinstance(msg.content, str):
+            parts.append(msg.content)
+        else:
+            parts.extend(getattr(block, "text", "") for block in msg.content)
+    return "\n".join(p for p in parts if p)
 
 
 def _build_text_pdf(page_count: int = 3) -> bytes:
