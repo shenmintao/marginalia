@@ -24,10 +24,14 @@ import json
 import logging
 from typing import Any, AsyncIterator
 
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, BadRequestError
 
 from marginalia.config import LlmProfile
 from marginalia.llm.base import AudioClient, ChatClient
+from marginalia.llm.model_controls import (
+    apply_openai_reasoning_controls,
+    detect_openai_compatible_dialect,
+)
 from marginalia.llm.types import (
     ChatMessage,
     ChatRequest,
@@ -55,8 +59,11 @@ class OpenAIChatClient(ChatClient):
                 f"(provider={profile.provider!r})"
             )
         self.profile_name = profile.name
+        self.provider = profile.provider
+        self.base_url = profile.base_url
         self.model = profile.model
         self._supports_json_schema = profile.provider == "openai"
+        self._compat_dialect = detect_openai_compatible_dialect(profile)
         self._client = AsyncOpenAI(api_key=profile.api_key, base_url=profile.base_url)
 
     async def complete(self, request: ChatRequest) -> ChatResponse:
@@ -70,6 +77,11 @@ class OpenAIChatClient(ChatClient):
             "max_completion_tokens": request.max_tokens,
             "temperature": request.temperature,
         }
+        apply_openai_reasoning_controls(
+            kwargs,
+            request,
+            dialect=self._compat_dialect,
+        )
         if request.tools:
             kwargs["tools"] = [
                 {
@@ -99,7 +111,18 @@ class OpenAIChatClient(ChatClient):
                 kwargs["response_format"] = {"type": "json_object"}
                 self._inject_schema_into_system(messages, schema)
 
-        resp = await self._client.chat.completions.create(**kwargs)
+        try:
+            resp = await self._client.chat.completions.create(**kwargs)
+        except BadRequestError:
+            if not (request.reasoning_effort or request.extra_body):
+                raise
+            log.warning(
+                "provider rejected reasoning controls for profile %s; retrying without them",
+                self.profile_name,
+            )
+            kwargs.pop("reasoning_effort", None)
+            kwargs.pop("extra_body", None)
+            resp = await self._client.chat.completions.create(**kwargs)
         return self._render_response(resp)
 
     @staticmethod
@@ -248,7 +271,6 @@ class OpenAIChatClient(ChatClient):
             parsed_json=parsed_json,
             raw_provider_response=resp,
         )
-
 
 class OpenAIAudioClient(AudioClient):
     def __init__(self, profile: LlmProfile) -> None:

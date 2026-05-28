@@ -21,10 +21,11 @@ import json
 import logging
 from typing import Any
 
-from anthropic import AsyncAnthropic
+from anthropic import AsyncAnthropic, BadRequestError
 
 from marginalia.config import LlmProfile
 from marginalia.llm.base import ChatClient
+from marginalia.llm.model_controls import anthropic_reasoning_controls
 from marginalia.llm.types import (
     ChatMessage,
     ChatRequest,
@@ -48,6 +49,7 @@ class AnthropicChatClient(ChatClient):
         if profile.provider != "anthropic":
             raise ValueError(f"profile {profile.name} is not Anthropic")
         self.profile_name = profile.name
+        self.provider = profile.provider
         self.model = profile.model
         kwargs: dict[str, Any] = {"api_key": profile.api_key}
         if profile.base_url:
@@ -70,6 +72,11 @@ class AnthropicChatClient(ChatClient):
         system = self._render_system(request)
         if system is not None:
             kwargs["system"] = system
+        thinking, extra_body = anthropic_reasoning_controls(request)
+        if thinking:
+            kwargs["thinking"] = thinking
+        if extra_body:
+            kwargs["extra_body"] = extra_body
 
         if request.tools:
             kwargs["tools"] = [
@@ -85,7 +92,18 @@ class AnthropicChatClient(ChatClient):
             elif isinstance(request.tool_choice, str):
                 kwargs["tool_choice"] = {"type": "tool", "name": request.tool_choice}
 
-        resp = await self._client.messages.create(**kwargs)
+        try:
+            resp = await self._client.messages.create(**kwargs)
+        except BadRequestError:
+            if not (request.extra_body or request.reasoning_effort):
+                raise
+            log.warning(
+                "provider rejected reasoning controls for profile %s; retrying without them",
+                self.profile_name,
+            )
+            kwargs.pop("thinking", None)
+            kwargs.pop("extra_body", None)
+            resp = await self._client.messages.create(**kwargs)
         return self._render_response(resp, expected_json=request.json_schema is not None)
 
     # --- system rendering ---------------------------------------------------

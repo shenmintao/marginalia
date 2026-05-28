@@ -102,6 +102,8 @@ class ChatRequest:
     json_schema: dict[str, Any] | None = None
     cache_breakpoints: list[int] = field(default_factory=list)
     temperature: float = 0.7
+    reasoning_effort: str | None = None
+    extra_body: dict[str, Any] | None = None
 
 
 StopReason = Literal["end_turn", "tool_use", "max_tokens", "stop_sequence", "other"]

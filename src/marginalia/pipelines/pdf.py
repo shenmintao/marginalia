@@ -34,6 +34,7 @@ from marginalia.llm import (
     TextBlock,
     get_chat_client,
 )
+from marginalia.llm.model_controls import DISABLE_THINKING_EXTRA_BODY
 from marginalia.llm.tagged_response import (
     render_format_hint,
     render_sections_hint,
@@ -76,7 +77,6 @@ OCR_MAX_PAGES: int | None = None  # None/<=0 means OCR every page at ingest
 PDF_READ_MAX_PAGES_PER_CALL = 50
 PDF_PATTERN_UNSCOPED_MAX_PAGES = 200
 PDF_DEFAULT_READ_PAGES = 20
-OCR_STORED_TEXT_SAMPLE_CHARS = 20_000
 OCR_BLOCK_MAX_CHARS = 8_000
 OCR_RENDER_BATCH_PAGES = 20
 OCR_RENDER_DPI = 200              # JPEG render DPI before VLM (sweet spot)
@@ -92,7 +92,8 @@ Rules:
 3. Use Markdown table syntax for tables.
 4. Use LaTeX for math (wrapped with $ or $$).
 5. Output ONLY the extracted text. No HTML, no preamble, no commentary.
-6. If the page has no recognisable text content, reply only with: No text content."""
+6. Do not describe your process. Do not include analysis, checklists, labels like "Transcription:", or <think> blocks.
+7. If the page has no recognisable text content, reply only with: No text content."""
 
 
 PDF_PIPELINE_SYSTEM = """You are Marginalia's PDF document indexer.
@@ -1313,23 +1314,25 @@ def _ocr_retrieval_extra(
     if base_extra and base_extra.strip():
         lines.append(base_extra.strip())
     lines.append(f"ocr_document_type: {document_type}")
-    sample_parts: list[str] = []
-    total = 0
-    for page_no, text in enumerate(ocr_pages, start=1):
-        clean = (text or "").strip()
-        if not clean:
-            continue
-        part = f"[Page {page_no}]\n{clean}"
-        if total + len(part) + 2 > OCR_STORED_TEXT_SAMPLE_CHARS:
-            remaining = OCR_STORED_TEXT_SAMPLE_CHARS - total
-            if remaining > 0:
-                sample_parts.append(part[:remaining].rstrip())
-            break
-        sample_parts.append(part)
-        total += len(part) + 2
-    if sample_parts:
-        lines.append("ocr_text_sample:\n" + "\n\n".join(sample_parts))
+    pages_with_text = sum(1 for text in ocr_pages if (text or "").strip())
+    lines.append(f"ocr_pages_with_text: {pages_with_text}")
     return "\n".join(lines)
+
+
+def _clean_ocr_response_text(text: str | None) -> str:
+    clean = (text or "").strip()
+    if not clean:
+        return ""
+    clean = re.sub(r"(?is)<think>.*?</think>", "", clean).strip()
+    marker = "</think>"
+    idx = clean.casefold().rfind(marker)
+    if idx >= 0:
+        clean = clean[idx + len(marker):].strip()
+    for prefix in ("Transcription:", "OCR text:", "Extracted text:"):
+        if clean.casefold().startswith(prefix.casefold()):
+            clean = clean[len(prefix):].lstrip()
+            break
+    return clean
 
 
 def _file_was_ocr_indexed(file_row: Any) -> bool:
@@ -1504,6 +1507,11 @@ async def _ocr_pdf_pages(pdf_bytes: bytes, total_pages: int) -> list[str]:
                     jpeg_bytes, max_long_edge=OCR_VLM_MAX_LONG_EDGE,
                 )
                 b64 = base64.b64encode(scaled).decode("ascii")
+                extra_body = (
+                    DISABLE_THINKING_EXTRA_BODY
+                    if getattr(client, "provider", None) == "openai-compatible"
+                    else None
+                )
                 resp = await client.complete(ChatRequest(
                     system=PDF_OCR_PROMPT,
                     messages=[ChatMessage(role="user", content=[
@@ -1512,11 +1520,12 @@ async def _ocr_pdf_pages(pdf_bytes: bytes, total_pages: int) -> list[str]:
                     ])],
                     max_tokens=4096,
                     temperature=0.0,
+                    extra_body=extra_body,
                 ))
         except Exception as exc:  # noqa: BLE001
             log.warning("OCR call failed for page %d: %s", i + 1, exc)
             return
-        text = (resp.text or "").strip()
+        text = _clean_ocr_response_text(resp.text)
         if text.lower() in ("no text content", "no text content."):
             text = ""
         out[i] = text
