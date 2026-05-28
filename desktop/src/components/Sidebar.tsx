@@ -1,6 +1,7 @@
 import { NavLink } from "react-router-dom";
 import { BookOpen, MessageSquare, Search, Settings, Library } from "lucide-react";
 
+import { APP_VERSION } from "@/lib/appVersion";
 import { cn } from "@/lib/utils";
 import { usePrefs } from "@/lib/prefs";
 
@@ -68,7 +69,7 @@ export function Sidebar() {
 
       {!compact && (
         <div className="mt-auto px-4 py-3 text-[11px] text-fg-subtle">
-          v0.1.0 — local-first
+          v{APP_VERSION}
         </div>
       )}
     </aside>
