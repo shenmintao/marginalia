@@ -34,10 +34,6 @@ from marginalia.llm import (
     get_chat_client,
 )
 from marginalia.llm.tagged_response import (
-    parse_path,
-    parse_sections,
-    parse_tagged,
-    parse_tags,
     render_format_hint,
     render_sections_hint,
 )
@@ -46,7 +42,13 @@ from marginalia.pipelines.base import (
     PipelineContext,
     PipelineResult,
     SegmentResult,
-    TagSuggestion,
+)
+from marginalia.pipelines._long_index import (
+    build_retrieval_extra,
+    fallback_section,
+    parse_index_response,
+    render_sections_digest,
+    renumber_sections,
 )
 from marginalia.pipelines.image import downscale_for_vlm
 from marginalia.pipelines.registry import register_pipeline
@@ -54,8 +56,10 @@ from marginalia.storage.base import StorageBackend
 
 log = logging.getLogger(__name__)
 
-MAX_PAGES = 60                    # cap pages we feed the model
+MAX_PAGES = 60                    # legacy single-prompt page cap
 MAX_TOTAL_TEXT_BYTES = 80_000     # ≈ 25-30k tokens cap
+PDF_CHUNK_PAGES = 40              # long-doc page window for per-chunk indexing
+PDF_SECTION_DIGEST_BYTES = 60_000 # cap the aggregate summary prompt
 MIN_TEXT_PER_PAGE_FOR_TEXT_LAYER = 50  # if every page yields fewer chars,
                                        # the doc is probably scanned
 OCR_MAX_PAGES = 50                # cap how many pages we OCR per doc
@@ -99,6 +103,34 @@ facets are topic | form | time | source | language | extra.
 )
 
 
+PDF_CHUNK_SYSTEM = """You are Marginalia's PDF section indexer.
+
+You receive one page range from a larger PDF. Produce a local index for this
+range only. Use the original page numbers shown in the `### Page N` markers.
+
+`summary` briefly states what this range covers. `description` can add a
+short walk-through. `sections` is required and should cover every meaningful
+heading or logical chunk in the provided range. Keep key terms useful for
+later retrieval.
+
+""" + render_format_hint() + "\n" + render_sections_hint(
+    anchor_unit="pages", anchor_example="pages 401-425",
+)
+
+
+PDF_AGGREGATE_SYSTEM = """You are Marginalia's PDF aggregate indexer.
+
+You receive a precomputed section map for an entire PDF. Do NOT read or invent
+outside that map. Produce only file-level fields: summary, description, extra,
+entry_extra, catalog_path, and tags. Do not output a sections block; the caller
+will preserve the full section map separately in `description.sections`.
+
+Make `extra` retrieval-friendly: include important alternate names, recurring
+technical terms, and high-value page ranges from the section map.
+
+""" + render_format_hint()
+
+
 # Schema kept for legacy callers but no longer fed to the LLM.
 PDF_PIPELINE_SCHEMA: dict[str, Any] = {}
 
@@ -139,7 +171,7 @@ class PdfPipeline(Pipeline):
         storage: StorageBackend,
     ) -> PipelineResult:
         body = await self._read_bytes(storage, ctx.storage_key)
-        text_per_page = self._extract_text(body)
+        text_per_page = self._extract_text(body, max_pages=None)
 
         vlm_available = has_vision_profile()
 
@@ -147,6 +179,7 @@ class PdfPipeline(Pipeline):
         total_chars = sum(len(t) for t in text_per_page)
         ocr_used = False
         ocr_pages_done = 0
+        indexed_pages = total_pages
         if total_pages > 0 and total_chars / max(total_pages, 1) < MIN_TEXT_PER_PAGE_FOR_TEXT_LAYER:
             if not vlm_available:
                 # No VLM profile configured — can't OCR. Mark file as needing
@@ -169,6 +202,8 @@ class PdfPipeline(Pipeline):
                 )
             text_per_page = ocr_text_per_page
             total_chars = sum(len(t) for t in text_per_page)
+            # OCR is still capped because it bills one VLM call per page.
+            indexed_pages = min(total_pages, OCR_MAX_PAGES)
 
         # Extract embedded figures and describe them via vision profile.
         # Single-image failures degrade to placeholder text; the ingest
@@ -182,15 +217,75 @@ class PdfPipeline(Pipeline):
         else:
             images = extract_images(body)
             described = await describe_images(images) if images else []
-        body_text = render_pages_with_figures(text_per_page, described)
-        body_text = self._truncate(body_text)
 
+        if (not ocr_used) and self._needs_chunked_index(text_per_page, described):
+            return await self._run_chunked_index(
+                ctx=ctx,
+                text_per_page=text_per_page,
+                described=described,
+                total_pages=total_pages,
+                ocr_used=ocr_used,
+                ocr_pages_done=ocr_pages_done,
+            )
+
+        return await self._run_single_index(
+            ctx=ctx,
+            text_per_page=text_per_page[:indexed_pages],
+            described=described,
+            total_pages=total_pages,
+            indexed_pages=indexed_pages,
+            ocr_used=ocr_used,
+            ocr_pages_done=ocr_pages_done,
+        )
+
+    @staticmethod
+    async def _read_bytes(
+        storage: StorageBackend, key: str,
+    ) -> bytes:
+        buf = bytearray()
+        async for chunk in storage.get(key):
+            buf.extend(chunk)
+        return bytes(buf)
+
+    def _needs_chunked_index(
+        self,
+        text_per_page: list[str],
+        described: list["DescribedImage"],
+    ) -> bool:
+        if len(text_per_page) > MAX_PAGES:
+            return True
+        rendered = render_pages_with_figures(text_per_page, described)
+        return len(rendered) > MAX_TOTAL_TEXT_BYTES
+
+    async def _run_single_index(
+        self,
+        *,
+        ctx: PipelineContext,
+        text_per_page: list[str],
+        described: list["DescribedImage"],
+        total_pages: int,
+        indexed_pages: int,
+        ocr_used: bool,
+        ocr_pages_done: int,
+    ) -> PipelineResult:
+        body_text_raw = render_pages_with_figures(text_per_page, described)
+        body_text = self._truncate(body_text_raw)
+        text_truncated = len(body_text_raw) > MAX_TOTAL_TEXT_BYTES
+        coverage = self._coverage(
+            total_pages=total_pages,
+            indexed_pages=indexed_pages,
+            chunk_count=1,
+            text_truncated=text_truncated,
+            ocr_used=ocr_used,
+            ocr_pages_done=ocr_pages_done,
+        )
         user_payload = {
             "folder_path": ctx.folder_path,
             "sibling_names": ctx.sibling_names,
             "catalog_sketch": ctx.catalog_sketch,
             "tag_vocabulary": ctx.tag_vocabulary,
             "page_count": total_pages,
+            "indexed_pages": indexed_pages,
             "figure_count": len(described),
             "ocr_used": ocr_used,
             "ocr_pages_done": ocr_pages_done if ocr_used else 0,
@@ -218,50 +313,243 @@ class PdfPipeline(Pipeline):
             temperature=0.2,
             cache_breakpoints=[0],
         ))
-
-        tagged = parse_tagged(resp.text or "")
-        summary = tagged.get("summary", "").strip()
-        if not summary:
+        fields = parse_index_response(resp, anchor_unit="pages")
+        if not fields.summary:
             log.warning(
                 "pdf pipeline: no <summary> in response. text=%r",
                 (resp.text or "")[:300],
             )
             raise ValueError("pdf pipeline produced empty summary")
-
-        sections = parse_sections(
-            tagged.get("sections", ""), anchor_unit="pages",
+        sections = fields.sections or [
+            fallback_section(
+                title=f"Pages 1-{max(indexed_pages, 1)}",
+                anchor_unit="pages",
+                anchor_value=f"1-{max(indexed_pages, 1)}",
+                summary=fields.summary,
+            )
+        ]
+        return self._result_from_fields(
+            fields=fields,
+            sections=renumber_sections(sections),
+            coverage=coverage,
+            ocr_used=ocr_used,
+            ocr_pages_done=ocr_pages_done,
         )
-        description: dict[str, Any] = {"sections": sections}
-        description_text = tagged.get("description", "").strip()
-        if description_text:
-            description["text"] = description_text
+
+    async def _run_chunked_index(
+        self,
+        *,
+        ctx: PipelineContext,
+        text_per_page: list[str],
+        described: list["DescribedImage"],
+        total_pages: int,
+        ocr_used: bool,
+        ocr_pages_done: int,
+    ) -> PipelineResult:
+        client = get_chat_client("ingest")
+        all_sections: list[dict[str, Any]] = []
+        chunk_summaries: list[dict[str, Any]] = []
+        truncated_chunks = 0
+
+        for chunk_no, (start, end, rendered, text_truncated) in enumerate(
+            self._iter_prompt_chunks(text_per_page, described),
+            start=1,
+        ):
+            if text_truncated:
+                truncated_chunks += 1
+            user_payload = {
+                "folder_path": ctx.folder_path,
+                "sibling_names": ctx.sibling_names,
+                "catalog_sketch": ctx.catalog_sketch,
+                "tag_vocabulary": ctx.tag_vocabulary,
+                "page_count": total_pages,
+                "page_start": start,
+                "page_end": end,
+                "chunk_no": chunk_no,
+            }
+            stable_prefix = (
+                "Index this page range from a larger PDF. Use original page "
+                "numbers from the page markers.\n\n"
+                + render_format_hint() + "\n"
+                + render_sections_hint(
+                    anchor_unit="pages",
+                    anchor_example=f"pages {start}-{end}",
+                )
+            )
+            file_content = (
+                f"<context>\n{json.dumps(user_payload, ensure_ascii=False)}\n</context>\n\n"
+                f"<document>\n{rendered}\n</document>"
+            )
+            resp = await client.complete(ChatRequest(
+                system=PDF_CHUNK_SYSTEM,
+                messages=[ChatMessage(role="user", content=[
+                    TextBlock(text=stable_prefix),
+                    TextBlock(text=file_content),
+                ])],
+                max_tokens=min(8192, max(2048, len(rendered) // 8)),
+                temperature=0.2,
+                cache_breakpoints=[0],
+            ))
+            fields = parse_index_response(resp, anchor_unit="pages")
+            summary = fields.summary or fields.description_text or f"Pages {start}-{end}"
+            sections = fields.sections or [
+                fallback_section(
+                    title=f"Pages {start}-{end}",
+                    anchor_unit="pages",
+                    anchor_value=f"{start}-{end}",
+                    summary=summary,
+                )
+            ]
+            all_sections.extend(sections)
+            chunk_summaries.append({
+                "page_start": start,
+                "page_end": end,
+                "summary": summary,
+                "description": fields.description_text or "",
+            })
+
+        sections = renumber_sections(all_sections)
+        coverage = self._coverage(
+            total_pages=total_pages,
+            indexed_pages=total_pages,
+            chunk_count=len(chunk_summaries),
+            text_truncated=truncated_chunks > 0,
+            ocr_used=ocr_used,
+            ocr_pages_done=ocr_pages_done,
+        )
+        if truncated_chunks:
+            coverage["truncated_chunks"] = truncated_chunks
+
+        digest = render_sections_digest(
+            sections, max_chars=PDF_SECTION_DIGEST_BYTES,
+        )
+        aggregate_payload = {
+            "folder_path": ctx.folder_path,
+            "sibling_names": ctx.sibling_names,
+            "catalog_sketch": ctx.catalog_sketch,
+            "tag_vocabulary": ctx.tag_vocabulary,
+            "coverage": coverage,
+            "chunk_summaries": chunk_summaries,
+        }
+        aggregate_content = (
+            f"<context>\n{json.dumps(aggregate_payload, ensure_ascii=False)}\n</context>\n\n"
+            f"<section_map>\n{digest}\n</section_map>"
+        )
+        resp = await client.complete(ChatRequest(
+            system=PDF_AGGREGATE_SYSTEM,
+            messages=[ChatMessage(role="user", content=[
+                TextBlock(text=(
+                    "Summarize the full PDF from this section map. "
+                    "The full `description.sections` already exists; "
+                    "produce file-level recall fields only."
+                )),
+                TextBlock(text=aggregate_content),
+            ])],
+            max_tokens=8192,
+            temperature=0.2,
+            cache_breakpoints=[0],
+        ))
+        fields = parse_index_response(resp, anchor_unit="pages")
+        if not fields.summary:
+            first = chunk_summaries[0]["summary"] if chunk_summaries else "PDF"
+            fields.summary = (
+                f"Long PDF indexed into {len(chunk_summaries)} page ranges. "
+                f"First range: {first}"
+            )
+        return self._result_from_fields(
+            fields=fields,
+            sections=sections,
+            coverage=coverage,
+            ocr_used=ocr_used,
+            ocr_pages_done=ocr_pages_done,
+        )
+
+    def _iter_prompt_chunks(
+        self,
+        text_per_page: list[str],
+        described: list["DescribedImage"],
+    ):
+        start = 0
+        n_pages = len(text_per_page)
+        while start < n_pages:
+            end = min(start + PDF_CHUNK_PAGES, n_pages)
+            rendered = render_pages_with_figures(
+                text_per_page[start:end],
+                described,
+                start_page=start + 1,
+            )
+            while len(rendered) > MAX_TOTAL_TEXT_BYTES and end - start > 1:
+                end = start + max(1, (end - start) // 2)
+                rendered = render_pages_with_figures(
+                    text_per_page[start:end],
+                    described,
+                    start_page=start + 1,
+                )
+            text_truncated = False
+            if len(rendered) > MAX_TOTAL_TEXT_BYTES:
+                rendered = self._truncate(rendered)
+                text_truncated = True
+            yield start + 1, end, rendered, text_truncated
+            start = end
+
+    def _result_from_fields(
+        self,
+        *,
+        fields,
+        sections: list[dict[str, Any]],
+        coverage: dict[str, Any],
+        ocr_used: bool,
+        ocr_pages_done: int,
+    ) -> PipelineResult:
+        description: dict[str, Any] = {
+            "sections": sections,
+            "coverage": coverage,
+        }
+        if fields.description_text:
+            description["text"] = fields.description_text
         if ocr_used:
             description["ocr"] = {
                 "engine": "vlm",
-                "pages_total": total_pages,
+                "pages_total": coverage.get("total_pages"),
                 "pages_processed": ocr_pages_done,
             }
         return PipelineResult(
-            summary=summary,
+            summary=fields.summary,
             description=description,
             kind="text",
-            extra=tagged.get("extra", "").strip() or None,
-            entry_extra=tagged.get("entry_extra", "").strip() or None,
-            entry_catalog_path=parse_path(tagged.get("catalog_path", "")) or None,
-            entry_tags=[
-                TagSuggestion(name=t["name"], facet=t["facet"])
-                for t in parse_tags(tagged.get("tags", ""))
-            ],
+            extra=build_retrieval_extra(
+                sections=sections,
+                coverage=coverage,
+                base_extra=fields.extra,
+            ),
+            entry_extra=fields.entry_extra,
+            entry_catalog_path=fields.catalog_path,
+            entry_tags=fields.tags,
         )
 
     @staticmethod
-    async def _read_bytes(
-        storage: StorageBackend, key: str,
-    ) -> bytes:
-        buf = bytearray()
-        async for chunk in storage.get(key):
-            buf.extend(chunk)
-        return bytes(buf)
+    def _coverage(
+        *,
+        total_pages: int,
+        indexed_pages: int,
+        chunk_count: int,
+        text_truncated: bool,
+        ocr_used: bool,
+        ocr_pages_done: int,
+    ) -> dict[str, Any]:
+        coverage: dict[str, Any] = {
+            "unit": "pages",
+            "total_pages": total_pages,
+            "indexed_pages": indexed_pages,
+            "indexed_partial": indexed_pages < total_pages,
+            "chunked": chunk_count > 1,
+            "chunk_count": chunk_count,
+            "text_truncated": text_truncated,
+        }
+        if ocr_used:
+            coverage["ocr_used"] = True
+            coverage["ocr_pages_done"] = ocr_pages_done
+        return coverage
 
     # ---- read_segment -----------------------------------------------------
 
@@ -435,7 +723,7 @@ class PdfPipeline(Pipeline):
         reading instead of the opaque "empty result".
         """
         try:
-            pages = self._extract_text(pdf_bytes)
+            pages = self._extract_text(pdf_bytes, max_pages=None)
         except Exception as exc:  # noqa: BLE001
             return SegmentResult(error=f"PDF parse failed: {exc}")
         total_pages = len(pages)
@@ -539,11 +827,17 @@ class PdfPipeline(Pipeline):
         )
 
     @staticmethod
-    def _extract_text(pdf_bytes: bytes) -> list[str]:
-        """Return text per page, capped at MAX_PAGES."""
+    def _extract_text(
+        pdf_bytes: bytes, *, max_pages: int | None = MAX_PAGES,
+    ) -> list[str]:
+        """Return text per page.
+
+        `max_pages` is only for prompt construction. Readback passes
+        `None` so `read_files(page_start=900)` can access late pages.
+        """
         from pypdf import PdfReader  # imported lazily so the package is optional
         reader = PdfReader(io.BytesIO(pdf_bytes))
-        pages = reader.pages[:MAX_PAGES]
+        pages = reader.pages if max_pages is None else reader.pages[:max_pages]
         out: list[str] = []
         for p in pages:
             try:
@@ -860,6 +1154,8 @@ async def _describe_one(client, img: ExtractedImage) -> DescribedImage:
 def render_pages_with_figures(
     text_per_page: list[str],
     described: list[DescribedImage],
+    *,
+    start_page: int = 1,
 ) -> str:
     """Build the prompt body, with `[Figure X.Y] ...` lines appended to
     each page's text block."""
@@ -868,7 +1164,7 @@ def render_pages_with_figures(
         by_page.setdefault(d.page_num, []).append(d)
 
     chunks: list[str] = []
-    for i, t in enumerate(text_per_page, start=1):
+    for i, t in enumerate(text_per_page, start=start_page):
         body = (t or "").strip() or "(no text on this page)"
         figs = by_page.get(i, [])
         if figs:

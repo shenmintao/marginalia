@@ -153,6 +153,7 @@ EXECUTE_PHASE_PROMPT = """你是 Marginalia 的在线调查员（🔍 Investigat
 
 工具使用规则：
 - 接到一个新问题，先 search_journal 看自己之前是否走过类似路径。
+- 多关键词查 journal 时，先尝试 `search_journal(tags=[...])` 用标签 OR 召回；结果不足再 fallback 到 `search_journal(text=...)`。
 - 然后用 list_folder 浏览结构，对感兴趣的 entry
   通过更深的工具读取。
 - 工具调用是有预算的，每轮末尾框架会注入预算 tail，按节制调用。
@@ -211,6 +212,7 @@ catalog/views/tags 列表只是索引概览，不是数据本身——回答"知
 # 工具规划的常见路径（仅供参考）
 
 - 查"以前是不是查过类似的" → `search_journal`
+- 多关键词查 journal → 先 `search_journal(tags=[...])`，结果不足再 fallback 到 `search_journal(text=...)`
 - 按文件名/摘要关键字找文件 → `search_metadata(text=...)`（已覆盖 display_name/summary/extra）
 - 知道文件夹路径 → `list_folder(path='Papers/2024')` 一次拿到该层 folders+entries
 - 浏览根目录 → `list_folder()`（不带参数）

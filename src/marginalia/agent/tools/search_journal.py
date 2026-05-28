@@ -46,7 +46,7 @@ SCHEMA: dict[str, Any] = {
         "tags": {
             "type": "array",
             "items": {"type": "string"},
-            "description": "Match notes carrying ALL of these tags.",
+            "description": "Match notes carrying ANY of these tags (OR).",
         },
         "kinds": {
             "type": "array",
@@ -85,8 +85,8 @@ SCHEMA: dict[str, Any] = {
             "type": "integer",
             "minimum": 0,
             "description": (
-                "Skip first N matches that satisfy ALL filters (text + "
-                "entry_id + tags + kinds + conversation + since/super). "
+                "Skip first N matches that satisfy all filters (text + "
+                "entry_id + any tag + kinds + conversation + since/super). "
                 "Default 0. Use with `next_offset` to page."
             ),
         },
@@ -156,7 +156,7 @@ async def search_journal(
                 continue
             if tags:
                 note_tags = set(j.tags or [])
-                if not all(t in note_tags for t in tags):
+                if not note_tags.intersection(tags):
                     continue
             collected.append(j)
             if len(collected) >= needed:

@@ -27,10 +27,6 @@ from marginalia.llm import (
     get_chat_client,
 )
 from marginalia.llm.tagged_response import (
-    parse_path,
-    parse_sections,
-    parse_tagged,
-    parse_tags,
     render_format_hint,
     render_sections_hint,
 )
@@ -39,20 +35,30 @@ from marginalia.pipelines.base import (
     PipelineContext,
     PipelineResult,
     SegmentResult,
-    TagSuggestion,
+)
+from marginalia.pipelines._long_index import (
+    build_retrieval_extra,
+    fallback_section,
+    parse_index_response,
+    render_sections_digest,
+    renumber_sections,
 )
 from marginalia.pipelines.registry import register_pipeline
 from marginalia.storage.base import StorageBackend
 
 log = logging.getLogger(__name__)
 
-# Truncate very long files; we still want a holistic summary, but we keep the
-# prompt bounded. 60 KB ≈ 15-20K tokens depending on language.
+# Single LLM prompts stay bounded, but ingest can read substantially more and
+# index it in chunks before the aggregate summary call.
 MAX_TEXT_BYTES = 60_000
+MAX_TEXT_INDEX_BYTES = 8 * 1024 * 1024
+TEXT_CHUNK_CHARS = 50_000
+TEXT_SECTION_DIGEST_BYTES = 60_000
 
 # read_segment limits — we read more than the LLM-indexing path because the
 # agent might want late chunks of a long file.
-READ_SEGMENT_BYTES_CAP = 4 * 1024 * 1024  # 4 MB
+READ_SEGMENT_BYTES_CAP = 32 * 1024 * 1024  # 32 MB
+READ_SEGMENT_DEEP_BYTES_CAP = 128 * 1024 * 1024  # 128 MB
 DEFAULT_MAX_CHARS = 8000
 
 TEXT_PIPELINE_SYSTEM = """You are Marginalia's text-document indexer.
@@ -82,6 +88,32 @@ language | extra.
 )
 
 
+TEXT_CHUNK_SYSTEM = """You are Marginalia's text section indexer.
+
+You receive one line range from a larger text document. Produce a local index
+for this range only. Use line-range anchors from the provided context, not
+byte offsets. `sections` is required and should cover every meaningful heading
+or logical chunk in this range.
+
+""" + render_format_hint() + "\n" + render_sections_hint(
+    anchor_unit="lines", anchor_example="lines 1200-1450",
+)
+
+
+TEXT_AGGREGATE_SYSTEM = """You are Marginalia's aggregate text indexer.
+
+You receive a precomputed section map for an entire text document. Do NOT read
+or invent outside that map. Produce only file-level fields: summary,
+description, extra, entry_extra, catalog_path, and tags. Do not output a
+sections block; the caller will preserve the full section map separately in
+`description.sections`.
+
+Make `extra` retrieval-friendly: include important alternate names, recurring
+technical terms, and high-value line ranges from the section map.
+
+""" + render_format_hint()
+
+
 # Schema kept for legacy callers but no longer fed to the LLM.
 TEXT_PIPELINE_SCHEMA: dict[str, Any] = {}
 
@@ -100,74 +132,256 @@ class TextPipeline(Pipeline):
         ctx: PipelineContext,
         storage: StorageBackend,
     ) -> PipelineResult:
-        body = await self._read_text(storage, ctx.storage_key)
+        body, indexed_bytes, read_truncated = await self._read_text_with_meta(
+            storage, ctx.storage_key, cap=MAX_TEXT_INDEX_BYTES,
+        )
+        if len(body) > MAX_TEXT_BYTES:
+            return await self._run_chunked_index(
+                ctx=ctx,
+                body=body,
+                total_bytes=ctx.size_bytes,
+                indexed_bytes=indexed_bytes,
+                read_truncated=read_truncated,
+            )
+        return await self._run_single_index(
+            ctx=ctx,
+            body=body,
+            total_bytes=ctx.size_bytes,
+            indexed_bytes=indexed_bytes,
+            read_truncated=read_truncated,
+        )
 
+    async def _run_single_index(
+        self,
+        *,
+        ctx: PipelineContext,
+        body: str,
+        total_bytes: int,
+        indexed_bytes: int,
+        read_truncated: bool,
+    ) -> PipelineResult:
         user_payload = {
             "folder_path": ctx.folder_path,
             "sibling_names": ctx.sibling_names,
             "catalog_sketch": ctx.catalog_sketch,
             "tag_vocabulary": ctx.tag_vocabulary,
-            "document": body,
+            "indexed_bytes": indexed_bytes,
+            "total_bytes": total_bytes,
         }
         stable_prefix = (
             "Index the document below. Hints are advisory — the document's "
-            "actual content takes precedence.\n\n"
+            "actual content takes precedence. Prefer line-range anchors "
+            "when possible.\n\n"
             + render_format_hint() + "\n"
             + render_sections_hint(
-                anchor_unit="heading or lines",
-                anchor_example="1.2.3 or lines 100-160",
+                anchor_unit="lines",
+                anchor_example="lines 100-160",
             )
         )
         file_content = (
-            f"<context>\n{json.dumps({k: v for k, v in user_payload.items() if k != 'document'}, ensure_ascii=False)}\n</context>\n\n"
+            f"<context>\n{json.dumps(user_payload, ensure_ascii=False)}\n</context>\n\n"
             f"<document>\n{body}\n</document>"
         )
 
         client = get_chat_client("ingest")
-        # Determine an output token ceiling based on document size — small
-        # docs need a small ceiling, larger docs proportionally more.
-        max_out = min(8192, max(2048, len(body) // 8))
-
         resp = await client.complete(ChatRequest(
             system=TEXT_PIPELINE_SYSTEM,
             messages=[ChatMessage(role="user", content=[
                 TextBlock(text=stable_prefix),
                 TextBlock(text=file_content),
             ])],
-            max_tokens=max_out,
+            max_tokens=min(8192, max(2048, len(body) // 8)),
             temperature=0.2,
             cache_breakpoints=[0],
         ))
-
-        tagged = parse_tagged(resp.text or "")
-        summary = tagged.get("summary", "").strip()
-        if not summary:
+        fields = parse_index_response(resp, anchor_unit="lines")
+        if not fields.summary:
             log.warning(
                 "text pipeline: no <summary> in response. text=%r",
                 (resp.text or "")[:300],
             )
             raise ValueError("text pipeline produced empty summary")
-
-        sections = parse_sections(
-            tagged.get("sections", ""), anchor_unit="heading",
+        total_lines = max(1, len(body.splitlines()))
+        sections = fields.sections or [
+            fallback_section(
+                title="Document",
+                anchor_unit="lines",
+                anchor_value=f"1-{total_lines}",
+                summary=fields.summary,
+            )
+        ]
+        coverage = self._coverage(
+            total_bytes=total_bytes,
+            indexed_bytes=indexed_bytes,
+            chunk_count=1,
+            read_truncated=read_truncated,
         )
-        description: dict[str, Any] = {"sections": sections}
-        description_text = tagged.get("description", "").strip()
-        if description_text:
-            description["text"] = description_text
+        return self._result_from_fields(
+            fields=fields,
+            sections=renumber_sections(sections),
+            coverage=coverage,
+        )
 
+    async def _run_chunked_index(
+        self,
+        *,
+        ctx: PipelineContext,
+        body: str,
+        total_bytes: int,
+        indexed_bytes: int,
+        read_truncated: bool,
+    ) -> PipelineResult:
+        client = get_chat_client("ingest")
+        sections: list[dict[str, Any]] = []
+        chunk_summaries: list[dict[str, Any]] = []
+        for chunk_no, (line_start, line_end, text) in enumerate(
+            _iter_line_chunks(body, max_chars=TEXT_CHUNK_CHARS),
+            start=1,
+        ):
+            payload = {
+                "folder_path": ctx.folder_path,
+                "sibling_names": ctx.sibling_names,
+                "catalog_sketch": ctx.catalog_sketch,
+                "tag_vocabulary": ctx.tag_vocabulary,
+                "line_start": line_start,
+                "line_end": line_end,
+                "chunk_no": chunk_no,
+                "indexed_bytes": indexed_bytes,
+                "total_bytes": total_bytes,
+            }
+            stable_prefix = (
+                "Index this line range from a larger text document. Use "
+                "line-range anchors.\n\n"
+                + render_format_hint() + "\n"
+                + render_sections_hint(
+                    anchor_unit="lines",
+                    anchor_example=f"lines {line_start}-{line_end}",
+                )
+            )
+            file_content = (
+                f"<context>\n{json.dumps(payload, ensure_ascii=False)}\n</context>\n\n"
+                f"<document>\n{text}\n</document>"
+            )
+            resp = await client.complete(ChatRequest(
+                system=TEXT_CHUNK_SYSTEM,
+                messages=[ChatMessage(role="user", content=[
+                    TextBlock(text=stable_prefix),
+                    TextBlock(text=file_content),
+                ])],
+                max_tokens=min(8192, max(2048, len(text) // 8)),
+                temperature=0.2,
+                cache_breakpoints=[0],
+            ))
+            fields = parse_index_response(resp, anchor_unit="lines")
+            summary = fields.summary or fields.description_text or f"Lines {line_start}-{line_end}"
+            local_sections = fields.sections or [
+                fallback_section(
+                    title=f"Lines {line_start}-{line_end}",
+                    anchor_unit="lines",
+                    anchor_value=f"{line_start}-{line_end}",
+                    summary=summary,
+                )
+            ]
+            sections.extend(local_sections)
+            chunk_summaries.append({
+                "line_start": line_start,
+                "line_end": line_end,
+                "summary": summary,
+                "description": fields.description_text or "",
+            })
+
+        sections = renumber_sections(sections)
+        coverage = self._coverage(
+            total_bytes=total_bytes,
+            indexed_bytes=indexed_bytes,
+            chunk_count=len(chunk_summaries),
+            read_truncated=read_truncated,
+        )
+        aggregate_payload = {
+            "folder_path": ctx.folder_path,
+            "sibling_names": ctx.sibling_names,
+            "catalog_sketch": ctx.catalog_sketch,
+            "tag_vocabulary": ctx.tag_vocabulary,
+            "coverage": coverage,
+            "chunk_summaries": chunk_summaries,
+        }
+        aggregate_content = (
+            f"<context>\n{json.dumps(aggregate_payload, ensure_ascii=False)}\n</context>\n\n"
+            f"<section_map>\n{render_sections_digest(sections, max_chars=TEXT_SECTION_DIGEST_BYTES)}\n</section_map>"
+        )
+        resp = await client.complete(ChatRequest(
+            system=TEXT_AGGREGATE_SYSTEM,
+            messages=[ChatMessage(role="user", content=[
+                TextBlock(text=(
+                    "Summarize the full text document from this section map. "
+                    "The full `description.sections` already exists; produce "
+                    "file-level recall fields only."
+                )),
+                TextBlock(text=aggregate_content),
+            ])],
+            max_tokens=8192,
+            temperature=0.2,
+            cache_breakpoints=[0],
+        ))
+        fields = parse_index_response(resp, anchor_unit="lines")
+        if not fields.summary:
+            first = chunk_summaries[0]["summary"] if chunk_summaries else "text document"
+            fields.summary = (
+                f"Long text indexed into {len(chunk_summaries)} line ranges. "
+                f"First range: {first}"
+            )
+        return self._result_from_fields(
+            fields=fields,
+            sections=sections,
+            coverage=coverage,
+        )
+
+    def _result_from_fields(
+        self,
+        *,
+        fields,
+        sections: list[dict[str, Any]],
+        coverage: dict[str, Any],
+    ) -> PipelineResult:
+        description: dict[str, Any] = {
+            "sections": sections,
+            "coverage": coverage,
+        }
+        if fields.description_text:
+            description["text"] = fields.description_text
         return PipelineResult(
-            summary=summary,
+            summary=fields.summary,
             description=description,
             kind="text",
-            extra=tagged.get("extra", "").strip() or None,
-            entry_extra=tagged.get("entry_extra", "").strip() or None,
-            entry_catalog_path=parse_path(tagged.get("catalog_path", "")) or None,
-            entry_tags=[
-                TagSuggestion(name=t["name"], facet=t["facet"])
-                for t in parse_tags(tagged.get("tags", ""))
-            ],
+            extra=build_retrieval_extra(
+                sections=sections,
+                coverage=coverage,
+                base_extra=fields.extra,
+            ),
+            entry_extra=fields.entry_extra,
+            entry_catalog_path=fields.catalog_path,
+            entry_tags=fields.tags,
         )
+
+    @staticmethod
+    def _coverage(
+        *,
+        total_bytes: int,
+        indexed_bytes: int,
+        chunk_count: int,
+        read_truncated: bool,
+    ) -> dict[str, Any]:
+        return {
+            "unit": "bytes",
+            "total_units": total_bytes,
+            "indexed_units": indexed_bytes,
+            "total_bytes": total_bytes,
+            "indexed_bytes": indexed_bytes,
+            "indexed_partial": read_truncated or indexed_bytes < total_bytes,
+            "chunked": chunk_count > 1,
+            "chunk_count": chunk_count,
+            "text_truncated": read_truncated,
+        }
 
     # ---- read_segment -----------------------------------------------------
 
@@ -179,7 +393,9 @@ class TextPipeline(Pipeline):
         storage: StorageBackend,
     ) -> SegmentResult:
         body = await self._read_text(
-            storage, file_row.storage_key, cap=READ_SEGMENT_BYTES_CAP,
+            storage,
+            file_row.storage_key,
+            cap=_read_cap_for_args(args, file_row=file_row),
         )
         return self._slice(
             body=body, args=args, file_row=file_row,
@@ -314,16 +530,85 @@ class TextPipeline(Pipeline):
     async def _read_text(
         storage: StorageBackend, key: str, cap: int = MAX_TEXT_BYTES,
     ) -> str:
+        text, _n, _truncated = await TextPipeline._read_text_with_meta(
+            storage, key, cap=cap,
+        )
+        return text
+
+    @staticmethod
+    async def _read_text_with_meta(
+        storage: StorageBackend, key: str, cap: int,
+    ) -> tuple[str, int, bool]:
         buf = bytearray()
+        truncated = False
         async for chunk in storage.get(key):
             buf.extend(chunk)
             if len(buf) > cap:
                 buf = bytearray(buf[:cap])
+                truncated = True
                 break
-        return _decode_text(bytes(buf))
+        return _decode_text(bytes(buf)), len(buf), truncated
 
 
 # ---- read_segment helpers ----------------------------------------------------
+
+def _iter_line_chunks(
+    body: str, *, max_chars: int,
+) -> list[tuple[int, int, str]]:
+    lines = body.splitlines()
+    if not lines:
+        return [(1, 1, "")]
+    chunks: list[tuple[int, int, str]] = []
+    cur: list[str] = []
+    cur_start = 1
+    cur_len = 0
+    for idx, line in enumerate(lines, start=1):
+        line_cost = len(line) + 1
+        if cur and cur_len + line_cost > max_chars:
+            chunks.append((cur_start, idx - 1, "\n".join(cur)))
+            cur = []
+            cur_start = idx
+            cur_len = 0
+        cur.append(line)
+        cur_len += line_cost
+    if cur:
+        chunks.append((cur_start, cur_start + len(cur) - 1, "\n".join(cur)))
+    return chunks
+
+
+def _read_cap_for_args(args: dict[str, Any], *, file_row: Any) -> int:
+    cap = READ_SEGMENT_BYTES_CAP
+    wants_deep_read = any(
+        args.get(k) for k in ("section_id", "heading", "line_start", "line_end", "pattern")
+    )
+    if wants_deep_read:
+        cap = READ_SEGMENT_DEEP_BYTES_CAP
+
+    try:
+        offset = max(0, int(args.get("offset") or 0))
+    except (TypeError, ValueError):
+        offset = 0
+    try:
+        max_chars = int(args.get("max_chars") or DEFAULT_MAX_CHARS)
+    except (TypeError, ValueError):
+        max_chars = DEFAULT_MAX_CHARS
+    if max_chars <= 0:
+        max_chars = DEFAULT_MAX_CHARS
+    if offset:
+        # `offset` is a decoded character offset, while storage caps are bytes.
+        # UTF-8 can take up to four bytes per character, so over-read enough for
+        # late chunks in non-ASCII long text.
+        cap = max(cap, (offset + max_chars + 4096) * 4)
+
+    raw_size = getattr(file_row, "size_bytes", None)
+    try:
+        size = int(raw_size)
+    except (TypeError, ValueError):
+        size = 0
+    if size > 0:
+        cap = min(cap, size)
+    return cap
+
 
 def _sections_from_file(file_row: Any) -> list[dict] | None:
     desc = getattr(file_row, "description", None)
