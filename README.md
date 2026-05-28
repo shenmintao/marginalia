@@ -212,6 +212,11 @@ docker compose up -d
 
 Current tests cover upload, ingest, agent runtime, tool execution, export, task scheduling, PDF/DOCX/image/table/archive pipelines, relation discovery, lifecycle behavior, and CLI flows.
 
+## Community links
+This open-source project is linked with and recognized by the LINUX DO community:
+
+LINUX DO: [https://linux.do/](https://linux.do/)
+
 ## License
 
 AGPL-3.0-or-later. See [LICENSE](LICENSE).
