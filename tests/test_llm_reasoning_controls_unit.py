@@ -247,6 +247,43 @@ async def test_siliconflow_disable_thinking_uses_enable_thinking_false() -> None
 
 
 @pytest.mark.asyncio
+async def test_generic_qwen_disable_uses_enable_thinking_false() -> None:
+    seen = await _capture_openai_kwargs(
+        base_url="https://example.invalid/v1",
+        model="qwen-vl-plus",
+        request=ChatRequest(
+            system=None,
+            messages=[ChatMessage(role="user", content="hello")],
+            max_tokens=32,
+            extra_body={"thinking": {"type": "disabled"}},
+        ),
+    )
+
+    assert "reasoning_effort" not in seen
+    assert seen["extra_body"] == {"enable_thinking": False}
+
+
+@pytest.mark.asyncio
+async def test_generic_qwen_effort_uses_thinking_budget() -> None:
+    seen = await _capture_openai_kwargs(
+        base_url="https://example.invalid/v1",
+        model="qwen3-vl-plus",
+        request=ChatRequest(
+            system=None,
+            messages=[ChatMessage(role="user", content="hello")],
+            max_tokens=32,
+            reasoning_effort="medium",
+        ),
+    )
+
+    assert "reasoning_effort" not in seen
+    assert seen["extra_body"] == {
+        "enable_thinking": True,
+        "thinking_budget": 2048,
+    }
+
+
+@pytest.mark.asyncio
 async def test_openrouter_kimi_maps_thinking_and_gateway_reasoning() -> None:
     seen = await _capture_openai_kwargs(
         base_url="https://openrouter.ai/api/v1",

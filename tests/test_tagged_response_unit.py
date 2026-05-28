@@ -34,6 +34,27 @@ def test_repeated_tag_last_wins() -> None:
     print("[2] repeated tag — last occurrence wins")
 
 
+def test_think_blocks_are_ignored() -> None:
+    text = (
+        "<think>\n"
+        "<summary>draft from hidden reasoning</summary>\n"
+        "</think>\n"
+        "<summary>final visible answer</summary>"
+    )
+    assert parse_tagged(text)["summary"] == "final visible answer"
+    print("[3] leaked <think> block ignored")
+
+
+def test_orphan_think_close_drops_prelude() -> None:
+    text = (
+        "draft notes that should not be indexed\n"
+        "</think>\n"
+        "<summary>final after orphan close</summary>"
+    )
+    assert parse_tagged(text)["summary"] == "final after orphan close"
+    print("[4] orphan </think> prelude ignored")
+
+
 def test_truncated_summary_recovered() -> None:
     text = (
         "<summary>本文件为劳动人事争议仲裁申请书，申请人要求被申请人支付绩效"
@@ -66,6 +87,8 @@ def test_no_tags_returns_empty() -> None:
 def main() -> None:
     test_well_formed_tags()
     test_repeated_tag_last_wins()
+    test_think_blocks_are_ignored()
+    test_orphan_think_close_drops_prelude()
     test_truncated_summary_recovered()
     test_truncated_after_complete_blocks()
     test_no_tags_returns_empty()

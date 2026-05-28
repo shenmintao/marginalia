@@ -46,6 +46,27 @@ _TAG_RE = re.compile(
 )
 _OPEN_TAG_RE = re.compile(r"<\s*(?P<name>[a-z_][a-z0-9_]*)\s*>", re.IGNORECASE)
 _FENCE_RE = re.compile(r"^```[a-zA-Z0-9_-]*\n|\n```$", re.MULTILINE)
+_THINK_RE = re.compile(r"(?is)<think>.*?</think>")
+
+
+def strip_reasoning_text(text: str | None) -> str:
+    """Remove leaked reasoning wrappers from provider content.
+
+    Some thinking models return reasoning inside `content` instead of a
+    separate `reasoning_content` field, or leak only a trailing `</think>`
+    marker before the final answer. Strip that material before callers parse
+    tags or persist a VLM answer.
+    """
+    clean = text or ""
+    clean = _THINK_RE.sub("", clean).strip()
+    marker = "</think>"
+    idx = clean.lower().rfind(marker)
+    if idx >= 0:
+        clean = clean[idx + len(marker):].strip()
+    start = clean.lower().find("<think>")
+    if start >= 0:
+        clean = clean[:start].strip()
+    return clean
 
 
 def parse_tagged(text: str) -> dict[str, str]:
@@ -59,7 +80,7 @@ def parse_tagged(text: str) -> dict[str, str]:
     body from open-tag-to-EOF. We'd rather use the partial summary the
     model produced than fail the whole ingest and re-bill the run.
     """
-    text = text or ""
+    text = strip_reasoning_text(text)
     out: dict[str, str] = {}
     last_end = 0
     for m in _TAG_RE.finditer(text):

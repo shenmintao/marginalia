@@ -83,11 +83,15 @@ PNG_BYTES = _make_1x1_png()
 
 class _FakeVision:
     profile_name = "vision"
+    provider = "openai-compatible"
     model = "fake-vision"
 
     async def complete(self, request: ChatRequest) -> ChatResponse:
         CALL_LOG.append(request)
-        tagged = """<summary>
+        tagged = """<think>
+<summary>draft from leaked reasoning</summary>
+</think>
+<summary>
 A 1x1 test image used to exercise the vision path.
 </summary>
 <description>
@@ -196,6 +200,7 @@ async def main():
     # ---- 1. The vision client was actually invoked ------------------------
     assert len(CALL_LOG) == 1, f"expected 1 vision call, got {len(CALL_LOG)}"
     req = CALL_LOG[0]
+    assert req.extra_body == {"thinking": {"type": "disabled"}}
 
     # ---- 2. Inspect the user message blocks ------------------------------
     user_msg = req.messages[0]

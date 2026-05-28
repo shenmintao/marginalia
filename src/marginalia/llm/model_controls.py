@@ -322,8 +322,14 @@ def _apply_generic_controls(
 ) -> None:
     thinking_type = _resolved_thinking_type(thinking, request.reasoning_effort)
     model_has_native_thinking = _is_kimi_thinking_model(model) or _is_mimo_thinking_model(model)
+    model_l = model.lower()
 
-    if thinking is not None:
+    if _looks_qwen(model_l) and thinking_type in ("disabled", "enabled", "adaptive", "auto"):
+        extra_body["enable_thinking"] = thinking_type != "disabled"
+        effort = _normalize_effort(request.reasoning_effort)
+        if extra_body["enable_thinking"] and effort:
+            extra_body.setdefault("thinking_budget", _qwen_thinking_budget(effort))
+    elif thinking is not None:
         extra_body["thinking"] = thinking
     elif model_has_native_thinking and thinking_type in ("disabled", "enabled", "adaptive", "auto"):
         extra_body["thinking"] = {
@@ -337,6 +343,7 @@ def _apply_generic_controls(
         and effort != "none"
         and not explicit_disabled
         and not _is_kimi_thinking_model(model)
+        and not _looks_qwen(model_l)
     ):
         kwargs["reasoning_effort"] = request.reasoning_effort
 

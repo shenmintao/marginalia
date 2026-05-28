@@ -31,11 +31,13 @@ from marginalia.llm import (
     TextBlock,
     get_chat_client,
 )
+from marginalia.llm.model_controls import DISABLE_THINKING_EXTRA_BODY
 from marginalia.llm.tagged_response import (
     parse_path,
     parse_tagged,
     parse_tags,
     render_format_hint,
+    strip_reasoning_text,
 )
 from marginalia.pipelines.base import (
     Pipeline,
@@ -105,6 +107,8 @@ content and visible text. Do not infer identity, location, source, date,
 intent, or surrounding context unless it is directly visible in the image or
 provided in context. If something is uncertain, say it is unclear rather than
 guessing.
+Do not describe your process. Do not include analysis, checklists, labels like
+"Final Polish:", or <think> blocks.
 
 `summary` is one or two sentences (<=60 Chinese characters / <=30 English words) in the
 user's likely language — the spine of what the image is. Keep it tight;
@@ -164,6 +168,7 @@ class ImagePipeline(Pipeline):
         )
 
         client = get_chat_client("vision")
+        extra_body = _disable_thinking_for_vlm(client)
         resp = await client.complete(ChatRequest(
             system=IMAGE_PIPELINE_SYSTEM,
             messages=[ChatMessage(role="user", content=[
@@ -174,6 +179,7 @@ class ImagePipeline(Pipeline):
             max_tokens=4096,
             temperature=0.2,
             cache_breakpoints=[0],
+            extra_body=extra_body,
         ))
 
         tagged = parse_tagged(resp.text or "")
@@ -279,12 +285,14 @@ class ImagePipeline(Pipeline):
         b64 = base64.b64encode(scaled).decode("ascii")
         client = get_chat_client("vision")
         try:
+            extra_body = _disable_thinking_for_vlm(client)
             resp = await client.complete(ChatRequest(
                 system=(
                     "You are looking at one image and answering the user's "
                     "specific question about it. Be concise, ground every "
                     "claim in what is visible. If the question can't be "
-                    "answered from the image alone, say so plainly."
+                    "answered from the image alone, say so plainly. Do not "
+                    "include analysis, checklists, or <think> blocks."
                 ),
                 messages=[ChatMessage(role="user", content=[
                     TextBlock(text=f"Question: {question}"),
@@ -292,11 +300,12 @@ class ImagePipeline(Pipeline):
                 ])],
                 max_tokens=1024,
                 temperature=0.2,
+                extra_body=extra_body,
             ))
         except Exception as exc:  # noqa: BLE001
             return SegmentResult(error=f"VLM call failed: {exc}",
                                  extras={"kind": "image"})
-        text = (resp.text or "").strip()
+        text = strip_reasoning_text(resp.text).strip()
         return SegmentResult(
             text=text or "(VLM returned empty response)",
             extras={
@@ -332,21 +341,26 @@ class ImagePipeline(Pipeline):
             f"Filename: {filename or 'unknown'}."
         )
         try:
+            extra_body = _disable_thinking_for_vlm(client)
             resp = await client.complete(ChatRequest(
-                system="You describe images concisely. Output one short paragraph, no preamble.",
+                system=(
+                    "You describe images concisely. Output one short paragraph, "
+                    "no preamble, no analysis, no <think> blocks."
+                ),
                 messages=[ChatMessage(role="user", content=[
                     TextBlock(text=prompt),
                     ImageBlock(media_type=media_type, data_b64=b64),
                 ])],
                 max_tokens=300,
                 temperature=0.2,
+                extra_body=extra_body,
             ))
         except Exception as exc:  # noqa: BLE001
             return SegmentResult(
                 error=f"VLM describe failed: {exc}",
                 extras={"kind": "image", "filename": filename, "bytes": len(body)},
             )
-        text = (resp.text or "").strip()
+        text = strip_reasoning_text(resp.text).strip()
         return SegmentResult(
             text=text or f"[image: {filename or 'unknown'}, ~{max(1, len(body) // 1024)} KB]",
             extras={
@@ -377,3 +391,9 @@ def _render_image_description(file_row: Any) -> str:
                 detail = (r.get("description") or r.get("summary") or "").strip()
                 parts.append(f"  [{i}] {title}: {detail}")
     return "\n".join(parts).strip()
+
+
+def _disable_thinking_for_vlm(client: Any) -> dict[str, Any] | None:
+    if getattr(client, "provider", None) == "openai-compatible":
+        return DISABLE_THINKING_EXTRA_BODY
+    return None
