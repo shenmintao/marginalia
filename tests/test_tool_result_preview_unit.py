@@ -70,6 +70,12 @@ def test_known_shapes() -> None:
     }, "machine-learning", "topic")
 
     _check("query_sql", {"rows": [{"a": 1}, {"a": 2}, {"a": 3}]}, "3 rows")
+    _check("query_sql", {
+        "export": {"row_count": 12, "filename": "qs_abc.csv"},
+    }, "exported 12 rows", "qs_abc.csv")
+    _check("query_log", {
+        "operation": "count_pattern", "match_count": 4, "scanned_lines": 10,
+    }, "4 matches", "10 lines")
 
 
 def test_error_shape() -> None:

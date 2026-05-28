@@ -804,6 +804,11 @@ async def chat(ctx: CliContext, message: str) -> None:
                         f"chart ready: {p.get('chart_id', '?')} - "
                         f"{(p.get('caption') or '')[:40]}"
                     )
+                elif p.get("kind") == "data_export" and sp is not None:
+                    sp.update(
+                        f"export ready: {p.get('filename', '?')} "
+                        f"({p.get('row_count', 0)} rows)"
+                    )
             elif ev.event_type == "answer":
                 answer = ev.data
             elif ev.event_type == "error":

@@ -369,6 +369,25 @@ async def main():
     assert pattern_read["extras"]["match_count"] >= 1, pattern_read
     print("[7] pattern match_count:", pattern_read["extras"]["match_count"])
 
+    rf_patterns = await _call("read_files", {
+        "requests": [{
+            "entry_id": seeded["e_a"][:8],
+            "reads": [{
+                "patterns": ["consensus", "pipeline"],
+                "context_lines": 0,
+                "max_matches": 5,
+            }],
+        }],
+    })
+    pattern_reads = rf_patterns["results"][0]["reads"]
+    assert len(pattern_reads) == 2, pattern_reads
+    assert all(item["ok"] is True for item in pattern_reads), pattern_reads
+    assert [item["args"]["pattern"] for item in pattern_reads] == [
+        "consensus", "pipeline",
+    ]
+    assert all(item["extras"]["match_count"] >= 1 for item in pattern_reads)
+    print("[7b] multi-pattern reads:", [item["args"]["pattern"] for item in pattern_reads])
+
     # invalid section_id → error
     rf_bad = await _call("read_files", {
         "requests": [{"entry_id": seeded["e_a"], "reads": [

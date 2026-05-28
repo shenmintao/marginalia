@@ -215,7 +215,7 @@ def test_text_read_segment_cap_expands_for_late_offsets_and_deep_reads() -> None
         file_row=Row(),
     )
 
-    assert late_offset_cap == text_mod.READ_SEGMENT_BYTES_CAP
+    assert late_offset_cap >= (50_000_000 + 1000 + 4096) * 4
     deep_late_offset_cap = text_mod._read_cap_for_args(
         {"pattern": "needle", "offset": 50_000_000, "max_chars": 1000},
         file_row=Row(),

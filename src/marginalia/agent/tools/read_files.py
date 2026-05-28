@@ -46,6 +46,8 @@ from marginalia.pipelines.registry import resolve_pipeline
 from marginalia.repositories import entries as entries_repo
 from marginalia.storage import get_storage
 
+MAX_EFFECTIVE_READS_PER_ENTRY = 50
+
 
 SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -105,6 +107,16 @@ SCHEMA: dict[str, Any] = {
                                 "paragraph_end": {"type": "integer", "minimum": 1},
                                 # pattern search
                                 "pattern": {"type": "string"},
+                                "patterns": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "maxItems": 10,
+                                    "description": (
+                                        "Multiple patterns to search in the same scope. "
+                                        "The tool expands this into one pattern read per "
+                                        "term."
+                                    ),
+                                },
                                 "context_lines": {"type": "integer", "minimum": 0},
                                 "max_matches": {
                                     "type": "integer",
@@ -162,7 +174,7 @@ SCHEMA: dict[str, Any] = {
         "pipeline understands (offset/max_chars for any file; "
         "page_start/page_end or page_label for PDF; "
         "line_start/line_end / section_id / "
-        "heading for text; pattern for regex search; member_path for "
+        "heading for text; pattern or patterns for regex search; member_path for "
         "container members). `pattern` can be combined with a range "
         "(page_start/end, line_start/end, paragraph_start/end, or "
         "spreadsheet heading) to restrict the search to that window — "
@@ -259,7 +271,20 @@ async def read_files(
             "reads": [],
         }
         any_failed = False
-        for read_args in reads_args:
+        expanded_reads = _expand_reads(reads_args)
+        if len(expanded_reads) > MAX_EFFECTIVE_READS_PER_ENTRY:
+            result_obj["ok"] = False
+            result_obj["reads"].append({
+                "ok": False,
+                "error": (
+                    f"too many effective reads after pattern expansion "
+                    f"({len(expanded_reads)} > {MAX_EFFECTIVE_READS_PER_ENTRY})"
+                ),
+            })
+            results.append(result_obj)
+            continue
+
+        for read_args in expanded_reads:
             seg = await _safe_read_segment(
                 pipeline=pipeline, file_row=file_row,
                 args=dict(read_args), storage=storage,
@@ -286,6 +311,34 @@ async def read_files(
         "results": results,
         "count": len(results),
     }
+
+
+def _expand_reads(reads_args: list[Any]) -> list[dict[str, Any]]:
+    expanded: list[dict[str, Any]] = []
+    for raw in reads_args:
+        read_args = dict(raw) if isinstance(raw, Mapping) else {}
+        raw_patterns = read_args.get("patterns")
+        patterns: list[str] = []
+        if read_args.get("pattern"):
+            patterns.append(str(read_args["pattern"]))
+        if isinstance(raw_patterns, list):
+            patterns.extend(str(item) for item in raw_patterns if str(item))
+
+        if not raw_patterns:
+            read_args.pop("patterns", None)
+            expanded.append(read_args)
+            continue
+
+        seen: set[str] = set()
+        for pattern in patterns:
+            if pattern in seen:
+                continue
+            seen.add(pattern)
+            item = dict(read_args)
+            item.pop("patterns", None)
+            item["pattern"] = pattern
+            expanded.append(item)
+    return expanded
 
 
 async def _safe_read_segment(

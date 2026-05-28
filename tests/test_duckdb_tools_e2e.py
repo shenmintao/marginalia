@@ -183,7 +183,7 @@ async def main():
         "entry_ids": ["no-such-entry"], "sql": "SELECT 1",
     })
     assert r["ok"] is False
-    assert r["error"].startswith("entry not found")
+    assert "entry_id=" in r["error"] or r["error"].startswith("entry not found")
     print("[6] unknown entry handled")
 
     # ---- query_sql column fuzzy match (kb-lite-style) -------------------
@@ -196,6 +196,21 @@ async def main():
     assert r["column_fixes"], "expected column_fixes to record the rewrite"
     assert any("name" in f.lower() for f in r["column_fixes"])
     print("[6b] column fuzzy match:", r["column_fixes"])
+
+    r = await _call("query_sql", {
+        "entry_ids": [seeded["e_csv"][:8]],
+        "sql": "SELECT name, role FROM t1 ORDER BY name",
+        "export_csv": True,
+    })
+    assert r["ok"] is True, r
+    assert r["export"]["row_count"] == 5
+    export_path = Path(r["export"]["path"])
+    assert export_path.exists(), export_path
+    exported = export_path.read_text(encoding="utf-8-sig")
+    assert exported.startswith("name,role")
+    assert "alice,engineer" in exported
+    assert r["__user_only__"]["kind"] == "data_export"
+    print("[6c] csv export:", export_path.name)
 
     # ---- query_log -----------------------------------------------------
     r = await _call("query_log", {
@@ -240,6 +255,39 @@ async def main():
     assert r["match_count"] == 2
     assert r["truncated"] is True
     print("[12] limit/truncated:", r["match_count"], r["truncated"])
+
+    r = await _call("query_log", {
+        "entry_id": seeded["e_log"],
+        "operation": "count_pattern",
+        "pattern": "connection refused",
+    })
+    assert r["ok"] is True, r
+    assert r["match_count"] == 2
+    assert r["line_count"] == 8
+    print("[13] count_pattern:", r["match_count"])
+
+    r = await _call("query_log", {
+        "entry_id": seeded["e_log"],
+        "operation": "top_values",
+        "pattern": r"from (?P<ip>10\.0\.0\.\d+)",
+        "group_by": "ip",
+    })
+    assert r["ok"] is True, r
+    assert {item["value"] for item in r["values"]} == {"10.0.0.5", "10.0.0.6"}
+    print("[14] top_values:", r["values"])
+
+    r = await _call("query_log", {
+        "entry_ids": [seeded["e_log"]],
+        "operation": "time_distribution",
+        "pattern": "ERROR",
+        "group_by": "hour",
+    })
+    assert r["ok"] is True, r
+    assert r["buckets"] == [
+        {"bucket": "2024-03-12 10:00", "count": 2},
+        {"bucket": "2024-03-12 11:00", "count": 1},
+    ]
+    print("[15] time_distribution:", r["buckets"])
 
     print("\nALL DUCKDB TOOLS E2E CHECKS PASSED")
 

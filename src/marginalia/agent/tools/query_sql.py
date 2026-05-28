@@ -27,6 +27,7 @@ so the model gets a clear error instead of a misleading success.
 """
 from __future__ import annotations
 
+import csv
 import logging
 import re
 import tempfile
@@ -36,8 +37,11 @@ from typing import Any, Mapping
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from marginalia.agent.tools import ToolContext, tool
+from marginalia.config import get_settings
 from marginalia.db.models import File, FileEntry
+from marginalia.repositories import entries as entries_repo
 from marginalia.storage import get_storage
+from marginalia.utils.ids import new_id
 
 log = logging.getLogger(__name__)
 
@@ -45,6 +49,7 @@ ALLOWED_EXTS = {"csv", "tsv", "xlsx", "xls", "json", "parquet", "pq"}
 MAX_RESULT_ROWS = 500
 MAX_RESULT_CHARS = 40_000
 MAX_FILE_BYTES = 200 * 1024 * 1024
+MAX_EXPORT_ROWS = 100_000
 SHEET_NAME_COLUMN = "__sheet_name"
 
 _FORBIDDEN_SQL = re.compile(
@@ -92,6 +97,15 @@ SCHEMA: dict[str, Any] = {
                 "the row cap (500) to page through large result sets."
             ),
         },
+        "export_csv": {
+            "type": "boolean",
+            "default": False,
+            "description": (
+                "Also write the selected result set to MARGINALIA_HOME/exports "
+                "as CSV and emit a user-only artifact. Export is capped at "
+                f"{MAX_EXPORT_ROWS} rows."
+            ),
+        },
     },
 }
 
@@ -105,7 +119,8 @@ SCHEMA: dict[str, Any] = {
         "are merged with a `__sheet_name` column. Use read_files first "
         "to inspect column names; the result also auto-corrects "
         "case/whitespace mismatches. Results cap at 500 rows; pass "
-        "`offset` (with the same SQL) to page through more."
+        "`offset` (with the same SQL) to page through more. Set "
+        "`export_csv` when the user needs the full selected result as a file."
     ),
     schema=SCHEMA,
 )
@@ -117,6 +132,7 @@ async def query_sql(
     entry_ids: list[str] = list(args.get("entry_ids") or [])
     sql: str = (args.get("sql") or "").strip()
     offset = max(0, int(args.get("offset") or 0))
+    export_csv = bool(args.get("export_csv") or False)
 
     if not entry_ids:
         return {"ok": False, "error": "entry_ids must be a non-empty list"}
@@ -130,13 +146,14 @@ async def query_sql(
     # Resolve entries → files
     records: list[tuple[FileEntry, File, str]] = []
     storage = get_storage()
-    for eid in entry_ids:
-        entry = await db.get(FileEntry, eid)
-        if entry is None:
+    for raw_eid in entry_ids:
+        eid, resolve_err = await entries_repo.resolve_entry_id_prefix(db, str(raw_eid))
+        if resolve_err:
+            return {"ok": False, "error": resolve_err}
+        pair = await entries_repo.get_live_with_file(db, eid)
+        if pair is None:
             return {"ok": False, "error": f"entry not found: {eid}"}
-        f = await db.get(File, entry.file_id)
-        if f is None:
-            return {"ok": False, "error": f"file row missing for entry {eid}"}
+        entry, f = pair
         if f.size_bytes and f.size_bytes > MAX_FILE_BYTES:
             return {
                 "ok": False,
@@ -158,7 +175,12 @@ async def query_sql(
             }
         records.append((entry, f, ext))
 
-    return await _run_in_tempdir(records, sql, storage, offset)
+    export_dir = (
+        Path(get_settings().marginalia_home).expanduser() / "exports"
+        if export_csv
+        else None
+    )
+    return await _run_in_tempdir(records, sql, storage, offset, export_dir)
 
 
 # -- helpers ---------------------------------------------------------------
@@ -204,6 +226,7 @@ async def _run_in_tempdir(
     sql: str,
     storage,
     offset: int,
+    export_dir: Path | None,
 ) -> dict[str, Any]:
     """Stream files to a tempdir, run DuckDB sync in a thread."""
     import asyncio
@@ -216,7 +239,9 @@ async def _run_in_tempdir(
             await _stream_to_disk(storage, f, local)
             on_disk.append((str(local), entry, f))
 
-        return await asyncio.to_thread(_run_duckdb, on_disk, sql, records, offset)
+        return await asyncio.to_thread(
+            _run_duckdb, on_disk, sql, records, offset, export_dir
+        )
     finally:
         for p in tmpdir.glob("*"):
             try:
@@ -240,6 +265,7 @@ def _run_duckdb(
     sql: str,
     records: list[tuple[FileEntry, File, str]],
     offset: int,
+    export_dir: Path | None,
 ) -> dict[str, Any]:
     import duckdb
 
@@ -302,9 +328,25 @@ def _run_duckdb(
                 if not chunk:
                     break
                 remaining -= len(chunk)
-        rows = cur.fetchmany(MAX_RESULT_ROWS + 1)
-        truncated = len(rows) > MAX_RESULT_ROWS
-        rows = rows[:MAX_RESULT_ROWS]
+        fetched = cur.fetchmany(MAX_RESULT_ROWS + 1)
+        export_rows: list[tuple[Any, ...]] | None = None
+        export_truncated = False
+        if export_dir is not None:
+            export_rows = list(fetched)
+            while len(export_rows) <= MAX_EXPORT_ROWS:
+                need = MAX_EXPORT_ROWS + 1 - len(export_rows)
+                if need <= 0:
+                    break
+                chunk = cur.fetchmany(min(need, 5000))
+                if not chunk:
+                    break
+                export_rows.extend(chunk)
+            export_truncated = len(export_rows) > MAX_EXPORT_ROWS
+            if export_truncated:
+                export_rows = export_rows[:MAX_EXPORT_ROWS]
+
+        truncated = len(fetched) > MAX_RESULT_ROWS
+        rows = fetched[:MAX_RESULT_ROWS]
         # Stringify cells (DuckDB returns native types — keep result JSON-able)
         flat_rows = [[_to_json_safe(v) for v in r] for r in rows]
 
@@ -321,6 +363,18 @@ def _run_duckdb(
         }
         if truncated:
             result["next_offset"] = offset + len(flat_rows)
+        if export_dir is not None and export_rows is not None:
+            export = _write_csv_export(export_dir, col_names, export_rows, export_truncated)
+            result["export"] = export
+            result["__user_only__"] = {
+                "kind": "data_export",
+                "format": "csv",
+                "filename": export["filename"],
+                "path": export["path"],
+                "row_count": export["row_count"],
+                "truncated": export["truncated"],
+                "columns": col_names,
+            }
         # Cap output size — model context cost
         approx = sum(len(str(c)) for r in flat_rows for c in r)
         if approx > MAX_RESULT_CHARS:
@@ -337,6 +391,30 @@ def _run_duckdb(
         return result
     finally:
         conn.close()
+
+
+def _write_csv_export(
+    export_dir: Path,
+    columns: list[str],
+    rows: list[tuple[Any, ...]],
+    truncated: bool,
+) -> dict[str, Any]:
+    export_dir.mkdir(parents=True, exist_ok=True)
+    export_id = "qs_" + new_id().split("-")[0]
+    path = export_dir / f"{export_id}.csv"
+    with path.open("w", encoding="utf-8-sig", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(columns)
+        for row in rows:
+            writer.writerow([_to_json_safe(value) for value in row])
+    return {
+        "kind": "csv",
+        "filename": path.name,
+        "path": str(path),
+        "row_count": len(rows),
+        "truncated": truncated,
+        "max_rows": MAX_EXPORT_ROWS,
+    }
 
 
 def _load_table(conn, table: str, path: str, ext: str) -> None:

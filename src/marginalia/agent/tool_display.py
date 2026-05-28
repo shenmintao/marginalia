@@ -508,6 +508,28 @@ def format_tool_result_preview(name: str, result: Any) -> str:
         return "no match"
 
     if name in ("query_sql", "query_log"):
+        export = result.get("export") if isinstance(result, dict) else None
+        if isinstance(export, dict):
+            return (
+                f"exported {export.get('row_count', 0)} rows to "
+                f"{export.get('filename', 'csv')}"
+            )
+        if name == "query_log":
+            op = result.get("operation")
+            if op == "count_pattern":
+                return (
+                    f"{result.get('match_count', 0)} matches in "
+                    f"{result.get('scanned_lines', 0)} lines"
+                )
+            if op == "top_values":
+                values = result.get("values") or []
+                return f"{_ru(values, 'value')}"
+            if op == "time_distribution":
+                buckets = result.get("buckets") or []
+                return f"{_ru(buckets, 'bucket')}"
+            matches = result.get("matches")
+            if isinstance(matches, list):
+                return f"{_ru(matches, 'match')}"
         rows = result.get("rows") or result.get("results") or []
         if isinstance(rows, list):
             return f"{_ru(rows, 'row')}"

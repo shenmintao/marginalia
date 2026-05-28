@@ -618,9 +618,10 @@ def _read_cap_for_args(args: dict[str, Any], *, file_row: Any) -> int:
         # include enough bytes for an explicit late offset if one is supplied.
         cap = max(cap, (offset + max_chars + 4096) * 4)
     else:
-        # Default chunk reads should be proportional to the requested window,
-        # not the 32MB safety cap. UTF-8 can take up to four bytes per char.
-        cap = min(READ_SEGMENT_BYTES_CAP, (offset + max_chars + 4096) * 4)
+        # Default chunk reads should stay proportional to the requested
+        # window, but late offsets must still be reachable. UTF-8 can take
+        # up to four bytes per char.
+        cap = (offset + max_chars + 4096) * 4
 
     raw_size = getattr(file_row, "size_bytes", None)
     try:
