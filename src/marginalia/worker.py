@@ -42,11 +42,14 @@ async def _arun(settings: Settings) -> int:
     await bootstrap_schema()
     runner = TaskRunner(settings=settings)
     await runner.start()
-    log.info("worker %s started; polling every %.1fs (lease=%ds, batch=%d)",
-             runner.worker_id,
-             settings.worker_poll_interval_seconds,
-             settings.worker_lease_seconds,
-             settings.worker_batch_size)
+    log.info(
+        "worker %s started; polling every %.1fs "
+        "(lease=%ds, concurrent_tasks=%d)",
+        runner.worker_id,
+        settings.worker_poll_interval_seconds,
+        settings.worker_lease_seconds,
+        settings.worker_batch_size,
+    )
 
     stop_event = asyncio.Event()
 

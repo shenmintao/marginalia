@@ -11,8 +11,9 @@ Why a separate file instead of editing `.env`:
     it (lossy on comments, may be checked in).
   - The overlay only carries the small whitelist of fields that make
     sense to change at runtime — LLM profiles, conflict policy, agent
-    token budgets, and bounded LLM ingest fan-out. Storage backend, db,
-    worker cadence still need a restart and stay in `.env`.
+    token budgets, worker concurrency, and bounded LLM ingest fan-out.
+    Storage backend, db, and most worker cadence still need a restart
+    and stay in `.env`.
 
 Writes are atomic (tmp + rename). The file is created on first PUT.
 After a successful write, callers must invalidate the
@@ -36,6 +37,7 @@ _ALLOWED_FIELDS: frozenset[str] = frozenset({
     "agent_final_answer_continue_turns",
     "agent_final_answer_max_chars",
     "llm_ingest_concurrency",
+    "worker_batch_size",
     # LLM defaults
     "llm_default_provider",
     "llm_default_api_key",
@@ -131,6 +133,7 @@ def validate_and_normalize(patch: dict[str, Any]) -> dict[str, Any]:
             "agent_final_answer_continue_turns",
             "agent_final_answer_max_chars",
             "llm_ingest_concurrency",
+            "worker_batch_size",
         ):
             try:
                 v = int(v)
@@ -138,7 +141,10 @@ def validate_and_normalize(patch: dict[str, Any]) -> dict[str, Any]:
                 bad.append(f"{k}: must be an integer")
                 continue
             lower = 0 if k == "agent_final_answer_continue_turns" else 1
-            upper = 32 if k == "llm_ingest_concurrency" else 200000
+            if k in ("llm_ingest_concurrency", "worker_batch_size"):
+                upper = 32
+            else:
+                upper = 200000
             if v < lower or v > upper:
                 bad.append(f"{k}: out of range [{lower}, {upper}]")
                 continue

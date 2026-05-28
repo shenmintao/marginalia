@@ -40,6 +40,7 @@ class TaskRunner:
 
     def __init__(self, settings: Settings | None = None, worker_id: str | None = None) -> None:
         self.settings = settings or get_settings()
+        self._static_settings = settings is not None
         self.worker_id = worker_id or f"{socket.gethostname()}:{os.getpid()}"
         self._stop = asyncio.Event()
         self._loop_task: asyncio.Task[None] | None = None
@@ -96,15 +97,28 @@ class TaskRunner:
     async def _run(self) -> None:
         log.info("TaskRunner %s starting", self.worker_id)
         while not self._stop.is_set():
+            settings = self._current_settings()
+            max_concurrent = max(1, int(settings.worker_batch_size or 1))
+            available = max_concurrent - len(self._inflight)
+            if available <= 0:
+                try:
+                    await asyncio.wait_for(
+                        self._stop.wait(),
+                        timeout=settings.worker_poll_interval_seconds,
+                    )
+                except asyncio.TimeoutError:
+                    pass
+                continue
             try:
-                claimed = await self._claim_batch(self.settings.worker_batch_size)
+                claimed = await self._claim_batch(available)
             except Exception:
                 log.exception("claim batch failed")
                 claimed = []
             if not claimed:
                 try:
                     await asyncio.wait_for(
-                        self._stop.wait(), timeout=self.settings.worker_poll_interval_seconds
+                        self._stop.wait(),
+                        timeout=settings.worker_poll_interval_seconds,
                     )
                 except asyncio.TimeoutError:
                     pass
@@ -114,6 +128,11 @@ class TaskRunner:
                 self._inflight.add(t)
                 t.add_done_callback(self._inflight.discard)
         log.info("TaskRunner %s stopped", self.worker_id)
+
+    def _current_settings(self) -> Settings:
+        if self._static_settings:
+            return self.settings
+        return get_settings()
 
     async def _claim_batch(self, limit: int) -> list[str]:
         now = _now()

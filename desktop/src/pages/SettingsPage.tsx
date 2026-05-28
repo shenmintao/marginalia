@@ -32,6 +32,7 @@ interface ServerCtx {
     field:
       | "agent_plan_max_tokens"
       | "agent_execute_max_tokens"
+      | "worker_batch_size"
       | "llm_ingest_concurrency",
     v: number,
   ) => Promise<void>;
@@ -94,6 +95,7 @@ function useServerCtx(): ServerCtx {
     field:
       | "agent_plan_max_tokens"
       | "agent_execute_max_tokens"
+      | "worker_batch_size"
       | "llm_ingest_concurrency",
     v: number,
   ) => {
@@ -232,6 +234,21 @@ function PreferencesSection({ ctx }: { ctx: ServerCtx }) {
               onCommit={(v) => setServerNumber("agent_execute_max_tokens", v)}
             />
           </div>
+        </Row>
+
+        <Row
+          label="Concurrent ingest tasks"
+          hint="Maximum background tasks the worker runs at once. Lower this when ingesting large scanned PDFs."
+        >
+          <NumberInput
+            value={server?.worker_batch_size}
+            disabled={!server}
+            min={1}
+            max={32}
+            step={1}
+            className="w-16"
+            onCommit={(v) => setServerNumber("worker_batch_size", v)}
+          />
         </Row>
 
         <Row
