@@ -75,8 +75,9 @@ class OpenAIChatClient(ChatClient):
             "model": self.model,
             "messages": messages,
             "max_completion_tokens": request.max_tokens,
-            "temperature": request.temperature,
         }
+        if self._supports_temperature(self.model, request.reasoning_effort):
+            kwargs["temperature"] = request.temperature
         apply_openai_reasoning_controls(
             kwargs,
             request,
@@ -124,6 +125,13 @@ class OpenAIChatClient(ChatClient):
             kwargs.pop("extra_body", None)
             resp = await self._client.chat.completions.create(**kwargs)
         return self._render_response(resp)
+
+    @staticmethod
+    def _supports_temperature(model: str, reasoning_effort: str | None = None) -> bool:
+        if reasoning_effort and reasoning_effort.lower() != "none":
+            return False
+        model_l = model.lower()
+        return not any(token in model_l for token in ("gpt-5", "o1", "o3", "o4"))
 
     @staticmethod
     def _inject_schema_into_system(messages: list[dict[str, Any]], schema: dict[str, Any]) -> None:
