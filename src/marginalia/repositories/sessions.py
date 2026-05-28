@@ -146,6 +146,25 @@ async def get_live(db: AsyncSession, session_id: str) -> Session | None:
     return s
 
 
+async def update_session_name(
+    db: AsyncSession, session_id: str, name: str,
+) -> Session | None:
+    """Store the user-facing session title.
+
+    Historically `initiating_user_message` doubled as the sidebar preview.
+    The planner now supplies a concise session name, so this field becomes
+    the read-side title without a schema migration.
+    """
+    title = name.strip()
+    if not title:
+        return None
+    s = await get_live(db, session_id)
+    if s is None:
+        return None
+    s.initiating_user_message = title[:160]
+    return s
+
+
 async def soft_delete(db: AsyncSession, session_id: str) -> Session | None:
     """Mark a session deleted_at=now. Returns the row on success, None if
     missing or already deleted. Conversations + journal rows are kept;

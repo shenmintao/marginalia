@@ -220,11 +220,21 @@ LLM_DEFAULT_MODEL=gpt-4o-mini
 LLM_REFLECT_MODEL=gpt-4o
 LLM_VISION_MODEL=gpt-4o
 
+AGENT_PLAN_MAX_TOKENS=1024
+AGENT_EXECUTE_MAX_TOKENS=2048
+AGENT_FINAL_ANSWER_CONTINUE_TURNS=3
+AGENT_FINAL_ANSWER_MAX_CHARS=120000
+
 MARGINALIA_SERVER=               # 非空 = 远程模式,跳过 embedded
 ```
 
 OpenAI 兼容 endpoint(Together / Groq / DeepSeek / 本地 vLLM / ollama)
 通过 `LLM_*_BASE_URL` 切换。
+
+长调研答案如果在最终回答阶段撞到模型 token 上限,运行时会在服务端续写,
+GUI 仍然只收到一个合并后的 `answer` 事件。可用
+`AGENT_FINAL_ANSWER_CONTINUE_TURNS` 和 `AGENT_FINAL_ANSWER_MAX_CHARS`
+调节续写轮数与最终答案字符上限。
 
 ## 部署形态
 

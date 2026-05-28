@@ -1,12 +1,14 @@
 """Focused tests for the runtime guards added 2026-05-24.
 
-Covers three additions on top of the plan-execute loop:
+Covers additions on top of the plan-execute loop:
   1. NO_PLAN fast-path — planner can skip execute by emitting `NO_PLAN: ...`
   2. tool-call dedup — repeat (name, args) returns prior result without
      re-running the handler
   3. doom-loop guard — same key crossing threshold within the rolling
      window appends a STOP nudge to the *current* tool message (no
      mutation of prior messages, so prefix cache stays valid)
+  4. final-answer continuation — max_tokens fragments are buffered
+     server-side and emitted as one answer event
 
 Strategy: drive runtime.run_turn against a scripted fake chat client and a
 scripted fake tool. Avoids real LLM/HTTP cost while exercising the actual
@@ -18,6 +20,7 @@ Run:
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shutil
 import sys
@@ -38,7 +41,7 @@ from marginalia.config import get_settings
 get_settings.cache_clear()  # type: ignore[attr-defined]
 
 from marginalia.db.engine import get_engine, get_session_factory
-from marginalia.db.models import Base, Session
+from marginalia.db.models import Base, Conversation, Session
 from marginalia.llm.types import (
     ChatRequest, ChatResponse, TokenUsage, ToolCall,
 )
@@ -147,7 +150,7 @@ async def test_no_plan_fast_path() -> None:
     sid = await _open_session("hi")
     chat = _ScriptedChat([
         ChatResponse(
-            text="NO_PLAN: 不客气，没什么要我做的就先在这儿待命。",
+            text="NO_PLAN: You're welcome; standing by.\nSession name: Quick thanks",
             tool_calls=[], stop_reason="end_turn",
             usage=TokenUsage(input_tokens=400, output_tokens=20),
             parsed_json=None,
@@ -165,7 +168,14 @@ async def test_no_plan_fast_path() -> None:
     assert "thinking" not in seq, seq
     assert "tool_call" not in seq
     answer = next(d for ev, d in events if ev == "answer")
-    assert "不客气" in answer, answer
+    assert "You're welcome" in answer, answer
+    assert "Session name:" not in answer, answer
+    done = next(d for ev, d in events if ev == "done")
+    assert '"session_name": "Quick thanks"' in done, done
+    factory = get_session_factory()
+    async with factory() as s:
+        row = await s.get(Session, sid)
+        assert row and row.initiating_user_message == "Quick thanks"
     # Exactly one LLM call (the plan).
     assert len(chat.requests) == 1, len(chat.requests)
     print("[1] NO_PLAN fast-path: 1 LLM call, no execute")
@@ -299,7 +309,50 @@ async def test_doom_loop_nudge() -> None:
     print("[3] doom-loop nudge appended; original user msg unchanged")
 
 
-# ---- 4. canonical args (json.dumps sort_keys) ------------------------------
+# ---- 4. final-answer max_tokens continuation ------------------------------
+
+async def test_final_answer_continuation_is_buffered() -> None:
+    sid = await _open_session("long answer")
+    chat = _ScriptedChat([
+        ChatResponse(
+            text="1. Write the researched answer.\nSession name: Long answer",
+            tool_calls=[], stop_reason="end_turn",
+            usage=TokenUsage(input_tokens=400, output_tokens=20),
+            parsed_json=None,
+        ),
+        ChatResponse(
+            text="Part A ",
+            tool_calls=[], stop_reason="max_tokens",
+            usage=TokenUsage(input_tokens=500, output_tokens=2048),
+            parsed_json=None,
+        ),
+        ChatResponse(
+            text="Part B.",
+            tool_calls=[], stop_reason="end_turn",
+            usage=TokenUsage(input_tokens=550, output_tokens=20),
+            parsed_json=None,
+        ),
+    ])
+    _install_chat(chat)
+
+    events = await _drive(sid, "make it long")
+    answers = [d for ev, d in events if ev == "answer"]
+    assert answers == ["Part A Part B."], answers
+    done = json.loads(next(d for ev, d in events if ev == "done"))
+    assert done["truncated"] is False, done
+    assert done["llm_calls"] == 3, done
+    assert len(chat.requests) == 3, len(chat.requests)
+    assert chat.requests[2].tools is None
+    assert chat.requests[2].tool_choice == "none"
+
+    factory = get_session_factory()
+    async with factory() as s:
+        conv = await s.get(Conversation, done["conversation_id"])
+        assert conv and conv.agent_response == "Part A Part B."
+    print("[4] final-answer continuation: buffered into one answer event")
+
+
+# ---- 5. canonical args (json.dumps sort_keys) ------------------------------
 
 def test_canonical_args() -> None:
     a = runtime._canonical_args({"a": 1, "b": 2})
@@ -308,7 +361,7 @@ def test_canonical_args() -> None:
     # Distinct values must produce distinct keys.
     c = runtime._canonical_args({"a": 1, "b": 3})
     assert c != a
-    print("[4] _canonical_args is order-stable")
+    print("[5] _canonical_args is order-stable")
 
 
 async def main() -> None:
@@ -317,6 +370,7 @@ async def main() -> None:
     await test_no_plan_fast_path()
     await test_tool_dedup()
     await test_doom_loop_nudge()
+    await test_final_answer_continuation_is_buffered()
     print("\nALL RUNTIME-GUARD TESTS PASSED")
 
 

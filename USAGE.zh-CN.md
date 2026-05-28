@@ -79,6 +79,15 @@ LLM_VISION_BASE_URL=https://api.deepseek.com/v1
 LLM_VISION_MODEL=deepseek-vl
 ```
 
+长调研答案如果在最终回答阶段撞到模型 token 上限,运行时会在服务端续写,
+GUI 仍然只收到一个合并后的 `answer` 事件:
+
+```ini
+AGENT_EXECUTE_MAX_TOKENS=2048
+AGENT_FINAL_ANSWER_CONTINUE_TURNS=3
+AGENT_FINAL_ANSWER_MAX_CHARS=120000
+```
+
 改完 `.env` 跑一次迁移:
 
 ```bash

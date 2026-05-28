@@ -77,6 +77,15 @@ Unset profile fields inherit from `LLM_DEFAULT_*`. `chat`, `reflect`, and `inges
 
 The desktop Settings page can write LLM overrides to `config_overlay.json`; those values take precedence over `.env` LLM fields.
 
+Long research answers are continued server-side if the final answer hits the
+model token limit. The GUI receives one merged `answer` event.
+
+```ini
+AGENT_EXECUTE_MAX_TOKENS=2048
+AGENT_FINAL_ANSWER_CONTINUE_TURNS=3
+AGENT_FINAL_ANSWER_MAX_CHARS=120000
+```
+
 ## 4. Start Marginalia
 
 Embedded mode:

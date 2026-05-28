@@ -15,6 +15,8 @@ for SSE streaming. One `run_turn(session_id, user_message)` invocation:
            feed back as `tool` message
          - if model returned text + no tool_calls AND stop_reason='end_turn':
            yield "answer" with final text
+         - if final text hits stop_reason='max_tokens', continue the answer
+           server-side and emit one merged "answer" event.
      Starting at turn 11 (>= EXECUTE_NUDGE_FROM), append wrap-up tail.
   4. Truncation: if MAX_EXECUTE_TURNS hit, yield "answer" with fallback
      text and mark truncated=True.
@@ -103,6 +105,8 @@ EXECUTE_MAX_TOKENS = 2048
 TOOL_RESULT_PREVIEW_LEN = 240
 
 NO_PLAN_PREFIX = "NO_PLAN:"
+SESSION_NAME_PREFIX = "Session name:"
+MAX_SESSION_NAME_LEN = 80
 
 # Doom-loop: if the same (name, canonical_args) shows up
 # DOOM_LOOP_THRESHOLD times within the last DOOM_LOOP_WINDOW tool calls,
@@ -115,6 +119,11 @@ DOOM_LOOP_NUDGE = (
     "[runtime guard] You have repeatedly called the same tool with similar "
     "arguments. Stop expanding tool calls and give the final answer from the "
     "results already collected."
+)
+FINAL_ANSWER_CONTINUE_NUDGE = (
+    "[runtime guard] Your previous final answer was cut off by the token "
+    "limit. Continue exactly where it stopped. Do not restart, do not repeat "
+    "previous text, do not call tools, and finish the answer."
 )
 
 
@@ -351,10 +360,14 @@ async def run_turn(
         user_message=user_message,
         conversation_id=conversation_id,
     )
+    session_name = _extract_session_name(plan_text)
+    if session_name:
+        await _store_session_name(session_id, session_name)
     yield AgentEvent(event_type="plan", data=plan_text)
 
     outcome = _ExecuteOutcome()
     no_plan_answer = _extract_no_plan_answer(plan_text)
+    plan_for_execute = _strip_session_name_line(plan_text)
     if no_plan_answer is not None:
         # Planner declared the user's turn is trivial — skip execute,
         # still emit one fake "thinking" so the SSE stream shape stays
@@ -375,7 +388,7 @@ async def run_turn(
         async for ev in _run_execute_phase(
             chat=chat,
             system_prompt=execute_system,
-            plan_text=plan_text,
+            plan_text=plan_for_execute,
             user_message=user_message,
             conversation_id=conversation_id,
             session_id=session_id,
@@ -439,11 +452,61 @@ async def run_turn(
             "llm_calls": usage.llm_calls,
             "duration_ms": usage.duration_ms,
             "truncated": outcome.truncated,
+            "session_name": session_name,
         }),
     )
 
 
 # ---- plan -----------------------------------------------------------------
+
+def _extract_session_name(plan_text: str) -> str | None:
+    """Return the planner-supplied session title from the final plan line."""
+    if not plan_text:
+        return None
+    for line in reversed(plan_text.splitlines()):
+        text = line.strip()
+        if not text:
+            continue
+        if not text.lower().startswith(SESSION_NAME_PREFIX.lower()):
+            return None
+        raw = text[len(SESSION_NAME_PREFIX):].strip()
+        title = _clean_session_name(raw)
+        return title or None
+    return None
+
+
+def _strip_session_name_line(plan_text: str) -> str:
+    """Remove the final session-name control line before execute consumes it."""
+    if not plan_text:
+        return plan_text
+    lines = plan_text.splitlines()
+    idx = len(lines) - 1
+    while idx >= 0 and not lines[idx].strip():
+        idx -= 1
+    if idx >= 0 and lines[idx].strip().lower().startswith(SESSION_NAME_PREFIX.lower()):
+        del lines[idx]
+    return "\n".join(lines).strip()
+
+
+def _clean_session_name(raw: str) -> str:
+    title = raw.strip().strip("`\"'")
+    title = re.sub(r"\s+", " ", title)
+    title = re.sub(r"^\s*[-*#]+\s*", "", title)
+    if "entry_id=" in title or re.search(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F-]{27,}\b", title):
+        return ""
+    return title[:MAX_SESSION_NAME_LEN].rstrip()
+
+
+async def _store_session_name(session_id: str, session_name: str) -> None:
+    try:
+        async with session_scope() as db:
+            await session_service.update_session_name(
+                db, session_id=session_id, name=session_name,
+            )
+            await db.commit()
+    except Exception:
+        log.exception("failed to store session name for session %s", session_id)
+
 
 def _extract_no_plan_answer(plan_text: str) -> str | None:
     """Return the trailing answer if `plan_text` is a NO_PLAN fast-path.
@@ -457,6 +520,7 @@ def _extract_no_plan_answer(plan_text: str) -> str | None:
     stripped = plan_text.lstrip()
     if not stripped.startswith(NO_PLAN_PREFIX):
         return None
+    stripped = _strip_session_name_line(stripped)
     answer = stripped[len(NO_PLAN_PREFIX):].strip()
     # Empty answer body is treated as a non-decision — fall back to execute
     # rather than returning a blank response to the user.
@@ -474,6 +538,18 @@ def _strip_leaked_no_plan(answer: str) -> str:
     if stripped.startswith(NO_PLAN_PREFIX):
         return stripped[len(NO_PLAN_PREFIX):].lstrip()
     return answer
+
+
+def _joined_final_answer(parts: list[str], fallback: str = "(no answer)") -> str:
+    """Join final-answer fragments from max_tokens continuation calls."""
+    text = "".join(p for p in parts if p)
+    return _strip_leaked_no_plan(text or fallback)
+
+
+def _cap_final_answer(answer: str, max_chars: int) -> tuple[str, bool]:
+    if max_chars <= 0 or len(answer) <= max_chars:
+        return answer, False
+    return answer[:max_chars].rstrip(), True
 
 
 async def _run_plan_phase(
@@ -780,12 +856,25 @@ async def _run_execute_phase(
         )),
     ]
 
+    settings = get_settings()
+    max_final_continuations = max(0, settings.agent_final_answer_continue_turns)
+    max_final_chars = max(0, settings.agent_final_answer_max_chars)
+    max_total_turns = MAX_EXECUTE_TURNS + max_final_continuations
+
     last_text: str | None = None
-    for turn in range(MAX_EXECUTE_TURNS):
-        budget_tail = _budget_tail(turn=turn)
+    final_parts: list[str] = []
+    final_continuations = 0
+    continuing_final_answer = False
+
+    for turn in range(max_total_turns):
+        if turn >= MAX_EXECUTE_TURNS and not continuing_final_answer:
+            break
+
+        budget_tail = None if continuing_final_answer else _budget_tail(turn=turn)
         loop_messages = messages + [
             ChatMessage(role="user", content=budget_tail)
         ] if budget_tail else messages
+        request_tools = None if continuing_final_answer else tool_defs
 
         yield AgentEvent(event_type="thinking")
 
@@ -793,9 +882,9 @@ async def _run_execute_phase(
         resp = await chat.complete(ChatRequest(
             system=system_prompt,
             messages=loop_messages,
-            max_tokens=get_settings().agent_execute_max_tokens,
-            tools=tool_defs,
-            tool_choice="auto",
+            max_tokens=settings.agent_execute_max_tokens,
+            tools=request_tools,
+            tool_choice="none" if continuing_final_answer else "auto",
             json_schema=None,
             temperature=0.3,
         ))
@@ -812,11 +901,17 @@ async def _run_execute_phase(
                 cache_read_tokens=resp.usage.cache_read_tokens,
                 cache_creation_tokens=resp.usage.cache_creation_tokens,
                 duration_ms=duration_ms,
-                extra={"execute_turn": turn, "stop_reason": resp.stop_reason},
+                extra={
+                    "execute_turn": turn,
+                    "stop_reason": resp.stop_reason,
+                    "final_continuation": continuing_final_answer,
+                    "final_continuation_index": final_continuations
+                    if continuing_final_answer else None,
+                },
             )
             await db.commit()
 
-        if resp.tool_calls:
+        if resp.tool_calls and not continuing_final_answer:
             assistant_blocks: list = []
             if resp.text:
                 assistant_blocks.append(TextBlock(text=resp.text))
@@ -839,7 +934,69 @@ async def _run_execute_phase(
             last_text = resp.text or last_text
             continue
 
-        last_text = resp.text or last_text
+        if resp.text:
+            last_text = resp.text
+        if continuing_final_answer or final_parts:
+            if resp.text:
+                final_parts.append(resp.text)
+            answer = _joined_final_answer(final_parts, last_text or "(no answer)")
+            answer, capped = _cap_final_answer(answer, max_final_chars)
+            if capped:
+                log.warning(
+                    "conversation %s final answer hit max char cap=%d",
+                    conversation_id,
+                    max_final_chars,
+                )
+                outcome.truncated = True
+                outcome.answer = answer
+                yield AgentEvent(
+                    event_type="answer",
+                    data=await _rewrite_footnotes_for_display(answer),
+                )
+                return
+            if resp.stop_reason in ("end_turn", "stop_sequence"):
+                outcome.answer = answer
+                yield AgentEvent(
+                    event_type="answer",
+                    data=await _rewrite_footnotes_for_display(answer),
+                )
+                return
+            if resp.stop_reason == "max_tokens":
+                if final_continuations >= max_final_continuations:
+                    log.warning(
+                        "conversation %s final answer hit continuation limit=%d",
+                        conversation_id,
+                        max_final_continuations,
+                    )
+                    outcome.truncated = True
+                    outcome.answer = answer
+                    yield AgentEvent(
+                        event_type="answer",
+                        data=await _rewrite_footnotes_for_display(answer),
+                    )
+                    return
+                final_continuations += 1
+                if resp.text:
+                    messages.append(ChatMessage(role="assistant", content=resp.text))
+                messages.append(ChatMessage(
+                    role="user",
+                    content=FINAL_ANSWER_CONTINUE_NUDGE,
+                ))
+                continuing_final_answer = True
+                continue
+
+            log.warning(
+                "conversation %s final continuation stopped with %s",
+                conversation_id,
+                resp.stop_reason,
+            )
+            outcome.answer = answer
+            yield AgentEvent(
+                event_type="answer",
+                data=await _rewrite_footnotes_for_display(answer),
+            )
+            return
+
         if resp.stop_reason in ("end_turn", "stop_sequence"):
             answer = _strip_leaked_no_plan(resp.text or last_text or "(no answer)")
             outcome.answer = answer
@@ -849,14 +1006,37 @@ async def _run_execute_phase(
             )
             return
         if resp.stop_reason == "max_tokens":
-            log.warning("execute turn %d hit max_tokens; treating as final", turn)
-            answer = _strip_leaked_no_plan(resp.text or last_text or "(no answer)")
-            outcome.answer = answer
-            yield AgentEvent(
-                event_type="answer",
-                data=await _rewrite_footnotes_for_display(answer),
-            )
-            return
+            final_parts.append(resp.text or last_text or "")
+            answer = _joined_final_answer(final_parts, last_text or "(no answer)")
+            answer, capped = _cap_final_answer(answer, max_final_chars)
+            if capped or max_final_continuations <= 0:
+                if capped:
+                    log.warning(
+                        "conversation %s final answer hit max char cap=%d",
+                        conversation_id,
+                        max_final_chars,
+                    )
+                else:
+                    log.warning(
+                        "conversation %s hit max_tokens with continuation disabled",
+                        conversation_id,
+                    )
+                outcome.truncated = True
+                outcome.answer = answer
+                yield AgentEvent(
+                    event_type="answer",
+                    data=await _rewrite_footnotes_for_display(answer),
+                )
+                return
+            final_continuations += 1
+            if resp.text:
+                messages.append(ChatMessage(role="assistant", content=resp.text))
+            messages.append(ChatMessage(
+                role="user",
+                content=FINAL_ANSWER_CONTINUE_NUDGE,
+            ))
+            continuing_final_answer = True
+            continue
 
     log.warning("conversation %s hit MAX_EXECUTE_TURNS=%d", conversation_id,
                 MAX_EXECUTE_TURNS)

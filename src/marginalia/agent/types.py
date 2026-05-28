@@ -44,7 +44,7 @@ class AgentEvent:
                           intentionally NOT fed back to the model
       - "answer"       : data = final answer text (single chunk; no token-level streaming yet)
       - "error"        : data = error message
-      - "done"         : data = JSON usage dict (tokens, tool_calls, llm_calls, duration_ms, truncated)
+      - "done"         : data = JSON usage dict (tokens, tool_calls, llm_calls, duration_ms, truncated, session_name?)
     """
 
     event_type: str
@@ -53,4 +53,3 @@ class AgentEvent:
 
 class AgentTurnError(Exception):
     """Raised when a turn cannot be completed (e.g. exceeded loop cap)."""
-

@@ -164,6 +164,8 @@ async def test_put_writes_overlay_and_invalidates_cache() -> None:
                     "patch": {
                         "llm_chat_model": "gpt-4o-2026",
                         "llm_chat_base_url": "https://example.test/v1",
+                        "agent_final_answer_continue_turns": 5,
+                        "agent_final_answer_max_chars": 180000,
                     },
                 },
             )
@@ -171,6 +173,8 @@ async def test_put_writes_overlay_and_invalidates_cache() -> None:
             body = r.json()
             assert body["profiles"]["chat"]["model"] == "gpt-4o-2026"
             assert body["profiles"]["chat"]["base_url"] == "https://example.test/v1"
+            assert body["overlay"]["agent_final_answer_continue_turns"] == 5
+            assert body["overlay"]["agent_final_answer_max_chars"] == 180000
             # Other profiles still resolve from default.
             assert body["profiles"]["ingest"]["model"] == "settings-default-model"
 
@@ -186,6 +190,8 @@ async def test_put_writes_overlay_and_invalidates_cache() -> None:
             # And get_settings() now sees the new model.
             s = get_settings()
             assert s.llm_chat_model == "gpt-4o-2026"
+            assert s.agent_final_answer_continue_turns == 5
+            assert s.agent_final_answer_max_chars == 180000
             print("[3] PUT /v1/settings/llm: overlay written, cache invalidated")
 
 

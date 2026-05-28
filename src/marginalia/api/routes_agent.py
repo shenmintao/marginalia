@@ -120,8 +120,8 @@ async def list_sessions(
     """List sessions for the chat sidebar, ordered most-recent first.
 
     Each row carries enough to render a clickable list entry:
-    initiating message preview (the first user message), turn count,
-    started_at / ended_at, and the close reason if any.
+    session-title preview, turn count, started_at / ended_at, and the close
+    reason if any.
     """
     rows = await session_service.list_sessions(db, limit=limit, offset=offset)
 

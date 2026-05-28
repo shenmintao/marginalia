@@ -103,13 +103,13 @@ class Settings(BaseSettings):
     llm_audio_model: str | None = None
 
     # --- Agent token budgets ------------------------------------------------
-    # Per-call max_tokens for the planner / executor. Defaults sized for
-    # gpt-4o-class models (1024 / 2048). DeepSeek-V3 etc. can return 64K+ in
-    # one shot — bump these when running long-context models or you'll hit
-    # `stop_reason=max_tokens` and have a half-finished answer treated as
-    # final (see runtime.py:433).
+    # Per-call max_tokens for the planner / executor.
+    # If the executor hits `stop_reason=max_tokens` during the final answer,
+    # runtime.py can continue instead of returning a half-finished answer.
     agent_plan_max_tokens: int = 1024
     agent_execute_max_tokens: int = 2048
+    agent_final_answer_continue_turns: int = 3
+    agent_final_answer_max_chars: int = 120_000
 
     @property
     def database_url(self) -> str:

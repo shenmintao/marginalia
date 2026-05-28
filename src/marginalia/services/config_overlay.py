@@ -33,6 +33,8 @@ _ALLOWED_FIELDS: frozenset[str] = frozenset({
     "default_on_conflict",
     "agent_plan_max_tokens",
     "agent_execute_max_tokens",
+    "agent_final_answer_continue_turns",
+    "agent_final_answer_max_chars",
     # LLM defaults
     "llm_default_provider",
     "llm_default_api_key",
@@ -122,14 +124,20 @@ def validate_and_normalize(patch: dict[str, Any]) -> dict[str, Any]:
             if v not in _VALID_CONFLICT:
                 bad.append(f"{k}: must be one of {sorted(_VALID_CONFLICT)}")
                 continue
-        if k in ("agent_plan_max_tokens", "agent_execute_max_tokens"):
+        if k in (
+            "agent_plan_max_tokens",
+            "agent_execute_max_tokens",
+            "agent_final_answer_continue_turns",
+            "agent_final_answer_max_chars",
+        ):
             try:
                 v = int(v)
             except (TypeError, ValueError):
                 bad.append(f"{k}: must be an integer")
                 continue
-            if v < 1 or v > 200000:
-                bad.append(f"{k}: out of range [1, 200000]")
+            lower = 0 if k == "agent_final_answer_continue_turns" else 1
+            if v < lower or v > 200000:
+                bad.append(f"{k}: out of range [{lower}, 200000]")
                 continue
         out[k] = v
     if bad:

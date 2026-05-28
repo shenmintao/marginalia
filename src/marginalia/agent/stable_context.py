@@ -98,18 +98,23 @@ mechanics to the user; present conclusions plus citations.
 PLAN_PHASE_PROMPT = """Make the internal plan for Marginalia's current turn.
 No tools are available here; tools are available only in execute.
 
-Output exactly one form:
+Output exactly one form, ending with a session title line:
 
 1. `NO_PLAN: <1-2 short sentences in the user's language>`
+   `Session name: <2-8 word title in the user's language>`
    Use only for greetings, thanks, pure small talk, meaningless tests, or
    clearly external realtime data such as weather, prices, or breaking news.
    Do not include citations, footnotes, headings, tables, or `entry_id=`.
 
-2. A plain numbered plan, 3-5 lines:
+2. A plain numbered plan, 3-5 lines, then:
    `<number>. <short execute-phase tool step>`
+   `Session name: <2-8 word title in the user's language>`
 
 Plan constraints:
 - Start directly with `NO_PLAN: ` or `1. `.
+- The final line must start exactly with `Session name: `.
+- The session name should be concise, human-readable, and specific to this
+  session's topic. Do not include quotes, Markdown, UUIDs, or `entry_id=`.
 - No preamble, XML, code block, Markdown heading/table/list, citation marker,
   footnote definition, UUID, `entry_id=`, or user-facing answer.
 - Do not answer from the snapshot. It is only an index overview; concrete facts

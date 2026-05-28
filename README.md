@@ -153,11 +153,18 @@ LLM_CHAT_MODEL=
 LLM_REFLECT_MODEL=
 LLM_INGEST_MODEL=
 LLM_VISION_MODEL=
+
+AGENT_PLAN_MAX_TOKENS=1024
+AGENT_EXECUTE_MAX_TOKENS=2048
+AGENT_FINAL_ANSWER_CONTINUE_TURNS=3
+AGENT_FINAL_ANSWER_MAX_CHARS=120000
 ```
 
 Use `openai-compatible` for DeepSeek, Together, Groq, local vLLM, Ollama, and other OpenAI wire-compatible services.
 
 The `vision` profile is optional. Without it, image enrichment, PDF figure captioning, and scanned-PDF OCR degrade gracefully or are skipped.
+
+When a long final answer hits the model token limit, Marginalia can continue it server-side and emit one merged answer event to the GUI. Tune `AGENT_FINAL_ANSWER_CONTINUE_TURNS` and `AGENT_FINAL_ANSWER_MAX_CHARS` for research-heavy deployments.
 
 ## Storage and Deployment
 
