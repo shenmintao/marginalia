@@ -1,9 +1,9 @@
-"""OCR page-cap boundary — scanned-PDF with > OCR_MAX_PAGES.
+"""OCR page-cap boundary — scanned-PDF with an explicit OCR_MAX_PAGES cap.
 
 Run:
     .venv/Scripts/python tests/test_pdf_ocr_cap_e2e.py
 
-Verifies that a scanned PDF longer than OCR_MAX_PAGES (50 by default):
+Verifies that a scanned PDF longer than an explicitly configured OCR_MAX_PAGES:
 
   - Triggers the OCR path normally (avg chars/page below threshold).
   - OCR is called exactly OCR_MAX_PAGES times, NOT total_pages times.
@@ -13,8 +13,8 @@ Verifies that a scanned PDF longer than OCR_MAX_PAGES (50 by default):
     an error.
   - Audit trail does not include `failed`.
 
-Important: we patch OCR_MAX_PAGES down to 5 for this test so we don't
-need to render 60 pages just to verify the boundary.
+Important: default ingest OCR is uncapped. We patch OCR_MAX_PAGES down to 5
+for this test to keep coverage for the optional cap path.
 """
 from __future__ import annotations
 

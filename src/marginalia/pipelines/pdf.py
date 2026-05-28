@@ -72,12 +72,13 @@ PDF_TEXT_MAX_INDEX_PAGES = 400    # hard text-layer ingest budget
 PDF_SECTION_DIGEST_BYTES = 60_000 # cap the aggregate summary prompt
 MIN_TEXT_PER_PAGE_FOR_TEXT_LAYER = 50  # if every page yields fewer chars,
                                        # the doc is probably scanned
-OCR_MAX_PAGES = 50                # cap how many pages we OCR per doc
+OCR_MAX_PAGES: int | None = None  # None/<=0 means OCR every page at ingest
 PDF_READ_MAX_PAGES_PER_CALL = 50
 PDF_PATTERN_UNSCOPED_MAX_PAGES = 200
 PDF_DEFAULT_READ_PAGES = 20
 OCR_STORED_TEXT_SAMPLE_CHARS = 20_000
 OCR_BLOCK_MAX_CHARS = 8_000
+OCR_RENDER_BATCH_PAGES = 20
 OCR_RENDER_DPI = 200              # JPEG render DPI before VLM (sweet spot)
 OCR_VLM_MAX_LONG_EDGE = 2048      # OCR is glyph-sensitive — keep more
                                   # detail than the caption path's 1568
@@ -228,8 +229,7 @@ class PdfPipeline(Pipeline):
                 )
             text_per_page = ocr_text_per_page
             total_chars = sum(len(t) for t in text_per_page)
-            # OCR is still capped because it bills one VLM call per page.
-            indexed_pages = min(total_pages, OCR_MAX_PAGES)
+            indexed_pages = _ocr_pages_to_process(total_pages)
             ocr_pages_for_storage = text_per_page[:indexed_pages]
             ocr_document_type = _classify_ocr_document(
                 ocr_pages_for_storage, total_pages=total_pages,
@@ -327,7 +327,8 @@ class PdfPipeline(Pipeline):
             ocr_pages_done=ocr_pages_done,
             partial_reasons=partial_reasons,
             max_index_pages=(
-                OCR_MAX_PAGES if ocr_used else PDF_TEXT_MAX_INDEX_PAGES
+                _ocr_configured_page_cap()
+                if ocr_used else PDF_TEXT_MAX_INDEX_PAGES
             ),
         )
         user_payload = {
@@ -501,7 +502,8 @@ class PdfPipeline(Pipeline):
             ocr_pages_done=ocr_pages_done,
             partial_reasons=partial_reasons,
             max_index_pages=(
-                OCR_MAX_PAGES if ocr_used else PDF_TEXT_MAX_INDEX_PAGES
+                _ocr_configured_page_cap()
+                if ocr_used else PDF_TEXT_MAX_INDEX_PAGES
             ),
         )
         if truncated_chunks:
@@ -641,7 +643,7 @@ class PdfPipeline(Pipeline):
         ocr_used: bool,
         ocr_pages_done: int,
         partial_reasons: list[str],
-        max_index_pages: int,
+        max_index_pages: int | None,
     ) -> dict[str, Any]:
         reasons = list(dict.fromkeys(partial_reasons))
         if text_truncated and "prompt_text_cap" not in reasons:
@@ -653,11 +655,12 @@ class PdfPipeline(Pipeline):
             "indexed_pages": indexed_pages,
             "indexed_partial": indexed_partial,
             "partial_reasons": reasons if indexed_partial else [],
-            "max_index_pages": max_index_pages,
             "chunked": chunk_count > 1,
             "chunk_count": chunk_count,
             "text_truncated": text_truncated,
         }
+        if max_index_pages is not None:
+            coverage["max_index_pages"] = max_index_pages
         if ocr_used:
             coverage["ocr_used"] = True
             coverage["ocr_pages_done"] = ocr_pages_done
@@ -718,8 +721,9 @@ class PdfPipeline(Pipeline):
             return SegmentResult(error=f"PDF read failed: {exc}",
                                  extras={"kind": "pdf"})
 
-        # Page selection: explicit page_start/page_end if given, else
-        # OCR_MAX_PAGES from the start (matches ingest-time coverage).
+        # Page selection: explicit page_start/page_end if given, else the
+        # first PDF_READ_MAX_PAGES_PER_CALL pages. This is an ad-hoc VLM read,
+        # not ingest; keep each direct vision call bounded.
         try:
             from pypdf import PdfReader
             total_pages = len(PdfReader(io.BytesIO(pdf_bytes)).pages)
@@ -735,9 +739,11 @@ class PdfPipeline(Pipeline):
             except (TypeError, ValueError):
                 return SegmentResult(error="page_start/page_end must be integers")
         else:
-            ps, pe = 1, min(total_pages or OCR_MAX_PAGES, OCR_MAX_PAGES)
-        # Cap span at OCR_MAX_PAGES to keep the VLM call bounded.
-        pe = min(pe, ps + OCR_MAX_PAGES - 1)
+            ps, pe = 1, min(
+                total_pages or PDF_READ_MAX_PAGES_PER_CALL,
+                PDF_READ_MAX_PAGES_PER_CALL,
+            )
+        pe = min(pe, ps + PDF_READ_MAX_PAGES_PER_CALL - 1)
 
         # Render pages [1..pe], then drop everything before ps. The
         # underlying renderer takes a leading page_count, so we render
@@ -1443,6 +1449,15 @@ def _ocr_total_pages(meta: dict[str, Any], *, fallback: int) -> int:
     return _positive_int(meta.get("pages_total")) or fallback
 
 
+def _ocr_configured_page_cap() -> int | None:
+    return _positive_int(OCR_MAX_PAGES)
+
+
+def _ocr_pages_to_process(total_pages: int) -> int:
+    cap = _ocr_configured_page_cap()
+    return min(total_pages, cap) if cap is not None else total_pages
+
+
 def _add_ocr_window_extras(
     extras: dict[str, Any],
     window: _PdfPageWindow,
@@ -1464,20 +1479,18 @@ def _add_ocr_window_extras(
 
 
 async def _ocr_pdf_pages(pdf_bytes: bytes, total_pages: int) -> list[str]:
-    """Render the first OCR_MAX_PAGES pages to JPEG via pypdfium2,
+    """Render OCR pages to JPEG via pypdfium2,
     down-scale each via downscale_for_vlm, and ask the vision profile
     to extract text in markdown. Returns one entry per rendered page;
-    pages beyond the cap are returned as empty strings.
+    if an explicit OCR_MAX_PAGES cap is configured, pages beyond the cap
+    are returned as empty strings.
 
     Empty / "No text content" responses are normalised to '' so the
     caller can detect the all-empty-page case and raise PdfNeedsOcrError.
     """
-    pages_to_ocr = min(total_pages, OCR_MAX_PAGES)
-    page_jpegs = await asyncio.to_thread(
-        _render_pdf_pages_to_jpeg, pdf_bytes, pages_to_ocr,
-    )
+    pages_to_ocr = _ocr_pages_to_process(total_pages)
     client = get_chat_client("vision")
-    out: list[str] = [""] * len(page_jpegs)
+    out: list[str] = [""] * pages_to_ocr
     sem = asyncio.Semaphore(llm_ingest_concurrency())
 
     async def _ocr_one(i: int, jpeg_bytes: bytes) -> None:
@@ -1508,9 +1521,18 @@ async def _ocr_pdf_pages(pdf_bytes: bytes, total_pages: int) -> list[str]:
             text = ""
         out[i] = text
 
-    await asyncio.gather(*(
-        _ocr_one(i, jpeg_bytes) for i, jpeg_bytes in enumerate(page_jpegs)
-    ))
+    for start in range(0, pages_to_ocr, OCR_RENDER_BATCH_PAGES):
+        batch_count = min(OCR_RENDER_BATCH_PAGES, pages_to_ocr - start)
+        page_jpegs = await asyncio.to_thread(
+            _render_pdf_pages_to_jpeg,
+            pdf_bytes,
+            batch_count,
+            start_page=start,
+        )
+        await asyncio.gather(*(
+            _ocr_one(start + i, jpeg_bytes)
+            for i, jpeg_bytes in enumerate(page_jpegs)
+        ))
     # Pad with empties for pages we skipped past the cap, so caller's
     # page indexing stays aligned with total_pages.
     while len(out) < total_pages:
@@ -1519,7 +1541,7 @@ async def _ocr_pdf_pages(pdf_bytes: bytes, total_pages: int) -> list[str]:
 
 
 def _render_pdf_pages_to_jpeg(
-    pdf_bytes: bytes, page_count: int,
+    pdf_bytes: bytes, page_count: int, *, start_page: int = 0,
 ) -> list[bytes]:
     """Render `page_count` pages to JPEG bytes. Sync, intended to run
     inside asyncio.to_thread. Mirrors WeKnora's PDFScannedParser shape:
@@ -1530,7 +1552,9 @@ def _render_pdf_pages_to_jpeg(
     out: list[bytes] = []
     pdf = pdfium.PdfDocument(pdf_bytes)
     try:
-        for i in range(min(page_count, len(pdf))):
+        start = max(0, start_page)
+        end = min(start + page_count, len(pdf))
+        for i in range(start, end):
             page = pdf[i]
             bitmap = None
             try:

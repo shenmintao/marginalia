@@ -281,7 +281,9 @@ Vision is optional. If configured:
 
 - image ingest can ask a vision model for descriptions;
 - PDF ingest can describe embedded figures;
-- scanned PDFs can fall back to per-page OCR up to a configured cap.
+- scanned PDFs can fall back to full per-page OCR. A deployment may still
+  configure an explicit OCR page cap, but the default is uncapped so stored
+  OCR text does not silently lose later pages.
 
 If vision is absent, scanned PDFs fail with an actionable "needs OCR" state rather than pretending empty text is valid.
 
