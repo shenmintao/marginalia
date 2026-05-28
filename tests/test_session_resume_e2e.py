@@ -196,7 +196,7 @@ async def test_resume_replays_history() -> None:
     # arc and the current question.
     boundary_idx = None
     for i, c in enumerate(contents):
-        if isinstance(c, str) and "本会话之前已完成的回合回放" in c:
+        if isinstance(c, str) and "replay earlier completed turns" in c:
             boundary_idx = i
             break
     assert boundary_idx is not None, "missing resume boundary note"
@@ -252,7 +252,7 @@ async def test_fresh_session_no_resume_prefix() -> None:
     exec_req = chat.requests[1]
     contents = [m.content for m in exec_req.messages]
     boundary_present = any(
-        isinstance(c, str) and "本会话之前已完成的回合回放" in c
+        isinstance(c, str) and "replay earlier completed turns" in c
         for c in contents
     )
     assert not boundary_present, (

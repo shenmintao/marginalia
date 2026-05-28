@@ -229,7 +229,7 @@ def render_format_hint(*, kinds: tuple[str, ...] | None = None) -> str:
         "exactly once, in the order shown. If a separate <sections> hint is "
         "included, place <sections> after <description> and before <extra>. "
         "Do not draft a block and then repeat it.\n"
-        "  <summary>1-2 sentences (≤60 中文字 / ≤30 English words). "
+        "  <summary>1-2 sentences (<=60 Chinese characters / <=30 English words). "
         "The spine of the document, not a retell.</summary>\n"
         "  <description>free-form prose; multi-paragraph OK.</description>"
         + kind_hint + "\n"

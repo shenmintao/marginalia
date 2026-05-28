@@ -69,7 +69,7 @@ and once retrieved, jump to the relevant section by anchor. The indexed text
 may be only the first `indexed_bytes` of a larger file; use only the content
 provided and do not infer missing later content.
 
-`summary` is one or two sentences (≤60 中文字 / ≤30 English words) in the
+`summary` is one or two sentences (<=60 Chinese characters / <=30 English words) in the
 document's own language — the spine of what the document is and why a
 reader would open it. Keep it tight; depth belongs in `description`.
 `description` is a free-text walk-through of what the document covers and how
@@ -405,14 +405,21 @@ class TextPipeline(Pipeline):
         args: dict[str, Any],
         storage: StorageBackend,
     ) -> SegmentResult:
-        body = await self._read_text(
-            storage,
-            file_row.storage_key,
+        body, n_read, source_truncated = await self._read_text_with_meta(
+            storage, file_row.storage_key,
             cap=_read_cap_for_args(args, file_row=file_row),
         )
-        return self._slice(
+        seg = self._slice(
             body=body, args=args, file_row=file_row,
         )
+        seg.extras.setdefault("source_bytes_read", n_read)
+        if source_truncated:
+            seg.extras["source_truncated"] = True
+            seg.extras["hint"] = (
+                "The file is longer than this read window; use offset, "
+                "line_start/line_end, section_id, heading, or pattern to drill in."
+            )
+        return seg
 
     async def read_segment_from_bytes(
         self,
@@ -590,12 +597,10 @@ def _iter_line_chunks(
 
 
 def _read_cap_for_args(args: dict[str, Any], *, file_row: Any) -> int:
-    cap = READ_SEGMENT_BYTES_CAP
     wants_deep_read = any(
         args.get(k) for k in ("section_id", "heading", "line_start", "line_end", "pattern")
     )
-    if wants_deep_read:
-        cap = READ_SEGMENT_DEEP_BYTES_CAP
+    cap = READ_SEGMENT_DEEP_BYTES_CAP if wants_deep_read else 0
 
     try:
         offset = max(0, int(args.get("offset") or 0))
@@ -607,11 +612,15 @@ def _read_cap_for_args(args: dict[str, Any], *, file_row: Any) -> int:
         max_chars = DEFAULT_MAX_CHARS
     if max_chars <= 0:
         max_chars = DEFAULT_MAX_CHARS
-    if offset:
-        # `offset` is a decoded character offset, while storage caps are bytes.
-        # UTF-8 can take up to four bytes per character, so over-read enough for
-        # late chunks in non-ASCII long text.
+
+    if wants_deep_read:
+        # Deep reads may need to scan for a section/heading/pattern, but still
+        # include enough bytes for an explicit late offset if one is supplied.
         cap = max(cap, (offset + max_chars + 4096) * 4)
+    else:
+        # Default chunk reads should be proportional to the requested window,
+        # not the 32MB safety cap. UTF-8 can take up to four bytes per char.
+        cap = min(READ_SEGMENT_BYTES_CAP, (offset + max_chars + 4096) * 4)
 
     raw_size = getattr(file_row, "size_bytes", None)
     try:

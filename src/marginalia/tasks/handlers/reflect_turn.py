@@ -76,31 +76,37 @@ ENTRY_LIMIT = 30  # cap how many entries we feed the model context for
 # as a separate system prompt, so the system prompt stays identical to
 # the execute phase (prefix-cache reuse).
 REFLECT_INSTRUCTIONS = """\
-你现在需要为以上对话生成一条调查日志，供将来的 planner 回忆。
+Generate one investigation journal entry for future planning.
 
-判断：
-1. 如果本轮与知识库内容无关（纯闲聊、问能力、天气等）——留空 <entry> 块。
-2. 否则，填写 <entry>：
+Decision:
+1. If this turn is unrelated to the knowledge base, such as small talk,
+   capability questions, or realtime external data, leave the <entry> block
+   empty.
+2. Otherwise, fill <entry>:
 
-   - question: 用户的问题，用自己的措辞，尽量简洁但保留完整含义。
-   - answer: 调查的实际结论。去掉问候、格式、重复问题——只保留发现、关键名字、数字。
-     如果 agent 说"未找到"，直接写"未找到"——空结果本身值得记录。
-   - entry_ids: agent 实际引用或读取过的、与结论相关的 entry_id。跳过看过但放弃的。
-   - tags: 主题标签，方便日后回忆。
+   - question: restate the user's question concisely, preserving meaning.
+   - answer: record the actual investigation result only. Remove greetings,
+     formatting, and repeated question text. If no evidence was found, write
+     that directly; an empty result is worth remembering.
+   - entry_ids: include only entry IDs the agent actually cited or read and
+     that support the result. Skip items that were inspected and rejected.
+   - tags: short topic tags useful for recall.
 
-与知识库相关的回合总要写一条，哪怕结论是"没找到"。只有纯闲聊才留空。
+Always write an entry for knowledge-base-related turns, including "not found"
+results. Only pure small talk should be empty.
 
-输出格式——恰好一个块：
+Output exactly one block:
 
   <entry>
-  question: 一行问题
-  answer: 自由文本；可多行
+  question: one-line question
+  answer: free text; may span lines
   entry_ids: id1, id2
   tags: tag1, tag2
   </entry>
 
-`answer:` 可跨行，下一个标签字段 `entry_ids:` 或 `tags:` 结束它。
-留空整个块（或省略字段值）以跳过写入。不要用 JSON 或 ``` 围栏。"""
+`answer:` may span lines and ends when the next labeled field,
+`entry_ids:` or `tags:`, starts. Leave the whole block empty, or omit field
+values, to skip writing. Do not output JSON or fenced code."""
 
 
 def _utcnow() -> datetime:
@@ -165,16 +171,16 @@ async def handle_reflect_turn(payload: Mapping[str, Any]) -> None:
         for tc in (conversation.tool_calls or [])
         if isinstance(tc, dict)
     ]
-    tool_summary = ", ".join(tool_names) if tool_names else "(无工具调用)"
+    tool_summary = ", ".join(tool_names) if tool_names else "(no tool calls)"
     reflect_tail = (
-        f"本轮对话概要：\n"
-        f"- 用户提问：{conversation.user_message}\n"
-        f"- 工具调用：{tool_summary}\n"
-        f"- Agent 回答：{(conversation.agent_response or '(无回答)')[:500]}\n\n"
+        f"Current turn summary:\n"
+        f"- User question: {conversation.user_message}\n"
+        f"- Tool calls: {tool_summary}\n"
+        f"- Agent answer: {(conversation.agent_response or '(no answer)')[:500]}\n\n"
     )
     if involved_entry_ids:
         reflect_tail += (
-            f"本轮涉及的 entry_id："
+            f"Entry IDs involved in this turn: "
             + ", ".join(involved_entry_ids)
             + "\n\n"
         )

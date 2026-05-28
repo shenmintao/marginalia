@@ -334,10 +334,10 @@ async def main():
     late = _budget_tail(turn=10)  # used=10, used+1=11 >= 11
     print("[7] tail at turn 0:", early[:60])
     print("[7] tail at turn 10:", late[:80])
-    assert "已用工具回合 0" in early
-    assert "接近预算上限" not in early
-    assert "已用工具回合 10" in late
-    assert "接近预算上限" in late
+    assert "tool rounds used 0" in early
+    assert "close to the budget limit" not in early
+    assert "tool rounds used 10" in late
+    assert "close to the budget limit" in late
 
     print("\nALL AGENT E2E CHECKS PASSED")
 

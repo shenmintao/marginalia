@@ -1,4 +1,4 @@
-"""restructure_catalogs — DESIGN.md §9.4 (重整书架分类).
+"""restructure_catalogs — DESIGN.md §9.4 (catalog restructuring).
 
 LLM-driven catalog tree maintenance. The agent (offline librarian) is asked
 to propose a small list of typed operations against the current catalog

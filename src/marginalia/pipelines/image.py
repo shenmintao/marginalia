@@ -106,7 +106,7 @@ intent, or surrounding context unless it is directly visible in the image or
 provided in context. If something is uncertain, say it is unclear rather than
 guessing.
 
-`summary` is one or two sentences (≤60 中文字 / ≤30 English words) in the
+`summary` is one or two sentences (<=60 Chinese characters / <=30 English words) in the
 user's likely language — the spine of what the image is. Keep it tight;
 detail belongs in `description`. `description` is a free-text walk-through of what the
 image shows — visible text, key objects, layout — multi-paragraph if useful.

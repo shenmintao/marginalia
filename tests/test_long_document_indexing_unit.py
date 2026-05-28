@@ -62,23 +62,34 @@ test entry extra
 </tags>"""
 
 
-def test_pdf_read_segment_can_access_pages_past_ingest_cap(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls: list[int | None] = []
+def _build_text_pdf(page_count: int) -> bytes:
+    from fpdf import FPDF
 
-    def fake_extract(pdf_bytes: bytes, *, max_pages: int | None = 60) -> list[str]:
-        calls.append(max_pages)
-        return [f"text page {i}" for i in range(1, 101)]
+    pdf = FPDF()
+    for i in range(1, page_count + 1):
+        pdf.add_page()
+        pdf.set_font("Helvetica", size=12)
+        pdf.multi_cell(
+            0,
+            8,
+            text=(
+                f"Physical page {i}\n"
+                f"Unique token p{i:03d}\n"
+                "This page has enough extracted text to be treated as a "
+                "normal text-layer PDF rather than scanned OCR input."
+            ),
+        )
+    return bytes(pdf.output())
 
-    monkeypatch.setattr(PdfPipeline, "_extract_text", staticmethod(fake_extract))
 
-    seg = PdfPipeline()._slice(b"fake", {"page_start": 90, "page_end": 91})
+def test_pdf_read_segment_can_access_pages_past_ingest_cap() -> None:
+    pdf_bytes = _build_text_pdf(100)
+    seg = PdfPipeline()._slice(pdf_bytes, {"page_start": 90, "page_end": 91})
 
     assert seg.error is None
-    assert calls == [None]
-    assert "text page 90" in seg.text
-    assert "text page 91" in seg.text
+    assert "Unique token p090" in seg.text
+    assert "Unique token p091" in seg.text
+    assert "Unique token p001" not in seg.text
     assert seg.extras["total_pages"] == 100
 
 
@@ -88,17 +99,6 @@ async def test_pdf_long_ingest_chunks_then_aggregates(
 ) -> None:
     import marginalia.pipelines.pdf as pdf_mod
 
-    def fake_extract(pdf_bytes: bytes, *, max_pages: int | None = 60) -> list[str]:
-        return [
-            (
-                f"Page {i} discusses topic {i}. "
-                "This page has enough extracted text to be treated as a "
-                "normal text-layer PDF rather than scanned OCR input."
-            )
-            for i in range(1, 66)
-        ]
-
-    monkeypatch.setattr(PdfPipeline, "_extract_text", staticmethod(fake_extract))
     monkeypatch.setattr(pdf_mod, "has_vision_profile", lambda: False)
 
     class FakeClient:
@@ -133,7 +133,10 @@ async def test_pdf_long_ingest_chunks_then_aggregates(
     fake = FakeClient()
     monkeypatch.setattr(pdf_mod, "get_chat_client", lambda profile="ingest": fake)
 
-    result = await PdfPipeline().run(ctx=_ctx(), storage=_BytesStorage(b"pdf"))
+    result = await PdfPipeline().run(
+        ctx=_ctx(),
+        storage=_BytesStorage(_build_text_pdf(65)),
+    )
 
     coverage = result.description["coverage"]
     assert coverage["chunked"] is True
@@ -212,7 +215,12 @@ def test_text_read_segment_cap_expands_for_late_offsets_and_deep_reads() -> None
         file_row=Row(),
     )
 
-    assert late_offset_cap >= (50_000_000 + 1000 + 4096) * 4
+    assert late_offset_cap == text_mod.READ_SEGMENT_BYTES_CAP
+    deep_late_offset_cap = text_mod._read_cap_for_args(
+        {"pattern": "needle", "offset": 50_000_000, "max_chars": 1000},
+        file_row=Row(),
+    )
+    assert deep_late_offset_cap >= (50_000_000 + 1000 + 4096) * 4
     assert text_mod._read_cap_for_args(
         {"line_start": 2_000_000},
         file_row=Row(),

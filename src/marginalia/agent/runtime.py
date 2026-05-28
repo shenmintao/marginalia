@@ -68,6 +68,14 @@ from marginalia.llm import (
     get_chat_client,
 )
 from marginalia.config import get_settings
+from marginalia.pipelines.pdf_text import (
+    PdfTextRange,
+    first_page_number,
+    get_pdf_page_labels_for_file,
+    get_pdf_text_for_file,
+    locate_quote_page,
+    resolve_page_label,
+)
 from marginalia.repositories import sessions as session_service
 from marginalia.repositories import entries as entries_repo
 from marginalia.repositories import tags as tags_repo
@@ -104,8 +112,9 @@ NO_PLAN_PREFIX = "NO_PLAN:"
 DOOM_LOOP_WINDOW = 6
 DOOM_LOOP_THRESHOLD = 3
 DOOM_LOOP_NUDGE = (
-    "[runtime guard] 你最近反复在用相似参数调用同一个工具，可能陷入循环。"
-    "请停止扩展工具调用，基于已有结果直接给出最终回答。"
+    "[runtime guard] You have repeatedly called the same tool with similar "
+    "arguments. Stop expanding tool calls and give the final answer from the "
+    "results already collected."
 )
 
 
@@ -594,7 +603,8 @@ def _pick_query_string(
     if _is_pdf_file(file):
         if located_pdf_page:
             return f"?page={located_pdf_page}"
-        return f"?page={page}" if page else ""
+        first = first_page_number(page)
+        return f"?page={first}" if first else ""
     mime = (getattr(file, "mime_type", None) or "").lower()
     ext = (getattr(file, "original_ext", None) or "").lower().lstrip(".")
     kind = (getattr(file, "kind", None) or "").lower()
@@ -608,19 +618,11 @@ def _pick_query_string(
     return ""
 
 
-def _locator_norm(text: str) -> str:
-    return re.sub(r"\s+", " ", text).strip().casefold()
-
-
-def _locator_compact(text: str) -> str:
-    return re.sub(r"\s+", "", text).casefold()
-
-
 async def _locate_pdf_quote_page(
     file: Any,
     quote: str,
     *,
-    pages_cache: dict[str, list[str]] | None = None,
+    pages_cache: dict[str, PdfTextRange] | None = None,
 ) -> int | None:
     storage_key = getattr(file, "storage_key", None)
     if not storage_key or not quote.strip():
@@ -628,33 +630,33 @@ async def _locate_pdf_quote_page(
     try:
         cache_key = str(storage_key)
         if pages_cache is not None and cache_key in pages_cache:
-            pages = pages_cache[cache_key]
+            doc = pages_cache[cache_key]
         else:
-            from marginalia.pipelines.pdf import PdfPipeline
             from marginalia.storage import get_storage
 
             storage = get_storage()
-            pdf_bytes = await PdfPipeline._read_bytes(storage, storage_key)
-            pages = await asyncio.to_thread(
-                PdfPipeline._extract_text, pdf_bytes, max_pages=None,
-            )
+            doc = await get_pdf_text_for_file(storage, file)
             if pages_cache is not None:
-                pages_cache[cache_key] = pages
+                pages_cache[cache_key] = doc
     except Exception:
         log.exception("footnote rewrite: PDF quote locator failed")
         return None
 
-    needle = _unescape_quote(quote)
-    norm_needle = _locator_norm(needle)
-    compact_needle = _locator_compact(needle)
-    if not norm_needle and not compact_needle:
+    return locate_quote_page(doc, quote)
+
+
+async def _resolve_pdf_page_locator(file: Any, page: str | None) -> int | None:
+    first = first_page_number(page)
+    if first is None:
         return None
-    for idx, page_text in enumerate(pages, start=1):
-        if norm_needle and norm_needle in _locator_norm(page_text):
-            return idx
-        if compact_needle and compact_needle in _locator_compact(page_text):
-            return idx
-    return None
+    try:
+        from marginalia.storage import get_storage
+
+        labels = await get_pdf_page_labels_for_file(get_storage(), file)
+        return resolve_page_label(labels, first) or first
+    except Exception:
+        log.exception("footnote rewrite: PDF page-label lookup failed")
+        return first
 
 
 async def _rewrite_footnotes_for_display(answer: str) -> str:
@@ -694,17 +696,22 @@ async def _rewrite_footnotes_for_display(answer: str) -> str:
         return answer
 
     located_pdf_pages: dict[int, int] = {}
-    pdf_pages_cache: dict[str, list[str]] = {}
+    pdf_pages_cache: dict[str, PdfTextRange] = {}
     for m in matches:
         raw_eid = m.group(2).strip()
         full_eid = resolved.get(raw_eid, raw_eid)
         file = file_by_id.get(full_eid)
         quote = m.group(3)
-        if not quote or not _is_pdf_file(file):
+        page = (m.group(4) or "").strip() or None
+        if not _is_pdf_file(file):
             continue
-        located = await _locate_pdf_quote_page(
-            file, quote, pages_cache=pdf_pages_cache,
-        )
+        located = None
+        if quote:
+            located = await _locate_pdf_quote_page(
+                file, quote, pages_cache=pdf_pages_cache,
+            )
+        if located is None and page:
+            located = await _resolve_pdf_page_locator(file, page)
         if located:
             located_pdf_pages[m.start()] = located
 
@@ -769,7 +776,7 @@ async def _run_execute_phase(
     messages: list[ChatMessage] = list(resumed_history or []) + [
         ChatMessage(role="user", content=user_message),
         ChatMessage(role="assistant", content=(
-            "已制定计划：\n" + (plan_text or "(无具体计划，直接基于问题回答)")
+            "Plan prepared:\n" + (plan_text or "(no specific plan; answer directly)")
         )),
     ]
 
@@ -834,7 +841,7 @@ async def _run_execute_phase(
 
         last_text = resp.text or last_text
         if resp.stop_reason in ("end_turn", "stop_sequence"):
-            answer = _strip_leaked_no_plan(resp.text or last_text or "(无回答)")
+            answer = _strip_leaked_no_plan(resp.text or last_text or "(no answer)")
             outcome.answer = answer
             yield AgentEvent(
                 event_type="answer",
@@ -843,7 +850,7 @@ async def _run_execute_phase(
             return
         if resp.stop_reason == "max_tokens":
             log.warning("execute turn %d hit max_tokens; treating as final", turn)
-            answer = _strip_leaked_no_plan(resp.text or last_text or "(无回答)")
+            answer = _strip_leaked_no_plan(resp.text or last_text or "(no answer)")
             outcome.answer = answer
             yield AgentEvent(
                 event_type="answer",
@@ -855,7 +862,7 @@ async def _run_execute_phase(
                 MAX_EXECUTE_TURNS)
     fallback = _strip_leaked_no_plan(
         last_text
-        or "对不起——本轮调查超过了预算上限，没能给出完整回答。请把问题分小或换个角度再试。"
+        or "This investigation exceeded the turn budget before a complete answer was produced. Please narrow the question or try another angle."
     )
     outcome.truncated = True
     outcome.answer = fallback
@@ -873,11 +880,15 @@ def _budget_tail(*, turn: int) -> str | None:
     """
     used = turn  # turns already consumed before this call
     left = MAX_EXECUTE_TURNS - used
-    base = f"[turn tail] 已用工具回合 {used} / 上限 {MAX_EXECUTE_TURNS}（剩余 {left}）。"
+    base = (
+        f"[turn tail] tool rounds used {used} / limit {MAX_EXECUTE_TURNS} "
+        f"(remaining {left})."
+    )
     if used + 1 >= EXECUTE_NUDGE_FROM:
         base += (
-            " 你已接近预算上限——除非缺一两个关键证据，本轮请直接给出"
-            "基于已收集材料的最终回答；不要再调用工具。"
+            " You are close to the budget limit. Unless one or two key pieces "
+            "of evidence are missing, give the final answer from the material "
+            "already collected; do not call more tools."
         )
     return base
 

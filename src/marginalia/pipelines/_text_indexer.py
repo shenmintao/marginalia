@@ -37,7 +37,7 @@ truncated prefix, sampled rows, sampled log lines, or otherwise partial. Use
 only the content provided and the supplied coverage metadata; do not infer
 missing content.
 
-`summary` is one or two sentences (≤60 中文字 / ≤30 English words) in the
+`summary` is one or two sentences (<=60 Chinese characters / <=30 English words) in the
 document's own language — the spine of what the document is and why a
 reader would open it. Keep it tight; depth belongs in `description`.
 `description` is a free-text walk-through of the document's organisation —

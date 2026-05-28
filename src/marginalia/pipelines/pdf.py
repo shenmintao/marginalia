@@ -51,6 +51,13 @@ from marginalia.pipelines._long_index import (
     renumber_sections,
 )
 from marginalia.pipelines.image import downscale_for_vlm
+from marginalia.pipelines.pdf_text import (
+    extract_pdf_page_labels,
+    extract_pdf_text_range,
+    pdf_page_count,
+    render_pdf_text_pages,
+    resolve_page_label,
+)
 from marginalia.pipelines.registry import register_pipeline
 from marginalia.storage.base import StorageBackend
 
@@ -64,6 +71,9 @@ PDF_SECTION_DIGEST_BYTES = 60_000 # cap the aggregate summary prompt
 MIN_TEXT_PER_PAGE_FOR_TEXT_LAYER = 50  # if every page yields fewer chars,
                                        # the doc is probably scanned
 OCR_MAX_PAGES = 50                # cap how many pages we OCR per doc
+PDF_READ_MAX_PAGES_PER_CALL = 50
+PDF_PATTERN_UNSCOPED_MAX_PAGES = 200
+PDF_DEFAULT_READ_PAGES = 20
 OCR_RENDER_DPI = 200              # JPEG render DPI before VLM (sweet spot)
 OCR_VLM_MAX_LONG_EDGE = 2048      # OCR is glyph-sensitive — keep more
                                   # detail than the caption path's 1568
@@ -88,7 +98,7 @@ not infer content from missing pages. Produce a structured index that lets a
 downstream agent decide whether to retrieve the document and find the
 relevant page.
 
-`summary` is one or two sentences (≤60 中文字 / ≤30 English words) in the
+`summary` is one or two sentences (<=60 Chinese characters / <=30 English words) in the
 document's own language — the spine of what the document is and why a
 reader would open it. Keep it tight; depth belongs in `description`.
 `description` is a free-text walk-through of the document's structure and
@@ -157,8 +167,8 @@ class PdfNeedsOcrError(Exception):
 
 
 _NO_TEXT_LAYER_ERROR = (
-    "PDF 无文本层——页面可能是扫描图片。"
-    "传 `question` 参数使用视觉模型读取。"
+    "PDF has no usable text layer; pages may be scanned images. "
+    "Pass the `question` parameter to read it with the vision model."
 )
 
 
@@ -265,9 +275,7 @@ class PdfPipeline(Pipeline):
 
     @staticmethod
     def _page_count(pdf_bytes: bytes) -> int:
-        from pypdf import PdfReader
-
-        return len(PdfReader(io.BytesIO(pdf_bytes)).pages)
+        return pdf_page_count(pdf_bytes)
 
     def _needs_chunked_index(
         self,
@@ -765,109 +773,154 @@ class PdfPipeline(Pipeline):
         returns an actionable error suggesting `question` for VLM-based
         reading instead of the opaque "empty result".
         """
+        return self._slice_text_layer(pdf_bytes, args)
+
+    def _slice_text_layer(
+        self, pdf_bytes: bytes, args: dict[str, Any],
+    ) -> SegmentResult:
         try:
-            pages = self._extract_text(pdf_bytes, max_pages=None)
+            labels = extract_pdf_page_labels(pdf_bytes)
+            total_pages = len(labels)
         except Exception as exc:  # noqa: BLE001
             return SegmentResult(error=f"PDF parse failed: {exc}")
-        total_pages = len(pages)
-        non_empty_pages = sum(1 for t in pages if t.strip())
-        body = "\n\n".join(
-            f"[Page {i+1}]\n{txt}" for i, txt in enumerate(pages) if txt
+        if total_pages == 0:
+            return SegmentResult(error="PDF has no pages")
+
+        offset = _int_arg(args.get("offset"), default=0, minimum=0)
+        max_chars = _int_arg(
+            args.get("max_chars"), default=self.READ_DEFAULT_MAX_CHARS, minimum=1,
         )
 
-        offset = max(0, int(args.get("offset") or 0))
-        max_chars = int(args.get("max_chars") or self.READ_DEFAULT_MAX_CHARS)
-        if max_chars <= 0:
-            max_chars = self.READ_DEFAULT_MAX_CHARS
-
-        # Pattern search: if entire PDF has no text layer, give actionable
-        # guidance instead of the generic "no matches". When page_start /
-        # page_end are also provided, the search is restricted to that
-        # window so the LLM can drill into a known region.
         pattern = (args.get("pattern") or "").strip()
+        has_page_scope = _has_pdf_page_scope(args)
         if pattern:
-            if non_empty_pages == 0:
-                return SegmentResult(
-                    error=_NO_TEXT_LAYER_ERROR,
-                    extras={"pattern": pattern, "total_pages": total_pages},
+            if has_page_scope:
+                resolved = _resolve_pdf_page_window(
+                    args,
+                    total_pages=total_pages,
+                    labels=labels,
+                    default_all=True,
+                    max_pages=PDF_READ_MAX_PAGES_PER_CALL,
                 )
-            scope_pages = pages
-            page_offset = 0
-            ps_raw = args.get("page_start")
-            pe_raw = args.get("page_end")
-            if ps_raw or pe_raw:
-                try:
-                    ps = max(1, int(ps_raw)) if ps_raw else 1
-                    pe = int(pe_raw) if pe_raw else total_pages
-                except (TypeError, ValueError):
-                    return SegmentResult(error="page_start/page_end must be integers")
-                if total_pages == 0:
-                    return SegmentResult(error="PDF has no pages")
-                ps = max(1, min(ps, total_pages))
-                pe = max(ps, min(pe, total_pages))
-                scope_pages = pages[ps - 1: pe]
-                page_offset = ps - 1
-            return _pdf_pattern_search(
-                pages=scope_pages, pattern=pattern,
-                context_lines=int(args.get("context_lines") or 2),
-                max_matches=int(args.get("max_matches") or 20),
-                match_offset=max(0, int(args.get("match_offset") or 0)),
-                page_offset=page_offset,
-                total_pages_full=total_pages,
+            else:
+                end = min(total_pages, PDF_PATTERN_UNSCOPED_MAX_PAGES)
+                resolved = _PdfPageWindow(
+                    page_start=1,
+                    page_end=end,
+                    requested_page_end=total_pages,
+                    truncated=end < total_pages,
+                )
+            if isinstance(resolved, SegmentResult):
+                return resolved
+            doc = extract_pdf_text_range(
+                pdf_bytes,
+                page_start=resolved.page_start,
+                page_end=resolved.page_end,
             )
-
-        page_start = args.get("page_start")
-        page_end = args.get("page_end")
-        if page_start:
-            try:
-                ps = int(page_start)
-            except (TypeError, ValueError):
-                return SegmentResult(error="page_start must be an integer")
-            try:
-                pe = int(page_end) if page_end else ps
-            except (TypeError, ValueError):
-                return SegmentResult(error="page_end must be an integer")
-            if total_pages == 0:
-                return SegmentResult(error="PDF has no pages")
-            ps = max(1, min(ps, total_pages))
-            pe = max(ps, min(pe, total_pages))
-            # If all pages in the requested range are empty, give actionable
-            # guidance instead of the opaque "empty result".
-            range_empty = all(not pages[i - 1].strip() for i in range(ps, pe + 1))
-            if range_empty:
+            if all(not page.strip() for page in doc.pages):
                 return SegmentResult(
                     error=_NO_TEXT_LAYER_ERROR,
                     extras={
-                        "page_start": ps, "page_end": pe,
+                        "pattern": pattern,
                         "total_pages": total_pages,
-                        "empty_pages_in_range": pe - ps + 1,
+                        "page_start": resolved.page_start,
+                        "page_end": resolved.page_end,
                     },
                 )
-            slab = "\n\n".join(
-                f"[Page {i}]\n{pages[i-1]}" for i in range(ps, pe + 1)
-                if pages[i-1]
+            result = _pdf_pattern_search(
+                pages=doc.pages,
+                pattern=pattern,
+                context_lines=int(args.get("context_lines") or 2),
+                max_matches=int(args.get("max_matches") or 20),
+                match_offset=max(0, int(args.get("match_offset") or 0)),
+                page_offset=doc.page_start - 1,
+                total_pages_full=total_pages,
+                page_labels=doc.page_labels,
             )
-            return _clamp_pdf(
-                slab, offset, max_chars,
-                extras={
-                    "page_start": ps, "page_end": pe,
-                    "total_pages": total_pages,
-                },
-            )
+            _add_pdf_window_extras(result.extras, resolved, doc)
+            if resolved.truncated:
+                result.extras["search_truncated"] = True
+                result.extras["hint"] = (
+                    "PDF search was capped; use read_entries_metadata sections, "
+                    "then pass page_start/page_end."
+                )
+            return result
 
-        # Full-body default: if no text at all, give actionable guidance.
-        if non_empty_pages == 0:
-            return SegmentResult(
-                error=_NO_TEXT_LAYER_ERROR,
+        if has_page_scope:
+            resolved = _resolve_pdf_page_window(
+                args,
+                total_pages=total_pages,
+                labels=labels,
+                default_all=False,
+                max_pages=PDF_READ_MAX_PAGES_PER_CALL,
+            )
+            if isinstance(resolved, SegmentResult):
+                return resolved
+            doc = extract_pdf_text_range(
+                pdf_bytes,
+                page_start=resolved.page_start,
+                page_end=resolved.page_end,
+            )
+            if all(not page.strip() for page in doc.pages):
+                return SegmentResult(
+                    error=_NO_TEXT_LAYER_ERROR,
+                    extras={
+                        "page_start": doc.page_start,
+                        "page_end": doc.page_start + len(doc.pages) - 1,
+                        "total_pages": total_pages,
+                        "empty_pages_in_range": len(doc.pages),
+                    },
+                )
+            result = _clamp_pdf(
+                render_pdf_text_pages(doc),
+                offset,
+                max_chars,
                 extras={"total_pages": total_pages},
             )
-        # Compute page range from char offset so footnotes can deep-link
-        # even when the LLM reads by offset rather than page_start/page_end.
+            _add_pdf_window_extras(result.extras, resolved, doc)
+            return result
+
+        end = min(total_pages, PDF_DEFAULT_READ_PAGES)
+        doc = extract_pdf_text_range(pdf_bytes, page_start=1, page_end=end)
+        if all(not page.strip() for page in doc.pages):
+            return SegmentResult(
+                error=_NO_TEXT_LAYER_ERROR,
+                extras={"total_pages": total_pages, "page_end": end},
+            )
+        body = render_pdf_text_pages(doc)
+        if offset >= len(body) and end < total_pages:
+            return SegmentResult(
+                error=(
+                    "offset is beyond the default PDF read window; use "
+                    "page_start/page_end from metadata sections instead"
+                ),
+                extras={
+                    "total_pages": total_pages,
+                    "page_start": 1,
+                    "page_end": end,
+                    "read_truncated": True,
+                    "next_page_start": end + 1,
+                },
+            )
         ps, pe = _page_range_from_offset(body, offset, max_chars, total_pages)
-        return _clamp_pdf(
-            body, offset, max_chars,
+        result = _clamp_pdf(
+            body,
+            offset,
+            max_chars,
             extras={"total_pages": total_pages, "page_start": ps, "page_end": pe},
         )
+        if end < total_pages:
+            result.extras.update({
+                "read_truncated": True,
+                "read_page_end": end,
+                "next_page_start": end + 1,
+                "hint": (
+                    "Only the first PDF page window was extracted; use "
+                    "read_entries_metadata sections, then read a targeted "
+                    "page_start/page_end window."
+                ),
+            })
+        return result
 
     @staticmethod
     def _extract_text(
@@ -878,17 +931,12 @@ class PdfPipeline(Pipeline):
         `max_pages` is only for prompt construction. Readback passes
         `None` so `read_files(page_start=900)` can access late pages.
         """
-        from pypdf import PdfReader  # imported lazily so the package is optional
-        reader = PdfReader(io.BytesIO(pdf_bytes))
-        pages = reader.pages if max_pages is None else reader.pages[:max_pages]
-        out: list[str] = []
-        for p in pages:
-            try:
-                txt = p.extract_text() or ""
-            except Exception:  # noqa: BLE001 — pypdf occasionally throws
-                txt = ""
-            out.append(txt)
-        return out
+        doc = extract_pdf_text_range(
+            pdf_bytes,
+            page_start=1,
+            page_end=max_pages,
+        )
+        return doc.pages
 
     @staticmethod
     def _truncate(rendered: str) -> str:
@@ -1227,6 +1275,108 @@ def render_pages_with_figures(
 # read_segment helpers
 # ---------------------------------------------------------------------------
 
+@dataclass(slots=True)
+class _PdfPageWindow:
+    page_start: int
+    page_end: int
+    requested_page_end: int
+    truncated: bool = False
+    page_label: str | None = None
+    resolved_page: int | None = None
+
+
+def _int_arg(value: Any, *, default: int, minimum: int | None = None) -> int:
+    if value in (None, ""):
+        parsed = default
+    else:
+        parsed = int(value)
+    if minimum is not None:
+        parsed = max(minimum, parsed)
+    return parsed
+
+
+def _has_pdf_page_scope(args: dict[str, Any]) -> bool:
+    return any(
+        args.get(key) not in (None, "")
+        for key in ("page_start", "page_end", "page_label")
+    )
+
+
+def _resolve_pdf_page_window(
+    args: dict[str, Any],
+    *,
+    total_pages: int,
+    labels: list[str],
+    default_all: bool,
+    max_pages: int,
+) -> _PdfPageWindow | SegmentResult:
+    try:
+        page_label_raw = args.get("page_label")
+        if page_label_raw not in (None, ""):
+            resolved = resolve_page_label(labels, page_label_raw)
+            if resolved is None:
+                return SegmentResult(
+                    error="page_label was not found in PDF page labels",
+                    extras={
+                        "page_label": str(page_label_raw),
+                        "total_pages": total_pages,
+                    },
+                )
+            start = resolved
+            end = _int_arg(args.get("page_end"), default=start, minimum=start)
+            requested_end = min(end, total_pages)
+            end = min(requested_end, start + max_pages - 1)
+            return _PdfPageWindow(
+                page_start=start,
+                page_end=end,
+                requested_page_end=requested_end,
+                truncated=end < requested_end,
+                page_label=str(page_label_raw),
+                resolved_page=resolved,
+            )
+
+        start = _int_arg(args.get("page_start"), default=1, minimum=1)
+        default_end = total_pages if default_all else start
+        end = _int_arg(args.get("page_end"), default=default_end, minimum=start)
+    except (TypeError, ValueError):
+        return SegmentResult(
+            error="page_start/page_end/page_label must identify PDF pages",
+            extras={"total_pages": total_pages},
+        )
+
+    start = max(1, min(start, total_pages))
+    requested_end = max(start, min(end, total_pages))
+    capped_end = min(requested_end, start + max_pages - 1)
+    return _PdfPageWindow(
+        page_start=start,
+        page_end=capped_end,
+        requested_page_end=requested_end,
+        truncated=capped_end < requested_end,
+    )
+
+
+def _add_pdf_window_extras(
+    extras: dict[str, Any],
+    window: _PdfPageWindow,
+    doc: Any,
+) -> None:
+    page_end = doc.page_start + len(doc.pages) - 1 if doc.pages else doc.page_start
+    extras.update({
+        "page_start": doc.page_start,
+        "page_end": page_end,
+        "total_pages": doc.total_pages,
+    })
+    if doc.page_labels:
+        extras["page_label_start"] = doc.page_labels[0]
+        extras["page_label_end"] = doc.page_labels[-1]
+    if window.page_label is not None:
+        extras["page_label"] = window.page_label
+        extras["resolved_page"] = window.resolved_page
+    if window.truncated:
+        extras["window_truncated"] = True
+        extras["requested_page_end"] = window.requested_page_end
+
+
 _PAGE_MARKER_RE = re.compile(r"\[Page (\d+)\]")
 
 
@@ -1284,6 +1434,7 @@ def _pdf_pattern_search(
     context_lines: int, max_matches: int,
     match_offset: int = 0, page_offset: int = 0,
     total_pages_full: int | None = None,
+    page_labels: list[str] | None = None,
 ) -> SegmentResult:
     try:
         rx = re.compile(pattern, re.IGNORECASE | re.MULTILINE)
@@ -1297,17 +1448,21 @@ def _pdf_pattern_search(
         if not page_text:
             continue
         page_no = idx + 1 + page_offset
+        label = page_labels[idx] if page_labels and idx < len(page_labels) else None
         page_lines = page_text.splitlines()
         for m in rx.finditer(page_text):
             line_no = page_text.count("\n", 0, m.start()) + 1
             s = max(0, line_no - 1 - context_lines)
             e = min(len(page_lines), line_no + context_lines)
-            all_hits.append({
+            hit = {
                 "page": page_no,
                 "line": line_no,
                 "match": m.group(0)[:200],
                 "context": "\n".join(page_lines[s:e]),
-            })
+            }
+            if label is not None:
+                hit["page_label"] = label
+            all_hits.append(hit)
 
     total = len(all_hits)
     hits = all_hits[match_offset: match_offset + max_matches]
@@ -1335,8 +1490,12 @@ def _pdf_pattern_search(
             err = "no matches"
         return SegmentResult(text="", error=err, extras=extras)
 
-    rendered = "\n\n".join(
-        f"[Page {h['page']} L{h['line']}] {h['match']}\n  ┊ {h['context']}"
-        for h in hits
-    )
-    return SegmentResult(text=rendered, extras=extras)
+    rendered_lines: list[str] = []
+    for h in hits:
+        label = h.get("page_label")
+        label_text = f" label {label}" if label and label != str(h["page"]) else ""
+        rendered_lines.append(
+            f"[Page {h['page']}{label_text} L{h['line']}] "
+            f"{h['match']}\n  > {h['context']}"
+        )
+    return SegmentResult(text="\n\n".join(rendered_lines), extras=extras)

@@ -178,6 +178,8 @@ def _read_segment(seg: Mapping[str, Any]) -> str:
         ps = seg["page_start"]
         pe = seg.get("page_end") or ps
         return f"pages {ps}-{pe}" if pe != ps else f"page {ps}"
+    if seg.get("page_label"):
+        return f"page label {seg['page_label']!r}"
     if seg.get("line_start") is not None:
         ls = seg["line_start"]
         le = seg.get("line_end") or ls

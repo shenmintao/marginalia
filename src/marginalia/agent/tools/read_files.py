@@ -11,6 +11,7 @@ Accepts a list of `requests`, each:
       { "heading": "Algorithm" },
       { "line_start": 100, "line_end": 150 },
       { "page_start": 3, "page_end": 5 },          // PDF only
+      { "page_label": "54" },                      // PDF printed label
       { "paragraph_start": 4, "paragraph_end": 12 }, // DOCX only
       { "pattern": "leader.*election", "context_lines": 3, "max_matches": 10 },
       { "member_path": "papers/raft.pdf", "page_start": 4 }   // container
@@ -90,6 +91,15 @@ SCHEMA: dict[str, Any] = {
                                 # PDF
                                 "page_start": {"type": "integer", "minimum": 1},
                                 "page_end": {"type": "integer", "minimum": 1},
+                                "page_label": {
+                                    "type": "string",
+                                    "description": (
+                                        "PDF only: printed/logical page label "
+                                        "from the PDF's page-label metadata. "
+                                        "Prefer page_start/page_end from prior "
+                                        "read_files results when available."
+                                    ),
+                                },
                                 # DOCX
                                 "paragraph_start": {"type": "integer", "minimum": 1},
                                 "paragraph_end": {"type": "integer", "minimum": 1},
@@ -150,7 +160,8 @@ SCHEMA: dict[str, Any] = {
         "Open file contents for one or more entries. Each request lists "
         "one or more `reads`, each addressing a slice via fields the "
         "pipeline understands (offset/max_chars for any file; "
-        "page_start/page_end for PDF; line_start/line_end / section_id / "
+        "page_start/page_end or page_label for PDF; "
+        "line_start/line_end / section_id / "
         "heading for text; pattern for regex search; member_path for "
         "container members). `pattern` can be combined with a range "
         "(page_start/end, line_start/end, paragraph_start/end, or "

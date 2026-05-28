@@ -286,7 +286,7 @@ async def test_doom_loop_nudge() -> None:
         if isinstance(msg.content, list):
             for block in msg.content:
                 content = getattr(block, "content", "") or ""
-                if "runtime guard" in content and "陷入循环" in content:
+                if "runtime guard" in content and "repeatedly called" in content:
                     nudge_seen = True
     assert nudge_seen, (
         "doom-loop nudge not appended to last tool_result. "
