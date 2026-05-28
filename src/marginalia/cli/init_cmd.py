@@ -40,6 +40,11 @@ STORAGE_BACKEND=mirror
 # as a separate process.
 WORKER_ENABLED=false
 
+# Automatic active -> demoted -> archived lifecycle transitions. Personal
+# knowledge bases usually want manual lifecycle control; shared/team
+# deployments can opt in.
+AUTO_LIFECYCLE_ENABLED=false
+
 # LLM defaults — every profile (chat / reflect / ingest / vision / audio)
 # inherits these unless overridden by LLM_<PROFILE>_* keys.
 LLM_DEFAULT_PROVIDER=openai

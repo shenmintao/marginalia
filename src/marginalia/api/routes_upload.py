@@ -24,7 +24,6 @@ from marginalia.services.folders import (
     FolderNotFoundError,
 )
 from marginalia.services.upload import (
-    DEFAULT_ON_CONFLICT,
     DisplayNameConflictError,
     upload as upload_service,
 )
@@ -61,7 +60,7 @@ async def upload_endpoint(
         "Optional override for the entry's display_name. Required when "
         "remote_path's last segment has no extension AND no trailing '/'."
     )),
-    on_conflict: Literal["rename", "error", "skip"] = Query(default=DEFAULT_ON_CONFLICT),
+    on_conflict: Literal["rename", "error", "skip"] | None = Query(default=None),
     file: UploadFile = File(...),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:

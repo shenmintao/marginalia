@@ -32,6 +32,7 @@ os.environ["STORAGE_BACKEND"] = "local"
 os.environ["WORKER_ENABLED"] = "false"
 os.environ["WORKER_POLL_INTERVAL_SECONDS"] = "0.1"
 os.environ["WORKER_LEASE_SECONDS"] = "5"
+os.environ["AUTO_LIFECYCLE_ENABLED"] = "true"
 os.environ["LLM_DEFAULT_API_KEY"] = "sk-fake"
 os.environ["LLM_DEFAULT_MODEL"] = "fake-model"
 
@@ -43,6 +44,7 @@ get_settings.cache_clear()  # type: ignore[attr-defined]
 from marginalia.db.engine import get_engine, get_session_factory
 from marginalia.db.models import AuditEvent, Base
 from marginalia.db.models.tasks import Task
+from marginalia.repositories import tasks as tasks_repo
 from marginalia.tasks.handlers.periodic_tick import (
     bootstrap_periodic_tick,
     handle_periodic_tick,
@@ -180,6 +182,13 @@ async def main():
         stuck_id, exhausted_id = stuck.id, exhausted.id
 
     await handle_recover_stuck_tasks({})
+
+    async with factory() as s:
+        changed = await tasks_repo.mark_done(
+            s, task_id=stuck_id, now=_now(), worker_id="dead-worker",
+        )
+        await s.commit()
+        assert changed is False, "stale worker must not complete a recovered task"
 
     async with factory() as s:
         s_row = await s.get(Task, stuck_id)

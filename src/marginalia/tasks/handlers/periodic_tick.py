@@ -22,6 +22,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
+from marginalia.config import get_settings
 from marginalia.repositories import audit_events as audit_events_repo
 from marginalia.db.session import session_scope
 from marginalia.repositories import files as files_repo
@@ -37,6 +38,7 @@ from marginalia.services.reprocess import reprocess_file
 from marginalia.tasks.enqueue import enqueue
 from marginalia.tasks.kinds import (
     KIND_PERIODIC_TICK,
+    KIND_SUGGEST_LIFECYCLE,
     KIND_SUMMARIZE_SESSION,
     PERIODIC_INTERVALS,
     task_handler,
@@ -72,13 +74,19 @@ def _aware(dt: datetime | None) -> datetime | None:
 @task_handler(KIND_PERIODIC_TICK)
 async def handle_periodic_tick(payload: Mapping[str, Any]) -> None:
     now = _utcnow()
+    settings = get_settings()
 
     async with session_scope() as session:
         dispatched: list[str] = []
         skipped_recent: list[str] = []
         skipped_inflight: list[str] = []
+        skipped_disabled: list[str] = []
 
         for kind, interval in PERIODIC_INTERVALS.items():
+            if kind == KIND_SUGGEST_LIFECYCLE and not settings.auto_lifecycle_enabled:
+                skipped_disabled.append(kind)
+                continue
+
             if await tasks_repo.has_inflight_for_kind(session, kind):
                 skipped_inflight.append(kind)
                 continue
@@ -142,6 +150,7 @@ async def handle_periodic_tick(payload: Mapping[str, Any]) -> None:
                 "dispatched": dispatched,
                 "skipped_recent": skipped_recent,
                 "skipped_inflight": skipped_inflight,
+                "skipped_disabled": skipped_disabled,
                 "next_tick_at": next_run.isoformat(),
             },
         )

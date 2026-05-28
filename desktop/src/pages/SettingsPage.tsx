@@ -280,6 +280,7 @@ function ServerSection({ ctx }: { ctx: ServerCtx }) {
           {server.worker_batch_size != null && (
             <Kv k="Concurrent ingest tasks" v={String(server.worker_batch_size)} />
           )}
+          <Kv k="Auto lifecycle" v={server.auto_lifecycle_enabled ? "enabled" : "disabled"} />
           <Kv k="Default conflict policy" v={server.default_on_conflict} />
           <Kv
             k="Agent token budget (plan/exec)"

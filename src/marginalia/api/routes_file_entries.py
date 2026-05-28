@@ -25,7 +25,6 @@ from marginalia.db.models import FileEntry
 from marginalia.db.session import get_session
 from marginalia.services import entries as entry_service
 from marginalia.services.upload import (
-    DEFAULT_ON_CONFLICT,
     DisplayNameConflictError,
 )
 
@@ -35,12 +34,12 @@ router = APIRouter(prefix="/file-entries", tags=["file_entries"])
 
 class RenameBody(BaseModel):
     display_name: str
-    on_conflict: Literal["rename", "error", "skip"] = DEFAULT_ON_CONFLICT
+    on_conflict: Literal["rename", "error", "skip"] | None = None
 
 
 class MoveBody(BaseModel):
     folder_id: str
-    on_conflict: Literal["rename", "error", "skip"] = DEFAULT_ON_CONFLICT
+    on_conflict: Literal["rename", "error", "skip"] | None = None
 
 
 class LifecycleBody(BaseModel):

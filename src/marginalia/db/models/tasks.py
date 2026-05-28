@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import CheckConstraint, JSON, Index, Integer, String, Text
+from sqlalchemy import CheckConstraint, JSON, Index, Integer, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from marginalia.db.models.base import Base, IdMixin, UtcDateTime
@@ -22,6 +22,17 @@ class Task(Base, IdMixin):
     __table_args__ = (
         Index("ix_tasks_status_sched_priority", "status", "scheduled_at", "priority"),
         Index("ix_tasks_dedup_key_active", "dedup_key"),
+        Index(
+            "uq_tasks_active_dedup_key",
+            "dedup_key",
+            unique=True,
+            sqlite_where=text(
+                "dedup_key IS NOT NULL AND status IN ('pending', 'running')"
+            ),
+            postgresql_where=text(
+                "dedup_key IS NOT NULL AND status IN ('pending', 'running')"
+            ),
+        ),
         Index("ix_tasks_kind_status", "kind", "status"),
         CheckConstraint(_in_clause("status", TASK_STATUSES), name="status"),
     )

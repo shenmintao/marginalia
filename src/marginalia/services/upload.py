@@ -52,14 +52,16 @@ from marginalia.utils.ids import new_id, storage_prefix
 
 _NameConflictPolicy = Literal["rename", "error", "skip"]
 
-def _resolve_default_on_conflict() -> _NameConflictPolicy:
-    # Resolved once at module import; env-driven via DEFAULT_ON_CONFLICT
-    # in .env. Per-call overrides on /v1/upload and file-entry routes
-    # still win when set.
+DEFAULT_ON_CONFLICT: _NameConflictPolicy = "rename"
+
+def resolve_on_conflict(
+    on_conflict: _NameConflictPolicy | None,
+) -> _NameConflictPolicy:
+    """Resolve the runtime default lazily so GUI settings take effect."""
+    if on_conflict is not None:
+        return on_conflict
     from marginalia.config import get_settings
     return get_settings().default_on_conflict
-
-DEFAULT_ON_CONFLICT: _NameConflictPolicy = _resolve_default_on_conflict()
 
 @dataclass(slots=True)
 class UploadResult:
@@ -134,7 +136,7 @@ async def upload(
     folder_id: str | None = None,
     display_name: str | None = None,
     content_type: str | None = None,
-    on_conflict: _NameConflictPolicy = DEFAULT_ON_CONFLICT,
+    on_conflict: _NameConflictPolicy | None = None,
 ) -> UploadResult:
     """Upload a single file. Two destination styles, exactly one required:
 
@@ -166,6 +168,7 @@ async def upload(
     desired_name = (derived_name or fallback_name).strip()
     if not desired_name:
         raise ValueError("display_name and fallback_name both empty")
+    on_conflict = resolve_on_conflict(on_conflict)
 
     folder_id_for_lookup = resolved_folder_id
 

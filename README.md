@@ -223,6 +223,7 @@ STORAGE_BACKEND=mirror           # default. user-readable folder tree:
                                  # ~5x faster for high-churn) / 's3'
 
 WORKER_ENABLED=true              # default in embedded mode
+AUTO_LIFECYCLE_ENABLED=false     # opt in to automatic demote/archive
 
 LLM_DEFAULT_PROVIDER=openai      # or anthropic
 LLM_DEFAULT_API_KEY=sk-...

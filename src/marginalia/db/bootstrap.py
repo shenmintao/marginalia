@@ -244,6 +244,50 @@ def _ensure_conversations_session_turn_unique(bind) -> None:
     ))
 
 
+def _ensure_tasks_active_dedup_unique(bind) -> None:
+    """Enforce at most one pending/running task per dedup_key.
+
+    `enqueue()` performs a best-effort read before insert, but concurrent
+    workers need the database to be the source of truth. Done/dead rows are
+    historical facts and may keep the same dedup_key.
+    """
+    inspector = sa.inspect(bind)
+    if "tasks" not in inspector.get_table_names():
+        return
+
+    indexes = inspector.get_indexes("tasks")
+    has_unique = any(
+        idx["name"] == "uq_tasks_active_dedup_key"
+        and idx.get("unique", False)
+        for idx in indexes
+    )
+    if has_unique:
+        return
+
+    dup_rows = bind.execute(sa.text(
+        "SELECT dedup_key, COUNT(*) AS n "
+        "FROM tasks "
+        "WHERE dedup_key IS NOT NULL AND status IN ('pending', 'running') "
+        "GROUP BY dedup_key "
+        "HAVING COUNT(*) > 1 "
+        "LIMIT 5"
+    )).fetchall()
+    if dup_rows:
+        sample = ", ".join(
+            f"(dedup_key={r[0]!r}, count={r[1]})" for r in dup_rows
+        )
+        raise RuntimeError(
+            "Cannot enforce unique active task dedup_key: existing active "
+            f"duplicates found - {sample}. Resolve or finish duplicates and restart."
+        )
+
+    bind.execute(sa.text(
+        "CREATE UNIQUE INDEX uq_tasks_active_dedup_key "
+        "ON tasks (dedup_key) "
+        "WHERE dedup_key IS NOT NULL AND status IN ('pending', 'running')"
+    ))
+
+
 def bootstrap_baseline_sync(bind) -> None:
     """v1 baseline — `Base.metadata.create_all` plus the `_inbox` seed.
 
@@ -283,6 +327,7 @@ POST_BASELINE_SHIMS: tuple[tuple[str, Callable[[Any], None]], ...] = (
     ("0004_repair_dangling_file_entries_fks", _repair_dangling_file_entries_fks),
     ("0005_sessions_end_reason_check", _relax_sessions_end_reason_check),
     ("0006_conversations_session_turn_unique", _ensure_conversations_session_turn_unique),
+    ("0007_tasks_active_dedup_unique", _ensure_tasks_active_dedup_unique),
 )
 
 ALEMBIC_HEAD_REVISION = POST_BASELINE_SHIMS[-1][0]

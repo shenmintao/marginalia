@@ -28,10 +28,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from marginalia.db.models import File, FileEntry, Folder
 from marginalia.repositories import audit_events as audit_events_repo
 from marginalia.services.upload import (
-    DEFAULT_ON_CONFLICT,
     DisplayNameConflictError,
     _existing_entry_with_name,
     _resolve_display_name,
+    resolve_on_conflict,
 )
 from marginalia.storage import MirrorStorage, get_storage
 
@@ -107,9 +107,10 @@ async def rename_entry(
     *,
     entry_id: str,
     new_name: str,
-    on_conflict: Literal["rename", "error", "skip"] = DEFAULT_ON_CONFLICT,
+    on_conflict: Literal["rename", "error", "skip"] | None = None,
 ) -> FileEntry:
     entry = await _get_live_entry(db, entry_id)
+    on_conflict = resolve_on_conflict(on_conflict)
     new_name = new_name.strip()
     if not new_name:
         raise ValueError("display_name cannot be empty")
@@ -156,9 +157,10 @@ async def move_entry(
     *,
     entry_id: str,
     new_folder_id: str,
-    on_conflict: Literal["rename", "error", "skip"] = DEFAULT_ON_CONFLICT,
+    on_conflict: Literal["rename", "error", "skip"] | None = None,
 ) -> FileEntry:
     entry = await _get_live_entry(db, entry_id)
+    on_conflict = resolve_on_conflict(on_conflict)
     if entry.folder_id == new_folder_id:
         return entry
 

@@ -46,7 +46,8 @@ from marginalia.cli.render import (
     print_banner,
 )
 
-PROMPT = f"{DIM_GREY}❯{RESET} "
+UNICODE_PROMPT = f"{DIM_GREY}❯{RESET} "
+ASCII_PROMPT = f"{DIM_GREY}>{RESET} "
 HISTORY_PATH = Path.home() / ".marginalia_history"
 EMBEDDED_BASE_URL = "http://embedded"
 EMBEDDED_MARKER = "embedded"
@@ -60,7 +61,16 @@ def _build_prompt(ctx: CliContext, *, pending: int = 0) -> str:
     line and froze the screen rhythm. Use `/busy` and `/cd` to query that
     state on demand instead.
     """
-    return PROMPT
+    return _console_safe(UNICODE_PROMPT, fallback=ASCII_PROMPT)
+
+
+def _console_safe(text: str, *, fallback: str) -> str:
+    encoding = sys.stdout.encoding or "utf-8"
+    try:
+        text.encode(encoding)
+    except UnicodeEncodeError:
+        return fallback
+    return text
 
 
 def _build_toolbar(ctx: CliContext, *, pending: int = 0) -> str:

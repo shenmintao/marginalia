@@ -190,6 +190,27 @@ async def main() -> None:
             names = {e["display_name"] for e in llm["entries"]}
             assert names == {"paper.pdf", "copy_of_paper.pdf", "paper (1).pdf"}
 
+            # 9. Runtime default conflict policy should be read lazily from
+            # settings, not frozen at module import.
+            r = await c.put(
+                "/v1/settings/llm",
+                json={"patch": {"default_on_conflict": "error"}},
+            )
+            assert r.status_code == 200, r.text
+            r = await c.post(
+                "/v1/upload",
+                params={"remote_path": "/defaults/policy.txt"},
+                files={"file": ("policy.txt", io.BytesIO(b"default-A"), "text/plain")},
+            )
+            assert r.status_code == 201, r.text
+            r = await c.post(
+                "/v1/upload",
+                params={"remote_path": "/defaults/policy.txt"},
+                files={"file": ("policy.txt", io.BytesIO(b"default-B"), "text/plain")},
+            )
+            assert r.status_code == 409, r.text
+            print("[9] default_on_conflict hot update applied to upload route")
+
     # --- DB-level invariants
     factory = get_session_factory()
     async with factory() as s:
@@ -201,18 +222,20 @@ async def main() -> None:
         ), {"k": KIND_INGEST_FILE})).scalar()
         n_events = (await s.execute(text("SELECT COUNT(*) FROM audit_events"))).scalar()
 
-        # Unique sha256s: content_a, content_b, b"MIT" (twice with same hash → 1)
-        # Files: 3. Entries: 4 (paper, copy_of, paper(1), raw.csv) + 2 LICENSE/COPYRIGHT = 6
-        # Folders: research, llm, datasets, repos, marginalia = 5
-        # Ingest tasks: 3 (one per unique sha256)
+        # Unique sha256s: content_a, content_b, b"MIT" (twice with same
+        # hash -> 1), default-A.
+        # Files: 4. Entries: 4 (paper, copy_of, paper(1), raw.csv)
+        # + 2 LICENSE/COPYRIGHT + 1 policy.txt = 7.
+        # Folders: research, llm, datasets, repos, marginalia, defaults = 6.
+        # Ingest tasks: 4 (one per unique sha256).
         print(
             "[DB] files=%d entries=%d folders=%d ingest_tasks=%d audit_events=%d"
             % (n_files, n_entries, n_folders, n_tasks, n_events)
         )
-        assert n_files == 3
-        assert n_entries == 6
-        assert n_folders == 5
-        assert n_tasks == 3
+        assert n_files == 4
+        assert n_entries == 7
+        assert n_folders == 6
+        assert n_tasks == 4
 
         # Audit kinds we expect to have fired at least once
         kinds = (await s.execute(

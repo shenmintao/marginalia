@@ -41,6 +41,7 @@ _TEST_ROOT.mkdir(parents=True)
 os.environ["MARGINALIA_HOME"] = str(_TEST_ROOT)
 os.environ["STORAGE_BACKEND"] = "local"
 os.environ["WORKER_ENABLED"] = "false"
+os.environ["AUTO_LIFECYCLE_ENABLED"] = "true"
 os.environ["LLM_DEFAULT_API_KEY"] = "sk-fake"
 os.environ["LLM_DEFAULT_MODEL"] = "fake-model"
 

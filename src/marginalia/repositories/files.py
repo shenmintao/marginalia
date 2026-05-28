@@ -14,7 +14,12 @@ async def get_by_sha256(db: AsyncSession, sha256: str) -> File | None:
     """Live or soft-deleted file row matching the content hash. Used by
     upload to detect dedup hits before a tentative storage put is finalised."""
     return (
-        await db.execute(select(File).where(File.sha256 == sha256))
+        await db.execute(
+            select(File)
+            .where(File.sha256 == sha256)
+            .order_by(File.deleted_at.isnot(None), File.created_at.asc())
+            .limit(1)
+        )
     ).scalar_one_or_none()
 
 

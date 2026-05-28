@@ -39,6 +39,7 @@ or risk duplicate-row IntegrityError on the second writer.
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
 import re
@@ -180,6 +181,17 @@ def _trim_largest_list(payload: Any, budget: int) -> tuple[bool, str | None, int
     lst.extend(original[:lo])
     dropped = n - lo
     return dropped > 0, path, dropped
+
+
+def _copy_jsonish(value: Any) -> Any:
+    """Return a mutation-safe copy for model-only truncation."""
+    try:
+        return copy.deepcopy(value)
+    except Exception:
+        try:
+            return json.loads(json.dumps(value, ensure_ascii=False, default=str))
+        except Exception:
+            return value
 
 
 def _structured_truncate(payload: Any, budget: int) -> tuple[str, dict | None]:
@@ -1150,11 +1162,12 @@ async def _dispatch_tool_calls(
                 user_only = None
                 if isinstance(result, dict) and "__user_only__" in result:
                     user_only = result.get("__user_only__")
-                    result_for_model = {
+                    result_for_model_source = {
                         k: v for k, v in result.items() if k != "__user_only__"
                     }
                 else:
-                    result_for_model = result
+                    result_for_model_source = result
+                result_for_model = _copy_jsonish(result_for_model_source)
                 if isinstance(result_for_model, (dict, list)):
                     result_text, _trim_marker = _structured_truncate(
                         result_for_model, MAX_TOOL_RESULT_LEN,
@@ -1179,7 +1192,7 @@ async def _dispatch_tool_calls(
                         }, ensure_ascii=False),
                     )
                 preview = tool_display.format_tool_result_preview(
-                    tc.name, result_for_model,
+                    tc.name, result_for_model_source,
                 )
                 if len(preview) > TOOL_RESULT_PREVIEW_LEN:
                     preview = preview[:TOOL_RESULT_PREVIEW_LEN] + "..."

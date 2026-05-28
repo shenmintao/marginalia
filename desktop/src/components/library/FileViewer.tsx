@@ -58,6 +58,119 @@ const CODE_EXT_TO_LANG: Record<string, string> = {
   md: "markdown",
 };
 
+const DOCX_ALLOWED_TAGS = new Set([
+  "A", "B", "BLOCKQUOTE", "BR", "CODE", "DD", "DIV", "DL", "DT", "EM",
+  "H1", "H2", "H3", "H4", "H5", "H6", "HR", "I", "IMG", "LI", "OL",
+  "P", "PRE", "S", "SPAN", "STRONG", "SUB", "SUP", "TABLE", "TBODY",
+  "TD", "TH", "THEAD", "TR", "U", "UL",
+]);
+
+const DOCX_DROP_TAGS = new Set([
+  "AUDIO", "BUTTON", "CANVAS", "EMBED", "FORM", "IFRAME", "INPUT",
+  "LINK", "MATH", "META", "OBJECT", "SCRIPT", "SELECT", "STYLE", "SVG",
+  "TEMPLATE", "TEXTAREA", "VIDEO",
+]);
+
+const DOCX_ALLOWED_ATTRS: Record<string, Set<string>> = {
+  A: new Set(["href", "title"]),
+  IMG: new Set(["src", "alt", "title"]),
+  TD: new Set(["colspan", "rowspan"]),
+  TH: new Set(["colspan", "rowspan"]),
+};
+
+function sanitizeDocxHtml(html: string): string {
+  const template = document.createElement("template");
+  template.innerHTML = html;
+
+  const isSafeUrl = (value: string, opts?: { image?: boolean }): boolean => {
+    const image = Boolean(opts?.image);
+    const trimmed = value.trim();
+    if (!trimmed) return false;
+    if (
+      trimmed.startsWith("#") ||
+      (trimmed.startsWith("/") && !trimmed.startsWith("//")) ||
+      trimmed.startsWith("./") ||
+      trimmed.startsWith("../")
+    ) {
+      return true;
+    }
+    try {
+      const url = new URL(trimmed, window.location.origin);
+      if (url.protocol === "http:" || url.protocol === "https:") {
+        return true;
+      }
+      if (!image && (url.protocol === "mailto:" || url.protocol === "tel:")) {
+        return true;
+      }
+      if (image && url.protocol === "data:") {
+        return /^data:image\/(png|jpeg|jpg|gif|webp);base64,/i.test(trimmed);
+      }
+    } catch {
+      return false;
+    }
+    return false;
+  };
+
+  const unwrap = (el: Element): void => {
+    const parent = el.parentNode;
+    if (!parent) return;
+    while (el.firstChild) {
+      parent.insertBefore(el.firstChild, el);
+    }
+    parent.removeChild(el);
+  };
+
+  const scrubChildren = (root: ParentNode): void => {
+    for (const child of Array.from(root.childNodes)) {
+      scrub(child);
+    }
+  };
+
+  const scrub = (node: Node): void => {
+    if (node.nodeType === Node.COMMENT_NODE) {
+      node.parentNode?.removeChild(node);
+      return;
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) {
+      return;
+    }
+    const el = node as HTMLElement;
+    scrubChildren(el);
+    if (!DOCX_ALLOWED_TAGS.has(el.tagName)) {
+      if (DOCX_DROP_TAGS.has(el.tagName)) {
+        el.parentNode?.removeChild(el);
+      } else {
+        unwrap(el);
+      }
+      return;
+    }
+    const allowed = DOCX_ALLOWED_ATTRS[el.tagName] || new Set<string>();
+    for (const attr of Array.from(el.attributes)) {
+      const name = attr.name.toLowerCase();
+      if (name.startsWith("on") || name === "style" || name === "srcdoc") {
+        el.removeAttribute(attr.name);
+        continue;
+      }
+      if (!allowed.has(name)) {
+        el.removeAttribute(attr.name);
+        continue;
+      }
+      if (el.tagName === "A" && name === "href" && !isSafeUrl(attr.value)) {
+        el.removeAttribute(attr.name);
+      }
+      if (el.tagName === "IMG" && name === "src" && !isSafeUrl(attr.value, { image: true })) {
+        el.removeAttribute(attr.name);
+      }
+    }
+    if (el.tagName === "A") {
+      el.setAttribute("rel", "noreferrer");
+    }
+  };
+
+  scrubChildren(template.content);
+  return template.innerHTML;
+}
+
 function classifyByName(name: string): Kind {
   const ext = (name.split(".").pop() || "").toLowerCase();
   if (ext === "pdf") return "pdf";
@@ -518,7 +631,7 @@ function DocxView({ url, quote, onScrolled }: {
         const buf = await (await fetch(url)).arrayBuffer();
         const mammoth = await import("mammoth");
         const r = await mammoth.convertToHtml({ arrayBuffer: buf });
-        if (!cancelled) setHtml(r.value);
+        if (!cancelled) setHtml(sanitizeDocxHtml(r.value));
       } catch (e) {
         if (!cancelled) setErr(e instanceof Error ? e.message : String(e));
       }

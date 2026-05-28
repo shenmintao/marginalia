@@ -127,7 +127,7 @@ class TaskRunner:
             if not rows:
                 await session.commit()
                 return []
-            await tasks_repo.mark_running(
+            claimed = await tasks_repo.mark_running(
                 session,
                 ids=rows,
                 now=now,
@@ -135,7 +135,7 @@ class TaskRunner:
                 worker_id=self.worker_id,
             )
             await session.commit()
-            return list(rows)
+            return list(claimed)
 
     async def _process(self, task_id: str) -> None:
         async with session_scope() as session:
@@ -171,11 +171,12 @@ class TaskRunner:
             log.exception("task %s (%s) failed", task_id, kind)
             duration_ms = int((time.monotonic() - started) * 1000)
             counters = unbind_accumulator(token) or UsageCounters()
-            await self._record_outcome(
-                task_id=task_id, kind=kind, outcome="error",
-                counters=counters, duration_ms=duration_ms,
-            )
-            await self._fail(task_id, attempts, max_attempts, repr(exc))
+            changed = await self._fail(task_id, attempts, max_attempts, repr(exc))
+            if changed:
+                await self._record_outcome(
+                    task_id=task_id, kind=kind, outcome="error",
+                    counters=counters, duration_ms=duration_ms,
+                )
             return
         finally:
             heartbeat.cancel()
@@ -183,15 +184,21 @@ class TaskRunner:
         duration_ms = int((time.monotonic() - started) * 1000)
         counters = unbind_accumulator(token) or UsageCounters()
         async with session_scope() as session:
-            await tasks_repo.mark_done(session, task_id=task_id, now=_now())
-            await outcomes_repo.record_outcome(
+            changed = await tasks_repo.mark_done(
                 session,
-                task_kind=kind,
-                object_kind="task",
-                object_id=task_id,
-                outcome="applied",
-                detail=counters.to_detail(duration_ms=duration_ms),
+                task_id=task_id,
+                now=_now(),
+                worker_id=self.worker_id,
             )
+            if changed:
+                await outcomes_repo.record_outcome(
+                    session,
+                    task_kind=kind,
+                    object_kind="task",
+                    object_id=task_id,
+                    outcome="applied",
+                    detail=counters.to_detail(duration_ms=duration_ms),
+                )
             await session.commit()
 
     async def _record_outcome(
@@ -218,12 +225,14 @@ class TaskRunner:
             while True:
                 await asyncio.sleep(interval)
                 async with session_scope() as session:
+                    now = _now()
                     await tasks_repo.heartbeat(
                         session,
                         task_id=task_id,
-                        lease_until=_now() + timedelta(
+                        lease_until=now + timedelta(
                             seconds=self.settings.worker_lease_seconds,
                         ),
+                        now=now,
                     )
                     await session.commit()
         except asyncio.CancelledError:
@@ -231,20 +240,26 @@ class TaskRunner:
 
     async def _fail(
         self, task_id: str, attempts: int, max_attempts: int, error: str
-    ) -> None:
+    ) -> bool:
         async with session_scope() as session:
             if attempts >= max_attempts:
-                await tasks_repo.mark_dead(
-                    session, task_id=task_id, now=_now(), error=error,
+                changed = await tasks_repo.mark_dead(
+                    session,
+                    task_id=task_id,
+                    now=_now(),
+                    error=error,
+                    worker_id=self.worker_id,
                 )
             else:
-                await tasks_repo.reschedule_for_retry(
+                changed = await tasks_repo.reschedule_for_retry(
                     session,
                     task_id=task_id,
                     error=error,
                     next_run_at=_now() + _backoff(attempts),
+                    worker_id=self.worker_id,
                 )
             await session.commit()
+            return changed
 
 
 async def main() -> None:

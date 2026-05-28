@@ -288,6 +288,7 @@ export interface ServerSettings {
   storage_backend: string;
   worker_enabled: boolean;
   worker_batch_size: number;
+  auto_lifecycle_enabled: boolean;
   default_on_conflict: string;
   agent_plan_max_tokens: number;
   agent_execute_max_tokens: number;

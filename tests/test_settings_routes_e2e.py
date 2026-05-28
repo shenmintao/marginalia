@@ -27,6 +27,7 @@ _TEST_ROOT.mkdir(parents=True)
 os.environ["MARGINALIA_HOME"] = str(_TEST_ROOT)
 os.environ["STORAGE_BACKEND"] = "local"
 os.environ["WORKER_ENABLED"] = "false"
+os.environ["AUTO_LIFECYCLE_ENABLED"] = "false"
 os.environ["LLM_DEFAULT_API_KEY"] = "sk-default-key-XXXX"
 os.environ["LLM_DEFAULT_MODEL"] = "settings-default-model"
 os.environ["LLM_DEFAULT_PROVIDER"] = "openai"
@@ -73,6 +74,7 @@ def _ensure_test_env() -> None:
     os.environ["MARGINALIA_HOME"] = str(_TEST_ROOT)
     os.environ["STORAGE_BACKEND"] = "local"
     os.environ["WORKER_ENABLED"] = "false"
+    os.environ["AUTO_LIFECYCLE_ENABLED"] = "false"
     os.environ["LLM_DEFAULT_API_KEY"] = "sk-default-key-XXXX"
     os.environ["LLM_DEFAULT_MODEL"] = "settings-default-model"
     os.environ["LLM_DEFAULT_PROVIDER"] = "openai"
@@ -112,6 +114,7 @@ async def test_server_snapshot_no_secrets() -> None:
             body = r.json()
             assert body["storage_backend"] == "local"
             assert body["worker_enabled"] is False
+            assert body["auto_lifecycle_enabled"] is False
             assert body["default_on_conflict"] in ("rename", "error", "skip")
             # Sanity: no secret keys / DSN-shaped fields snuck in.
             for k, v in body.items():

@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
+from marginalia.config import get_settings
 from marginalia.repositories import audit_events as audit_events_repo
 from marginalia.db.session import session_scope
 from marginalia.repositories import entries as entries_repo
@@ -67,6 +68,10 @@ class _Decision:
 async def handle_suggest_lifecycle(payload: Mapping[str, Any]) -> None:
     now = _utcnow()
     phases = list(payload.get("phases") or ["demote", "archive"])
+    if not payload.get("force") and not get_settings().auto_lifecycle_enabled:
+        await _record_disabled_outcomes(now, phases)
+        log.info("suggest_lifecycle skipped: AUTO_LIFECYCLE_ENABLED=false")
+        return
 
     summary: dict[str, Any] = {}
     for phase in phases:
@@ -81,6 +86,25 @@ async def handle_suggest_lifecycle(payload: Mapping[str, Any]) -> None:
         summary[phase] = {"applied": applied, "candidates": candidates}
 
     log.info("suggest_lifecycle: %s", summary)
+
+async def _record_disabled_outcomes(now: datetime, phases: list[str]) -> None:
+    async with session_scope() as session:
+        for phase in phases:
+            outcome_kind = PHASE_OUTCOME_KIND.get(phase)
+            if outcome_kind is None:
+                continue
+            await record_outcome(
+                session,
+                task_kind=outcome_kind,
+                object_kind=GLOBAL_OBJECT_KIND,
+                object_id=GLOBAL_OBJECT_ID,
+                outcome="noop",
+                detail={
+                    "disabled": True,
+                    "reason": "AUTO_LIFECYCLE_ENABLED=false",
+                },
+            )
+        await session.commit()
 
 async def _run_demote(
     now: datetime, payload: Mapping[str, Any]

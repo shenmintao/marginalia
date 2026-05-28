@@ -31,6 +31,8 @@ async def find_pending_or_running_by_dedup(
                 Task.dedup_key == dedup_key,
                 Task.status.in_(("pending", "running")),
             )
+            .order_by(Task.created_at.asc())
+            .limit(1)
         )
     ).scalar_one_or_none()
 
@@ -64,45 +66,55 @@ async def mark_running(
     now: datetime,
     lease_until: datetime,
     worker_id: str,
-) -> None:
+) -> list[str]:
     """Bulk-transition the given pending ids to running, bumping attempts."""
     if not ids:
-        return
-    await db.execute(
-        update(Task)
-        .where(Task.id.in_(list(ids)), Task.status == "pending")
-        .values(
-            status="running",
-            locked_by=worker_id,
-            lease_expires_at=lease_until,
-            started_at=now,
-            attempts=Task.attempts + 1,
+        return []
+    rows = (
+        await db.execute(
+            update(Task)
+            .where(Task.id.in_(list(ids)), Task.status == "pending")
+            .values(
+                status="running",
+                locked_by=worker_id,
+                lease_expires_at=lease_until,
+                last_heartbeat_at=now,
+                started_at=now,
+                attempts=Task.attempts + 1,
+            )
+            .returning(Task.id)
         )
-    )
+    ).scalars().all()
+    return list(rows)
 
 
 async def mark_done(
-    db: AsyncSession, *, task_id: str, now: datetime,
-) -> None:
-    await db.execute(
-        update(Task)
-        .where(Task.id == task_id)
-        .values(_release_values(
+    db: AsyncSession, *, task_id: str, now: datetime, worker_id: str | None = None,
+) -> bool:
+    stmt = update(Task).where(Task.id == task_id)
+    if worker_id is not None:
+        stmt = stmt.where(Task.status == "running", Task.locked_by == worker_id)
+    result = await db.execute(
+        stmt.values(_release_values(
             status="done", finished_at=now, last_error=None,
         ))
     )
+    return bool(result.rowcount or 0)
 
 
 async def mark_dead(
     db: AsyncSession, *, task_id: str, now: datetime, error: str,
-) -> None:
-    await db.execute(
-        update(Task)
-        .where(Task.id == task_id)
-        .values(_release_values(
+    worker_id: str | None = None,
+) -> bool:
+    stmt = update(Task).where(Task.id == task_id)
+    if worker_id is not None:
+        stmt = stmt.where(Task.status == "running", Task.locked_by == worker_id)
+    result = await db.execute(
+        stmt.values(_release_values(
             status="dead", finished_at=now, last_error=error,
         ))
     )
+    return bool(result.rowcount or 0)
 
 
 async def mark_pending_dead_by_kinds(
@@ -133,23 +145,26 @@ async def reschedule_for_retry(
     task_id: str,
     error: str,
     next_run_at: datetime,
-) -> None:
-    await db.execute(
-        update(Task)
-        .where(Task.id == task_id)
-        .values(_release_values(
+    worker_id: str | None = None,
+) -> bool:
+    stmt = update(Task).where(Task.id == task_id)
+    if worker_id is not None:
+        stmt = stmt.where(Task.status == "running", Task.locked_by == worker_id)
+    result = await db.execute(
+        stmt.values(_release_values(
             status="pending", last_error=error, scheduled_at=next_run_at,
         ))
     )
+    return bool(result.rowcount or 0)
 
 
 async def heartbeat(
-    db: AsyncSession, *, task_id: str, lease_until: datetime,
+    db: AsyncSession, *, task_id: str, lease_until: datetime, now: datetime,
 ) -> None:
     await db.execute(
         update(Task)
         .where(Task.id == task_id, Task.status == "running")
-        .values(lease_expires_at=lease_until)
+        .values(lease_expires_at=lease_until, last_heartbeat_at=now)
     )
 
 

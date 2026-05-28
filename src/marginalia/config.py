@@ -56,6 +56,11 @@ class Settings(BaseSettings):
     worker_lease_seconds: int = 60
     worker_heartbeat_seconds: int = 20
 
+    # Automatic active -> demoted -> archived transitions are opt-in.
+    # Personal knowledge bases often prefer manual lifecycle control, while
+    # team/shared deployments may want background cost management.
+    auto_lifecycle_enabled: bool = False
+
     # Default policy when an upload / rename / move would collide with an
     # existing display_name in the same folder. `rename` suffixes ` (1)`,
     # `error` raises 409, `skip` returns the existing entry. Per-call

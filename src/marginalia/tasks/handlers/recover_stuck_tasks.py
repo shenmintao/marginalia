@@ -18,7 +18,7 @@ per row that exhausted retries.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
 from marginalia.repositories import audit_events as audit_events_repo
@@ -36,7 +36,7 @@ def _utcnow() -> datetime:
 @task_handler(KIND_RECOVER_STUCK_TASKS)
 async def handle_recover_stuck_tasks(payload: Mapping[str, Any]) -> None:
     now = _utcnow()
-    cutoff = now
+    cutoff = now - timedelta(seconds=GRACE_SECONDS)
 
     async with session_scope() as session:
         rows = await tasks_repo.list_stale_running(session, now=cutoff)
