@@ -193,6 +193,13 @@ async def _main() -> None:
                 f"pages_processed should equal cap, got {ocr.get('pages_processed')}"
             print(f"[2] description correctly reports "
                   f"{ocr['pages_processed']}/{ocr['pages_total']} pages OCRed")
+            coverage = (f.description or {}).get("coverage") or {}
+            assert coverage.get("total_pages") == TEST_TOTAL_PAGES, coverage
+            assert coverage.get("indexed_pages") == TEST_CAP, coverage
+            assert coverage.get("indexed_partial") is True, coverage
+            assert "ocr_page_cap" in coverage.get("partial_reasons", []), coverage
+            assert coverage.get("max_index_pages") == TEST_CAP, coverage
+            print(f"[2b] coverage marks OCR cap explicitly: {coverage}")
 
         assert len(VISION_CALLS) == TEST_CAP, \
             f"VLM should be called exactly {TEST_CAP} times, "\

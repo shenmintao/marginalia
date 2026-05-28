@@ -1,10 +1,10 @@
 """search_metadata — DESIGN.md §10.1.
 
-Filters entries by combinations of text (ILIKE on summary + extras), tags,
-catalog scope, folder scope, view, kind, lifecycle. Catalog filters
-(`catalog_id` / `catalog_subtree`) are mutually exclusive; folder filters
-(`folder_id` / `folder_subtree`) are mutually exclusive. Catalog and folder
-filters can be combined (AND). Returns minimal entry rows + pagination
+Filters entries by combinations of text (ILIKE on display name, summary, and
+extras), tags, catalog scope, folder scope, view, kind, lifecycle. Catalog
+filters (`catalog_id` / `catalog_subtree`) are mutually exclusive; folder
+filters (`folder_id` / `folder_subtree`) are mutually exclusive. Catalog and
+folder filters can be combined (AND). Returns minimal entry rows + pagination
 metadata (`total`, `has_more`, `next_offset`).
 """
 from __future__ import annotations
@@ -27,7 +27,10 @@ SCHEMA: dict[str, Any] = {
     "properties": {
         "text": {
             "type": "string",
-            "description": "Free text matched against files.summary + extras (ILIKE).",
+            "description": (
+                "Free text matched against display_name, files.summary, "
+                "files.extra, and entry.extra (ILIKE)."
+            ),
         },
         "tags_all": {"type": "array", "items": {"type": "string"}},
         "tags_any": {"type": "array", "items": {"type": "string"}},
@@ -80,7 +83,8 @@ SCHEMA: dict[str, Any] = {
         "(folder_id / folder_subtree, mutually exclusive). Catalog and "
         "folder filters AND together. Pass `offset` (with the previous "
         "call's `next_offset`) to page beyond `limit`; the response carries "
-        "`total` and `has_more`."
+        "`total` and `has_more`. Rows include compact coverage metadata when "
+        "available."
     ),
     schema=SCHEMA,
 )
@@ -155,18 +159,7 @@ async def search_metadata(
 
     has_more = (offset + len(rows)) < total
     out: dict[str, Any] = {
-        "entries": [
-            {
-                "entry_id": e.id,
-                "display_name": e.display_name,
-                "lifecycle": e.lifecycle,
-                "kind": f.kind,
-                "summary": f.summary,
-                "catalog_id": e.catalog_id,
-                "folder_id": e.folder_id,
-            }
-            for e, f in rows
-        ],
+        "entries": [_entry_row(e, f) for e, f in rows],
         "count": len(rows),
         "total": total,
         "has_more": has_more,
@@ -174,6 +167,48 @@ async def search_metadata(
     if has_more:
         out["next_offset"] = offset + len(rows)
     return out
+
+
+def _entry_row(entry: Any, file_row: Any) -> dict[str, Any]:
+    row: dict[str, Any] = {
+        "entry_id": entry.id,
+        "display_name": entry.display_name,
+        "lifecycle": entry.lifecycle,
+        "kind": file_row.kind,
+        "summary": file_row.summary,
+        "catalog_id": entry.catalog_id,
+        "folder_id": entry.folder_id,
+    }
+    coverage = _compact_coverage(file_row.description)
+    if coverage is not None:
+        row["coverage"] = coverage
+    return row
+
+
+def _compact_coverage(description: Any) -> dict[str, Any] | None:
+    if not isinstance(description, dict):
+        return None
+    coverage = description.get("coverage")
+    if not isinstance(coverage, dict):
+        return None
+    keys = (
+        "unit",
+        "total_pages",
+        "indexed_pages",
+        "total_units",
+        "indexed_units",
+        "indexed_partial",
+        "partial_reasons",
+        "max_index_pages",
+        "chunked",
+        "chunk_count",
+        "text_truncated",
+        "truncated_chunks",
+        "ocr_used",
+        "ocr_pages_done",
+    )
+    compact = {key: coverage[key] for key in keys if key in coverage}
+    return compact or None
 
 
 def _empty_page(limit: int, offset: int) -> dict[str, Any]:

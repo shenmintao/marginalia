@@ -59,6 +59,7 @@ log = logging.getLogger(__name__)
 MAX_PAGES = 60                    # legacy single-prompt page cap
 MAX_TOTAL_TEXT_BYTES = 80_000     # ≈ 25-30k tokens cap
 PDF_CHUNK_PAGES = 40              # long-doc page window for per-chunk indexing
+PDF_TEXT_MAX_INDEX_PAGES = 400    # hard text-layer ingest budget
 PDF_SECTION_DIGEST_BYTES = 60_000 # cap the aggregate summary prompt
 MIN_TEXT_PER_PAGE_FOR_TEXT_LAYER = 50  # if every page yields fewer chars,
                                        # the doc is probably scanned
@@ -81,9 +82,11 @@ Rules:
 
 PDF_PIPELINE_SYSTEM = """You are Marginalia's PDF document indexer.
 
-You receive the full text of a PDF, page-by-page. Produce a structured
-index that lets a downstream agent decide whether to retrieve the document
-and find the relevant page.
+You receive the indexed text of a PDF, page-by-page. It may be only the
+first `indexed_pages` of a longer PDF; use only the pages provided and do
+not infer content from missing pages. Produce a structured index that lets a
+downstream agent decide whether to retrieve the document and find the
+relevant page.
 
 `summary` is one or two sentences (≤60 中文字 / ≤30 English words) in the
 document's own language — the spine of what the document is and why a
@@ -120,10 +123,12 @@ later retrieval.
 
 PDF_AGGREGATE_SYSTEM = """You are Marginalia's PDF aggregate indexer.
 
-You receive a precomputed section map for an entire PDF. Do NOT read or invent
-outside that map. Produce only file-level fields: summary, description, extra,
-entry_extra, catalog_path, and tags. Do not output a sections block; the caller
-will preserve the full section map separately in `description.sections`.
+You receive a precomputed section map for the indexed portion of a PDF. Do NOT
+read or invent outside that map. If `coverage.indexed_partial` is true, make
+the limited coverage clear and do not imply that later pages were reviewed.
+Produce only file-level fields: summary, description, extra, entry_extra,
+catalog_path, and tags. Do not output a sections block; the caller will
+preserve the full section map separately in `description.sections`.
 
 Make `extra` retrieval-friendly: include important alternate names, recurring
 technical terms, and high-value page ranges from the section map.
@@ -171,16 +176,21 @@ class PdfPipeline(Pipeline):
         storage: StorageBackend,
     ) -> PipelineResult:
         body = await self._read_bytes(storage, ctx.storage_key)
-        text_per_page = self._extract_text(body, max_pages=None)
+        total_pages = self._page_count(body)
+        text_index_pages = min(total_pages, PDF_TEXT_MAX_INDEX_PAGES)
+        text_per_page = self._extract_text(body, max_pages=text_index_pages)
 
         vlm_available = has_vision_profile()
 
-        total_pages = len(text_per_page)
         total_chars = sum(len(t) for t in text_per_page)
         ocr_used = False
         ocr_pages_done = 0
-        indexed_pages = total_pages
-        if total_pages > 0 and total_chars / max(total_pages, 1) < MIN_TEXT_PER_PAGE_FOR_TEXT_LAYER:
+        indexed_pages = len(text_per_page)
+        partial_reasons: list[str] = []
+        if indexed_pages < total_pages:
+            partial_reasons.append("text_page_cap")
+        avg_chars = total_chars / max(indexed_pages, 1)
+        if total_pages > 0 and avg_chars < MIN_TEXT_PER_PAGE_FOR_TEXT_LAYER:
             if not vlm_available:
                 # No VLM profile configured — can't OCR. Mark file as needing
                 # OCR so the user can retry once a vision model is wired up.
@@ -191,7 +201,7 @@ class PdfPipeline(Pipeline):
                 "pdf %s appears scanned (pages=%d, avg_chars=%.1f); "
                 "running VLM OCR fallback",
                 ctx.storage_key, total_pages,
-                total_chars / max(total_pages, 1),
+                avg_chars,
             )
             ocr_used = True
             ocr_text_per_page = await _ocr_pdf_pages(body, total_pages)
@@ -204,6 +214,9 @@ class PdfPipeline(Pipeline):
             total_chars = sum(len(t) for t in text_per_page)
             # OCR is still capped because it bills one VLM call per page.
             indexed_pages = min(total_pages, OCR_MAX_PAGES)
+            partial_reasons = []
+            if indexed_pages < total_pages:
+                partial_reasons.append("ocr_page_cap")
 
         # Extract embedded figures and describe them via vision profile.
         # Single-image failures degrade to placeholder text; the ingest
@@ -215,7 +228,7 @@ class PdfPipeline(Pipeline):
         if ocr_used or not vlm_available:
             described = []
         else:
-            images = extract_images(body)
+            images = extract_images(body, max_pages=indexed_pages)
             described = await describe_images(images) if images else []
 
         if (not ocr_used) and self._needs_chunked_index(text_per_page, described):
@@ -224,8 +237,10 @@ class PdfPipeline(Pipeline):
                 text_per_page=text_per_page,
                 described=described,
                 total_pages=total_pages,
+                indexed_pages=indexed_pages,
                 ocr_used=ocr_used,
                 ocr_pages_done=ocr_pages_done,
+                partial_reasons=partial_reasons,
             )
 
         return await self._run_single_index(
@@ -236,6 +251,7 @@ class PdfPipeline(Pipeline):
             indexed_pages=indexed_pages,
             ocr_used=ocr_used,
             ocr_pages_done=ocr_pages_done,
+            partial_reasons=partial_reasons,
         )
 
     @staticmethod
@@ -246,6 +262,12 @@ class PdfPipeline(Pipeline):
         async for chunk in storage.get(key):
             buf.extend(chunk)
         return bytes(buf)
+
+    @staticmethod
+    def _page_count(pdf_bytes: bytes) -> int:
+        from pypdf import PdfReader
+
+        return len(PdfReader(io.BytesIO(pdf_bytes)).pages)
 
     def _needs_chunked_index(
         self,
@@ -267,6 +289,7 @@ class PdfPipeline(Pipeline):
         indexed_pages: int,
         ocr_used: bool,
         ocr_pages_done: int,
+        partial_reasons: list[str],
     ) -> PipelineResult:
         body_text_raw = render_pages_with_figures(text_per_page, described)
         body_text = self._truncate(body_text_raw)
@@ -278,6 +301,10 @@ class PdfPipeline(Pipeline):
             text_truncated=text_truncated,
             ocr_used=ocr_used,
             ocr_pages_done=ocr_pages_done,
+            partial_reasons=partial_reasons,
+            max_index_pages=(
+                OCR_MAX_PAGES if ocr_used else PDF_TEXT_MAX_INDEX_PAGES
+            ),
         )
         user_payload = {
             "folder_path": ctx.folder_path,
@@ -291,8 +318,10 @@ class PdfPipeline(Pipeline):
             "ocr_pages_done": ocr_pages_done if ocr_used else 0,
         }
         stable_prefix = (
-            "Index the PDF below. Hints are advisory; the document's text "
-            "and figure captions take precedence.\n\n"
+            "Index the PDF pages below. Hints are advisory; the provided "
+            "text and figure captions take precedence. If indexed_pages is "
+            "less than page_count, cover only the provided pages and do not "
+            "infer missing pages.\n\n"
             + render_format_hint() + "\n"
             + render_sections_hint(anchor_unit="pages", anchor_example="pages 4-7")
         )
@@ -343,8 +372,10 @@ class PdfPipeline(Pipeline):
         text_per_page: list[str],
         described: list["DescribedImage"],
         total_pages: int,
+        indexed_pages: int,
         ocr_used: bool,
         ocr_pages_done: int,
+        partial_reasons: list[str],
     ) -> PipelineResult:
         client = get_chat_client("ingest")
         all_sections: list[dict[str, Any]] = []
@@ -411,11 +442,15 @@ class PdfPipeline(Pipeline):
         sections = renumber_sections(all_sections)
         coverage = self._coverage(
             total_pages=total_pages,
-            indexed_pages=total_pages,
+            indexed_pages=indexed_pages,
             chunk_count=len(chunk_summaries),
             text_truncated=truncated_chunks > 0,
             ocr_used=ocr_used,
             ocr_pages_done=ocr_pages_done,
+            partial_reasons=partial_reasons,
+            max_index_pages=(
+                OCR_MAX_PAGES if ocr_used else PDF_TEXT_MAX_INDEX_PAGES
+            ),
         )
         if truncated_chunks:
             coverage["truncated_chunks"] = truncated_chunks
@@ -439,7 +474,7 @@ class PdfPipeline(Pipeline):
             system=PDF_AGGREGATE_SYSTEM,
             messages=[ChatMessage(role="user", content=[
                 TextBlock(text=(
-                    "Summarize the full PDF from this section map. "
+                    "Summarize the indexed PDF coverage from this section map. "
                     "The full `description.sections` already exists; "
                     "produce file-level recall fields only."
                 )),
@@ -536,12 +571,20 @@ class PdfPipeline(Pipeline):
         text_truncated: bool,
         ocr_used: bool,
         ocr_pages_done: int,
+        partial_reasons: list[str],
+        max_index_pages: int,
     ) -> dict[str, Any]:
+        reasons = list(dict.fromkeys(partial_reasons))
+        if text_truncated and "prompt_text_cap" not in reasons:
+            reasons.append("prompt_text_cap")
+        indexed_partial = indexed_pages < total_pages or text_truncated
         coverage: dict[str, Any] = {
             "unit": "pages",
             "total_pages": total_pages,
             "indexed_pages": indexed_pages,
-            "indexed_partial": indexed_pages < total_pages,
+            "indexed_partial": indexed_partial,
+            "partial_reasons": reasons if indexed_partial else [],
+            "max_index_pages": max_index_pages,
             "chunked": chunk_count > 1,
             "chunk_count": chunk_count,
             "text_truncated": text_truncated,
@@ -1033,7 +1076,9 @@ class DescribedImage:
     error: str | None = None
 
 
-def extract_images(pdf_bytes: bytes) -> list[ExtractedImage]:
+def extract_images(
+    pdf_bytes: bytes, *, max_pages: int | None = None,
+) -> list[ExtractedImage]:
     """Walk the PDF and return significant images (icons filtered)."""
     from pypdf import PdfReader  # imported lazily
 
@@ -1045,7 +1090,8 @@ def extract_images(pdf_bytes: bytes) -> list[ExtractedImage]:
         return out
 
     total = 0
-    for page_num, page in enumerate(reader.pages, start=1):
+    pages = reader.pages if max_pages is None else reader.pages[:max_pages]
+    for page_num, page in enumerate(pages, start=1):
         try:
             page_images = list(page.images)[:MAX_IMAGES_PER_PAGE]
         except Exception as exc:

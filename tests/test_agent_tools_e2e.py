@@ -101,14 +101,25 @@ async def _seed():
                        sha256="z" * 64, size_bytes=len(body),
                        mime_type="text/markdown", original_ext=".md", kind="text",
                        summary="Paper on consensus algorithms",
-                       description={"sections": [
-                           {"id": "s1", "title": "Overview",
-                            "anchor": {"unit": "lines", "value": "1-3"},
-                            "summary": "Intro", "key_terms": ["consensus"]},
-                           {"id": "s2", "title": "Pipeline",
-                            "anchor": {"unit": "lines", "value": "5-7"},
-                            "summary": "Pipeline detail", "key_terms": ["raft", "paxos"]},
-                       ]},
+                       description={
+                           "sections": [
+                               {"id": "s1", "title": "Overview",
+                                "anchor": {"unit": "lines", "value": "1-3"},
+                                "summary": "Intro", "key_terms": ["consensus"]},
+                               {"id": "s2", "title": "Pipeline",
+                                "anchor": {"unit": "lines", "value": "5-7"},
+                                "summary": "Pipeline detail",
+                                "key_terms": ["raft", "paxos"]},
+                           ],
+                           "coverage": {
+                               "unit": "pages",
+                               "total_pages": 12,
+                               "indexed_pages": 5,
+                               "indexed_partial": True,
+                               "partial_reasons": ["text_page_cap"],
+                               "max_index_pages": 5,
+                           },
+                       },
                        extra="Cross-cutting note about consensus.",
                        ingest_status="done", ingested_at=now,
                        created_at=now, updated_at=now)
@@ -272,6 +283,9 @@ async def main():
           [e["display_name"] for e in sm["entries"]])
     sm_names = {e["display_name"] for e in sm["entries"]}
     assert sm_names == {"paper-a.md", "paper-b.md"}, sm_names
+    sm_coverage = {e["display_name"]: e.get("coverage") for e in sm["entries"]}
+    assert sm_coverage["paper-a.md"]["indexed_partial"] is True, sm_coverage
+    assert "text_page_cap" in sm_coverage["paper-b.md"]["partial_reasons"], sm_coverage
 
     # search_metadata with mutually-exclusive args → error
     bad = await _call("search_metadata", {

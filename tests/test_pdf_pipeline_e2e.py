@@ -49,6 +49,7 @@ from marginalia.db.engine import get_engine, get_session_factory
 from marginalia.db.models import Base, EntryTag, File, FileEntry, Tag
 from marginalia.llm.types import ChatRequest, ChatResponse, TokenUsage
 from marginalia.main import app
+from marginalia.pipelines import pdf as pdf_module
 from marginalia.tasks.kinds import KIND_INGEST_FILE
 from marginalia.tasks.runner import TaskRunner
 
@@ -63,17 +64,24 @@ def _request_text(request: ChatRequest) -> str:
     )
 
 
-def _build_text_pdf() -> bytes:
-    """Use fpdf2 to write a real 3-page PDF with predictable text."""
+def _build_text_pdf(page_count: int = 3) -> bytes:
+    """Use fpdf2 to write a real PDF with predictable text."""
     from fpdf import FPDF
     from fpdf.enums import XPos, YPos
 
     pdf = FPDF()
-    for i, body in enumerate([
+    bodies = [
         "Page one talks about Raft consensus and leader election.",
         "Page two introduces Paxos and acceptors.",
         "Page three discusses tradeoffs between Raft and Paxos.",
-    ], start=1):
+    ]
+    while len(bodies) < page_count:
+        i = len(bodies) + 1
+        bodies.append(
+            f"Page {i} continues the consensus survey with enough text "
+            f"to count as a real text layer for indexing."
+        )
+    for i, body in enumerate(bodies[:page_count], start=1):
         pdf.add_page()
         pdf.set_font("Helvetica", size=14)
         pdf.cell(
@@ -301,6 +309,41 @@ async def main():
                 # invariant the user-facing system relies on.
                 print("[5] audit ingest_status_changed entries seen:",
                       [p.get("status") for p in payloads])
+
+                # ---- 6. Long text-layer PDF: explicit index cap ----------
+                original_cap = pdf_module.PDF_TEXT_MAX_INDEX_PAGES
+                pdf_module.PDF_TEXT_MAX_INDEX_PAGES = 3
+                try:
+                    CALL_LOG.clear()
+                    long_pdf = _build_text_pdf(page_count=5)
+                    r = await c.post(
+                        "/v1/upload",
+                        params={"remote_path": "/papers/"},
+                        files={"file": ("long-text.pdf",
+                                        io.BytesIO(long_pdf),
+                                        "application/pdf")},
+                    )
+                    assert r.status_code == 201, r.text
+                    long_file_id = r.json()["file_id"]
+                    status = await _wait_for_status(long_file_id, expect="done")
+                    assert status == "done", f"long text PDF status: {status}"
+                    assert len(CALL_LOG) == 1
+                    prompt = _request_text(CALL_LOG[0])
+                    assert "### Page 1" in prompt
+                    assert "### Page 3" in prompt
+                    assert "### Page 4" not in prompt
+
+                    async with factory() as s:
+                        f = await s.get(File, long_file_id)
+                        coverage = (f.description or {}).get("coverage") or {}
+                    assert coverage.get("total_pages") == 5, coverage
+                    assert coverage.get("indexed_pages") == 3, coverage
+                    assert coverage.get("indexed_partial") is True, coverage
+                    assert "text_page_cap" in coverage.get("partial_reasons", []), coverage
+                    assert coverage.get("max_index_pages") == 3, coverage
+                    print("[6] long text PDF coverage:", coverage)
+                finally:
+                    pdf_module.PDF_TEXT_MAX_INDEX_PAGES = original_cap
         finally:
             await runner.stop()
 
