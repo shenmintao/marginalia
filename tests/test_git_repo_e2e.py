@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import asyncio
 import io
-import json
 import os
 import shutil
 import sys
@@ -110,37 +109,47 @@ def _unit_test_parse():
 
 # ---- 2. End-to-end through the container pipeline -------------------------
 
+def _request_text(request: ChatRequest) -> str:
+    return "\n".join(
+        getattr(block, "text", "")
+        for block in request.messages[0].content
+    )
+
+
 class _FakeIngest:
     profile_name = "ingest"
     model = "fake-ingest"
 
     async def complete(self, request: ChatRequest) -> ChatResponse:
         # Verify the prompt actually carries git_metadata
-        ut = request.messages[0].content[0].text  # type: ignore[index, attr-defined]
+        ut = _request_text(request)
         global LAST_PROMPT
         LAST_PROMPT = ut
-        payload = {
-            "summary": "An acme repository.",
-            "description": {
-                "primary_language": "python",
-                "frameworks_detected": [],
-            },
-            "kind": "container",
-            "extra": "",
-            "entry_extra": "",
-            "entry_catalog_path": ["Code"],
-            "entry_tags": [
-                {"name": "git", "facet": "form"},
-                {"name": "python", "facet": "language"},
-            ],
-        }
+        tagged = """<summary>
+An acme repository.
+</summary>
+<description>
+Small git-backed Python repository.
+</description>
+<kind>container</kind>
+<extra>
+archive_kind: zip
+primary_language: python
+</extra>
+<entry_extra>
+</entry_extra>
+<catalog_path>Code</catalog_path>
+<tags>
+form: git
+language: python
+</tags>"""
         return ChatResponse(
-            text=json.dumps(payload),
+            text=tagged,
             tool_calls=[],
             stop_reason="end_turn",
             usage=TokenUsage(input_tokens=1500, output_tokens=200,
                              cache_read_tokens=1200),
-            parsed_json=payload,
+            parsed_json=None,
         )
 
 
@@ -154,6 +163,12 @@ def _install_fake() -> None:
         return fake
     import marginalia.pipelines.archive as cmod
     cmod.get_chat_client = _factory  # type: ignore[assignment]
+    import marginalia.tasks.handlers.periodic_tick as pmod
+
+    async def _no_periodic_bootstrap() -> None:
+        return None
+
+    pmod.bootstrap_periodic_tick = _no_periodic_bootstrap  # type: ignore[assignment]
 
 
 async def _create_schema():

@@ -56,9 +56,18 @@ from marginalia.tasks.runner import TaskRunner
 CALL_LOG: list[ChatRequest] = []
 
 
+def _request_text(request: ChatRequest) -> str:
+    return "\n".join(
+        getattr(block, "text", "")
+        for block in request.messages[0].content
+    )
+
+
 def _build_text_pdf() -> bytes:
     """Use fpdf2 to write a real 3-page PDF with predictable text."""
     from fpdf import FPDF
+    from fpdf.enums import XPos, YPos
+
     pdf = FPDF()
     for i, body in enumerate([
         "Page one talks about Raft consensus and leader election.",
@@ -67,9 +76,12 @@ def _build_text_pdf() -> bytes:
     ], start=1):
         pdf.add_page()
         pdf.set_font("Helvetica", size=14)
-        pdf.cell(200, 10, txt=f"Section {i}", ln=True)
+        pdf.cell(
+            200, 10, text=f"Section {i}",
+            new_x=XPos.LMARGIN, new_y=YPos.NEXT,
+        )
         pdf.set_font("Helvetica", size=11)
-        pdf.multi_cell(0, 8, txt=body)
+        pdf.multi_cell(0, 8, text=body)
     return bytes(pdf.output())
 
 
@@ -91,42 +103,32 @@ class _FakeIngest:
 
     async def complete(self, request: ChatRequest) -> ChatResponse:
         CALL_LOG.append(request)
-        payload = {
-            "summary": "A short PDF on Raft and Paxos consensus algorithms.",
-            "description": {
-                "sections": [
-                    {
-                        "id": "s1", "title": "Section 1",
-                        "anchor": {"unit": "pages", "value": "1-1"},
-                        "summary": "Raft.", "key_terms": ["raft", "leader"],
-                    },
-                    {
-                        "id": "s2", "title": "Section 2",
-                        "anchor": {"unit": "pages", "value": "2-2"},
-                        "summary": "Paxos.", "key_terms": ["paxos"],
-                    },
-                    {
-                        "id": "s3", "title": "Section 3",
-                        "anchor": {"unit": "pages", "value": "3-3"},
-                        "summary": "Tradeoffs.", "key_terms": ["tradeoffs"],
-                    },
-                ],
-            },
-            "kind": "text",
-            "extra": "",
-            "entry_extra": "",
-            "entry_catalog_path": ["Research", "Consensus"],
-            "entry_tags": [
-                {"name": "consensus", "facet": "topic"},
-                {"name": "pdf", "facet": "form"},
-            ],
-        }
+        tagged = """<summary>
+A short PDF on Raft and Paxos consensus algorithms.
+</summary>
+<description>
+The PDF compares Raft, Paxos, and their tradeoffs.
+</description>
+<sections>
+s1 | pages 1-1 | Section 1 | Raft. | raft, leader
+s2 | pages 2-2 | Section 2 | Paxos. | paxos
+s3 | pages 3-3 | Section 3 | Tradeoffs. | tradeoffs
+</sections>
+<extra>
+</extra>
+<entry_extra>
+</entry_extra>
+<catalog_path>Research / Consensus</catalog_path>
+<tags>
+topic: consensus
+form: pdf
+</tags>"""
         return ChatResponse(
-            text=json.dumps(payload),
+            text=tagged,
             tool_calls=[],
             stop_reason="end_turn",
             usage=TokenUsage(input_tokens=2000, output_tokens=400, cache_read_tokens=1500),
-            parsed_json=payload,
+            parsed_json=None,
         )
 
 
@@ -140,6 +142,12 @@ def _install_fake() -> None:
         return fake
     import marginalia.pipelines.pdf as pmod
     pmod.get_chat_client = _factory  # type: ignore[assignment]
+    import marginalia.tasks.handlers.periodic_tick as tickmod
+
+    async def _no_periodic_bootstrap() -> None:
+        return None
+
+    tickmod.bootstrap_periodic_tick = _no_periodic_bootstrap  # type: ignore[assignment]
 
 
 class _FakeOcrEmpty:
@@ -224,7 +232,7 @@ async def main():
                 # ---- 2. fake ingest LLM was called once -----------------
                 assert len(CALL_LOG) == 1
                 req = CALL_LOG[0]
-                user_text = req.messages[0].content[0].text  # type: ignore[index, attr-defined]
+                user_text = _request_text(req)
                 for marker in ("### Page 1", "### Page 2", "### Page 3"):
                     assert marker in user_text, f"missing {marker} in prompt"
                 assert "Raft" in user_text and "Paxos" in user_text

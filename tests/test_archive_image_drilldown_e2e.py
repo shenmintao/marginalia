@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import asyncio
 import io
-import json
 import os
 import shutil
 import zipfile
@@ -88,24 +87,27 @@ class _FakeIngest:
 
     async def complete(self, request: ChatRequest) -> ChatResponse:
         INGEST_CALLS.append(request)
-        payload = {
-            "summary": "A tiny archive with a markdown readme and one image.",
-            "description": {
-                "archive_kind": "zip",
-                "primary_language": None,
-                "frameworks_detected": [],
-            },
-            "kind": "container",
-            "extra": "",
-            "entry_extra": "",
-            "entry_catalog_path": ["Tests"],
-            "entry_tags": [{"name": "test", "facet": "source"}],
-        }
+        tagged = """<summary>
+A tiny archive with a markdown readme and one image.
+</summary>
+<description>
+The archive contains a small readme and a placeholder image.
+</description>
+<kind>container</kind>
+<extra>
+archive_kind: zip
+</extra>
+<entry_extra>
+</entry_extra>
+<catalog_path>Tests</catalog_path>
+<tags>
+source: test
+</tags>"""
         return ChatResponse(
-            text=json.dumps(payload), tool_calls=[],
+            text=tagged, tool_calls=[],
             stop_reason="end_turn",
             usage=TokenUsage(input_tokens=400, output_tokens=80),
-            parsed_json=payload,
+            parsed_json=None,
         )
 
 

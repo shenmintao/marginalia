@@ -66,12 +66,28 @@ def _make_fake_summarizer():
         async def complete(self, request: ChatRequest) -> ChatResponse:
             SUMMARIZE_CALLS.append(request)
             payload = NEXT_RESPONSE
+            insight_lines: list[str] = []
+            for insight in payload.get("insights", []):
+                insight_lines.extend([
+                    f"- note: {insight['note']}",
+                    f"  entry_ids: {', '.join(insight.get('entry_ids') or [])}",
+                    f"  tags: {', '.join(insight.get('tags') or [])}",
+                ])
+            superseded_lines = list(payload.get("superseded") or [])
+            tagged = (
+                "<insights>\n"
+                + "\n".join(insight_lines)
+                + "\n</insights>\n\n"
+                "<superseded>\n"
+                + "\n".join(superseded_lines)
+                + "\n</superseded>"
+            )
             return ChatResponse(
-                text=json.dumps(payload),
+                text=tagged,
                 tool_calls=[],
                 stop_reason="end_turn",
                 usage=TokenUsage(input_tokens=3000, output_tokens=400, cache_read_tokens=2500),
-                parsed_json=payload,
+                parsed_json=None,
             )
     return _FakeChatClient()
 

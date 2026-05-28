@@ -60,6 +60,13 @@ from marginalia.utils.ids import new_id
 CALL_LOG: list[ChatRequest] = []
 
 
+def _request_text(request: ChatRequest) -> str:
+    return "\n".join(
+        getattr(block, "text", "")
+        for block in request.messages[0].content
+    )
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -78,7 +85,7 @@ def _make_fake_llm(plan: dict[str, list[str]]):
 
         async def complete(self, request: ChatRequest) -> ChatResponse:
             CALL_LOG.append(request)
-            user_text = request.messages[0].content[0].text  # type: ignore[index, attr-defined]
+            user_text = _request_text(request)
             ctx_start = user_text.index("<context>") + len("<context>")
             ctx_end = user_text.index("</context>")
             ctx_blob = user_text[ctx_start:ctx_end].strip()
@@ -90,13 +97,17 @@ def _make_fake_llm(plan: dict[str, list[str]]):
                     assignments.append({"entry_id": eid, "tag_ids": plan[eid]})
                 else:
                     assignments.append({"entry_id": eid, "tag_ids": []})
-            payload = {"assignments": assignments}
+            lines = [
+                f"{a['entry_id']}: {', '.join(a['tag_ids'])}"
+                for a in assignments
+            ]
+            tagged = "<assignments>\n" + "\n".join(lines) + "\n</assignments>"
             return ChatResponse(
-                text=json.dumps(payload),
+                text=tagged,
                 tool_calls=[],
                 stop_reason="end_turn",
                 usage=TokenUsage(input_tokens=600, output_tokens=120, cache_read_tokens=400),
-                parsed_json=payload,
+                parsed_json=None,
             )
 
     return _Fake()
@@ -262,7 +273,7 @@ async def main():
 
         # 2. vocabulary feed: alias 'md' must NOT be offered. Inspect call log.
         assert len(CALL_LOG) >= 1
-        call_text = CALL_LOG[0].messages[0].content[0].text  # type: ignore[index, attr-defined]
+        call_text = _request_text(CALL_LOG[0])
         assert seeded["alias_md_id"] not in call_text, "alias tag id leaked to LLM"
 
         # 3. entry_tags after run

@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import asyncio
 import io
-import json
 import os
 import shutil
 import sys
@@ -62,6 +61,13 @@ from marginalia.tasks.runner import TaskRunner
 
 
 CALL_LOG: list[ChatRequest] = []
+
+
+def _request_text(request: ChatRequest) -> str:
+    return "\n".join(
+        getattr(block, "text", "")
+        for block in request.messages[0].content
+    )
 
 
 def _build_repo_zip() -> bytes:
@@ -116,28 +122,32 @@ class _FakeIngest:
 
     async def complete(self, request: ChatRequest) -> ChatResponse:
         CALL_LOG.append(request)
-        payload = {
-            "summary": "Toy FastAPI repo with src/ and tests/.",
-            "description": {
-                "primary_language": "python",
-                "frameworks_detected": ["FastAPI", "SQLAlchemy"],
-            },
-            "kind": "container",
-            "extra": "",
-            "entry_extra": "",
-            "entry_catalog_path": ["Code", "WebApps"],
-            "entry_tags": [
-                {"name": "fastapi", "facet": "topic"},
-                {"name": "python", "facet": "language"},
-                {"name": "git_repo", "facet": "form"},
-            ],
-        }
+        tagged = """<summary>
+Toy FastAPI repo with src/ and tests/.
+</summary>
+<description>
+Small source archive shaped like a Python web application.
+</description>
+<kind>container</kind>
+<extra>
+archive_kind: zip
+primary_language: python
+frameworks_detected: FastAPI, SQLAlchemy
+</extra>
+<entry_extra>
+</entry_extra>
+<catalog_path>Code / WebApps</catalog_path>
+<tags>
+topic: fastapi
+language: python
+form: git_repo
+</tags>"""
         return ChatResponse(
-            text=json.dumps(payload),
+            text=tagged,
             tool_calls=[],
             stop_reason="end_turn",
             usage=TokenUsage(input_tokens=2200, output_tokens=400, cache_read_tokens=1800),
-            parsed_json=payload,
+            parsed_json=None,
         )
 
 
@@ -148,6 +158,12 @@ def _install_fake() -> None:
         return fake
     import marginalia.pipelines.archive as cmod
     cmod.get_chat_client = _factory  # type: ignore[assignment]
+    import marginalia.tasks.handlers.periodic_tick as pmod
+
+    async def _no_periodic_bootstrap() -> None:
+        return None
+
+    pmod.bootstrap_periodic_tick = _no_periodic_bootstrap  # type: ignore[assignment]
 
 
 async def _create_schema():
@@ -205,7 +221,7 @@ async def main():
 
                 # ---- 2. fake LLM call inspection -----------------------
                 assert len(CALL_LOG) == 1
-                prompt = CALL_LOG[0].messages[0].content[0].text  # type: ignore[index, attr-defined]
+                prompt = _request_text(CALL_LOG[0])
                 assert "README.md" in prompt
                 assert "pyproject.toml" in prompt
                 assert "FastAPI" in prompt

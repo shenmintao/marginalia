@@ -95,29 +95,28 @@ class _FakeIngest:
 
     async def complete(self, request: ChatRequest) -> ChatResponse:
         INGEST_CALLS.append(request)
-        payload = {
-            "summary": "Long scanned PDF; OCRed first 5 of 8 pages.",
-            "description": {
-                "sections": [
-                    {
-                        "id": "s1", "title": "OCR'd portion",
-                        "anchor": {"unit": "pages", "value": f"1-{TEST_CAP}"},
-                        "summary": "First 5 pages.",
-                        "key_terms": ["lorem", "ipsum"],
-                    },
-                ],
-            },
-            "kind": "text",
-            "extra": "",
-            "entry_extra": "",
-            "entry_catalog_path": ["Tests"],
-            "entry_tags": [{"name": "ocr-cap-boundary", "facet": "form"}],
-        }
+        tagged = f"""<summary>
+Long scanned PDF; OCRed first 5 of 8 pages.
+</summary>
+<description>
+OCR coverage is limited to the configured page cap.
+</description>
+<sections>
+s1 | pages 1-{TEST_CAP} | OCR'd portion | First 5 pages. | lorem, ipsum
+</sections>
+<extra>
+</extra>
+<entry_extra>
+</entry_extra>
+<catalog_path>Tests</catalog_path>
+<tags>
+form: ocr-cap-boundary
+</tags>"""
         return ChatResponse(
-            text=json.dumps(payload), tool_calls=[],
+            text=tagged, tool_calls=[],
             stop_reason="end_turn",
             usage=TokenUsage(input_tokens=900, output_tokens=200),
-            parsed_json=payload,
+            parsed_json=None,
         )
 
 

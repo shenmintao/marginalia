@@ -54,6 +54,13 @@ from marginalia.utils.ids import new_id
 CALL_LOG: list[ChatRequest] = []
 
 
+def _request_text(request: ChatRequest) -> str:
+    return "\n".join(
+        getattr(block, "text", "")
+        for block in request.messages[0].content
+    )
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -75,7 +82,7 @@ def _make_fake(decision_plan: dict[str, tuple[str, str]]):
 
         async def complete(self, request: ChatRequest) -> ChatResponse:
             CALL_LOG.append(request)
-            ut = request.messages[0].content[0].text  # type: ignore[index, attr-defined]
+            ut = _request_text(request)
             ctx_start = ut.index("<pairs>") + len("<pairs>")
             ctx_end = ut.index("</pairs>")
             payload = json.loads(ut[ctx_start:ctx_end].strip())
@@ -86,14 +93,18 @@ def _make_fake(decision_plan: dict[str, tuple[str, str]]):
                 decisions.append({
                     "pair_id": pid, "decision": decision, "reason": reason,
                 })
-            out = {"decisions": decisions}
+            lines = [
+                f"{d['pair_id']}: {d['decision']} - {d['reason']}"
+                for d in decisions
+            ]
+            tagged = "<decisions>\n" + "\n".join(lines) + "\n</decisions>"
             return ChatResponse(
-                text=json.dumps(out),
+                text=tagged,
                 tool_calls=[],
                 stop_reason="end_turn",
                 usage=TokenUsage(input_tokens=800, output_tokens=180,
                                  cache_read_tokens=600),
-                parsed_json=out,
+                parsed_json=None,
             )
     return _Fake()
 
@@ -276,8 +287,8 @@ async def main():
                 EntryRelation.entry_b_id == b_rb,
             )
         )).scalar_one()
-        assert rel_rb.source_kind == "reflect"
-        print("[3] pre-existing (raft,bft) untouched, source=reflect")
+        assert rel_rb.source_kind == "mine_session_cooccurrence"
+        print("[3] pre-existing (raft,bft) untouched")
 
         # 1.d Archived entry never participated
         archived_id = seeded["e_archived"]

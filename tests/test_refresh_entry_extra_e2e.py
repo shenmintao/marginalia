@@ -52,6 +52,13 @@ from marginalia.utils.ids import new_id
 CALL_LOG: list[ChatRequest] = []
 
 
+def _request_text(request: ChatRequest) -> str:
+    return "\n".join(
+        getattr(block, "text", "")
+        for block in request.messages[0].content
+    )
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -71,20 +78,19 @@ def _make_fake(plan: dict[str, str]):
 
         async def complete(self, request: ChatRequest) -> ChatResponse:
             CALL_LOG.append(request)
-            ut = request.messages[0].content[0].text  # type: ignore[index, attr-defined]
+            ut = _request_text(request)
             ctx_start = ut.index("<context>") + len("<context>")
             ctx_end = ut.index("</context>")
             payload = json.loads(ut[ctx_start:ctx_end].strip())
             eid = payload["entry"]["entry_id"]
             new_extra = plan.get(eid, payload["entry"]["current_extra"])
-            out = {"extra": new_extra}
             return ChatResponse(
-                text=json.dumps(out),
+                text=f"<extra>\n{new_extra}\n</extra>",
                 tool_calls=[],
                 stop_reason="end_turn",
                 usage=TokenUsage(input_tokens=600, output_tokens=120,
                                  cache_read_tokens=400),
-                parsed_json=out,
+                parsed_json=None,
             )
     return _Fake()
 

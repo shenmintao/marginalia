@@ -84,12 +84,21 @@ def _make_fake_reflect(entry_a: str, entry_b: str):
 
         async def complete(self, request: ChatRequest) -> ChatResponse:
             REFLECT_CALLS.append(request)
+            entry = payload["journal_entries"][0]
+            tagged = (
+                "<entry>\n"
+                f"question: {entry['question']}\n"
+                f"answer: {entry['answer']}\n"
+                f"entry_ids: {', '.join(entry['entry_ids'])}\n"
+                f"tags: {', '.join(entry['tags'])}\n"
+                "</entry>"
+            )
             return ChatResponse(
-                text=json.dumps(payload),
+                text=tagged,
                 tool_calls=[],
                 stop_reason="end_turn",
                 usage=TokenUsage(input_tokens=2500, output_tokens=600, cache_read_tokens=2000),
-                parsed_json=payload,
+                parsed_json=None,
             )
 
     return _FakeChatClient()

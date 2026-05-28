@@ -74,7 +74,7 @@ EXECUTE_PHASE_PROMPT = """你是 Marginalia 的在线调查员（🔍 Investigat
   三个字段的语义：
   - `entry_id=<id>` —— 必填。完整 36 字符 uuid，或 8 字符以上的十六进制前缀
     （前缀只要在当前库内唯一）。**只能**来自本轮真实工具结果（`search_journal`、
-    `list_folder`、`read_entry` 等），不能从系统快照里编造，也不要在前面加
+    `list_folder`、`read_entries_metadata`、`read_files` 等），不能从系统快照里编造，也不要在前面加
     文件名 / em-dash 等任何前缀（GUI 会自动用 display_name 替换 id）。
   - `quote="<原文逐字摘录>"` —— **能写就写**。从原文逐字复制 10-60 字，挑带
     数字/专有名词/关键短语的句子最容易在 GUI 中定位并高亮。引号内 `"` 写成
@@ -98,11 +98,11 @@ EXECUTE_PHASE_PROMPT = """你是 Marginalia 的在线调查员（🔍 Investigat
   开头。
 
   正确示例（PDF — 同时写 quote 和物理 page；后端会优先用 quote 校准 page）：
-    `[^a]: entry_id=def456, quote="2024 年营收同比增长 18%", page=3 - 营收数据来源`
+    `[^a]: entry_id=def45678, quote="2024 年营收同比增长 18%", page=3 - 营收数据来源`
   正确示例（markdown — 只写 quote）：
-    `[^b]: entry_id=abc123, quote="合同第4.6条规定年终奖以书面决定为准" - 论证年终奖归属`
+    `[^b]: entry_id=abc12345, quote="合同第4.6条规定年终奖以书面决定为准" - 论证年终奖归属`
   正确示例（图片 / 扫描件 — 都省略）：
-    `[^c]: entry_id=ghi789 - 银行流水截图佐证转账金额`
+    `[^c]: entry_id=0123abcd - 银行流水截图佐证转账金额`
 
   错误示例（任意一条都会让 footnote 渲染失败）：
     `[^a]: 5-聊天记录.pdf — 6fd4da7d, page=3 - r`            # 文件名前缀禁止
@@ -116,7 +116,7 @@ EXECUTE_PHASE_PROMPT = """你是 Marginalia 的在线调查员（🔍 Investigat
   内容时，写两条独立 footnote，正文用 `[^a]` `[^b]` 两个角标分别指。
   **不要**把多段证据塞进一条 footnote——GUI 只能跳到一处，其余用户找不到。
 - **`entry_id` 的合法来源只有一个**：你在本轮里通过 `search_journal`、
-  `list_folder`、`read_entry` 等工具调用真实拿到过的 catalog entry
+  `list_folder`、`read_entries_metadata`、`read_files` 等工具调用真实拿到过的 catalog entry
   id。**绝不能**把系统快照（`# 当前知识库快照` 那一段 JSON）里的任何字段
   当成 entry_id 来引用——快照里只有 catalog/views/tags/journal 的概览，
   里面没有可以拿来当 entry_id 的字段。完整 36 字符 uuid 和 8 字符以上的十六进制

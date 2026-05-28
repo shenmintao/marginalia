@@ -53,6 +53,13 @@ from marginalia.utils.ids import new_id
 CALL_LOG: list[ChatRequest] = []
 
 
+def _request_text(request: ChatRequest) -> str:
+    return "\n".join(
+        getattr(block, "text", "")
+        for block in request.messages[0].content
+    )
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -71,7 +78,7 @@ def _make_fake(plan: dict[str, dict]):
 
         async def complete(self, request: ChatRequest) -> ChatResponse:
             CALL_LOG.append(request)
-            ut = request.messages[0].content[0].text  # type: ignore[index, attr-defined]
+            ut = _request_text(request)
             ctx_start = ut.index("<clusters>") + len("<clusters>")
             ctx_end = ut.index("</clusters>")
             payload = json.loads(ut[ctx_start:ctx_end].strip())
@@ -89,14 +96,15 @@ def _make_fake(plan: dict[str, dict]):
                     d["filter_tag_ids"] = spec.get(
                         "filter_tag_ids", cl["tag_ids"])
                 decisions.append(d)
-            out = {"decisions": decisions}
+            lines = [json.dumps(d, ensure_ascii=False) for d in decisions]
+            tagged = "<decisions>\n" + "\n".join(lines) + "\n</decisions>"
             return ChatResponse(
-                text=json.dumps(out),
+                text=tagged,
                 tool_calls=[],
                 stop_reason="end_turn",
                 usage=TokenUsage(input_tokens=600, output_tokens=200,
                                  cache_read_tokens=400),
-                parsed_json=out,
+                parsed_json=None,
             )
     return _Fake()
 
@@ -258,7 +266,7 @@ async def main():
         # 1.c Cluster C (covered) — was never even sent to LLM
         # Verify by examining LLM call payload
         assert len(CALL_LOG) == 1
-        ut = CALL_LOG[0].messages[0].content[0].text  # type: ignore[index, attr-defined]
+        ut = _request_text(CALL_LOG[0])
         assert "graph" not in ut, "covered cluster should not be sent to LLM"
         assert "node" not in ut
         print("[3] cluster C (graph/node/edge) excluded — already covered")

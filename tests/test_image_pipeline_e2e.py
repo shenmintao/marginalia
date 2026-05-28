@@ -8,11 +8,10 @@ Verifies:
   2. Uploading a PNG enqueues ingest_file; the handler picks it up.
   3. The fake VISION client receives a ChatRequest whose user message
      contains:
-       - one TextBlock (the prompt context)
-       - one ImageBlock with media_type='image/png' and base64-decoded
-         bytes equal to the original upload
+       - two TextBlocks (format hint + prompt context)
+       - one ImageBlock re-encoded as image/jpeg
   4. The pipeline produces a PipelineResult with kind='image' and a
-     description.regions array; the handler writes it to files.* and
+     description text; the handler writes it to files.* and
      creates the catalog/tag chain as for text.
   5. files.summary / kind / description / entry_tags are all set.
 """
@@ -21,7 +20,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import io
-import json
 import os
 import shutil
 import sys
@@ -89,34 +87,31 @@ class _FakeVision:
 
     async def complete(self, request: ChatRequest) -> ChatResponse:
         CALL_LOG.append(request)
-        payload = {
-            "summary": "A 1x1 test image used to exercise the vision path.",
-            "description": {
-                "regions": [
-                    {
-                        "id": "r1",
-                        "label": "Solid color region",
-                        "summary": "The entire frame is uniform.",
-                        "key_terms": ["test", "uniform", "solid"],
-                    }
-                ]
-            },
-            "kind": "image",
-            "extra": "Synthetic test fixture — no real semantic content.",
-            "entry_extra": "Sits among test fixtures in /tests/images.",
-            "entry_catalog_path": ["Tests", "Images"],
-            "entry_tags": [
-                {"name": "test-fixture", "facet": "source"},
-                {"name": "png", "facet": "form"},
-                {"name": "synthetic", "facet": "topic"},
-            ],
-        }
+        tagged = """<summary>
+A 1x1 test image used to exercise the vision path.
+</summary>
+<description>
+The entire frame is a uniform solid color region.
+</description>
+<kind>image</kind>
+<extra>
+notable: synthetic test fixture with no real semantic content
+</extra>
+<entry_extra>
+Sits among test fixtures in /tests/images.
+</entry_extra>
+<catalog_path>Tests / Images</catalog_path>
+<tags>
+source: test-fixture
+form: png
+topic: synthetic
+</tags>"""
         return ChatResponse(
-            text=json.dumps(payload),
+            text=tagged,
             tool_calls=[],
             stop_reason="end_turn",
             usage=TokenUsage(input_tokens=1500, output_tokens=200, cache_read_tokens=1200),
-            parsed_json=payload,
+            parsed_json=None,
         )
 
 
@@ -127,6 +122,12 @@ def _install_fake() -> None:
         return fake
     import marginalia.pipelines.image as imod
     imod.get_chat_client = _factory  # type: ignore[assignment]
+    import marginalia.tasks.handlers.periodic_tick as pmod
+
+    async def _no_periodic_bootstrap() -> None:
+        return None
+
+    pmod.bootstrap_periodic_tick = _no_periodic_bootstrap  # type: ignore[assignment]
 
 
 # ---- helpers ---------------------------------------------------------------
@@ -205,7 +206,7 @@ async def main():
     text_blocks = [b for b in blocks if isinstance(b, TextBlock)]
     image_blocks = [b for b in blocks if isinstance(b, ImageBlock)]
     print("[blocks] text:", len(text_blocks), " image:", len(image_blocks))
-    assert len(text_blocks) == 1
+    assert len(text_blocks) == 2
     assert len(image_blocks) == 1
 
     img = image_blocks[0]
@@ -229,8 +230,8 @@ async def main():
         assert f.kind == "image"
         assert f.summary and "test image" in f.summary.lower()
         assert isinstance(f.description, dict)
-        assert "regions" in f.description
-        assert len(f.description["regions"]) == 1
+        assert "text" in f.description
+        assert "uniform solid color" in f.description["text"]
         assert f.ingest_status == "done"
         assert f.ingested_at is not None
 

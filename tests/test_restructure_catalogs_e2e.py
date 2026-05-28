@@ -89,13 +89,17 @@ def _make_fake(operations: list[dict]):
 
         async def complete(self, request: ChatRequest) -> ChatResponse:
             CALLS.append(request)
-            payload = {"operations": operations}
+            tagged = (
+                "<operations>\n"
+                + "\n".join(json.dumps(op) for op in operations)
+                + "\n</operations>"
+            )
             return ChatResponse(
-                text=json.dumps(payload),
+                text=tagged,
                 tool_calls=[],
                 stop_reason="end_turn",
                 usage=TokenUsage(input_tokens=900, output_tokens=200, cache_read_tokens=600),
-                parsed_json=payload,
+                parsed_json=None,
             )
     return _Fake()
 

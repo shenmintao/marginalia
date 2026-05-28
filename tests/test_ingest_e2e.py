@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import asyncio
 import io
-import json
 import os
 import shutil
 import sys
@@ -63,50 +62,48 @@ from marginalia.tasks.runner import TaskRunner  # noqa: E402
 CALL_LOG: list[ChatRequest] = []
 
 
+def _request_text(request: ChatRequest) -> str:
+    return "\n".join(
+        getattr(block, "text", "")
+        for block in request.messages[0].content
+    )
+
+
 class _FakeChatClient:
     profile_name = "ingest"
     model = "fake-model"
 
     async def complete(self, request: ChatRequest) -> ChatResponse:
         CALL_LOG.append(request)
-        # Return a canned, schema-compliant pipeline output.
-        payload = {
-            "summary": "A short note describing how Marginalia handles ingestion.",
-            "description": {
-                "sections": [
-                    {
-                        "id": "s1",
-                        "title": "Overview",
-                        "anchor": {"unit": "heading", "path": "1"},
-                        "summary": "High-level intro to ingestion.",
-                        "key_terms": ["ingest", "pipeline", "metadata"],
-                    },
-                    {
-                        "id": "s2",
-                        "title": "Pipeline",
-                        "anchor": {"unit": "heading", "path": "2"},
-                        "summary": "How the text pipeline works.",
-                        "key_terms": ["text", "json", "schema"],
-                    },
-                ],
-            },
-            "kind": "text",
-            "extra": "Themes: indexing, summarization, structured output.",
-            "entry_extra": "Sits beside other research notes; references the ingest design.",
-            "entry_catalog_path": ["Research", "Marginalia"],
-            "entry_tags": [
-                {"name": "marginalia", "facet": "topic"},
-                {"name": "ingest-pipeline", "facet": "topic"},
-                {"name": "markdown", "facet": "form"},
-                {"name": "english", "facet": "language"},
-            ],
-        }
+        # Return the tagged-response format used by the real ingest prompt.
+        tagged = """<summary>
+A short note describing how Marginalia handles ingestion.
+</summary>
+<description>
+Overview of the ingestion note and its pipeline discussion.
+</description>
+<sections>
+s1 | 1 | Overview | High-level intro to ingestion. | ingest, pipeline, metadata
+s2 | 2 | Pipeline | How the text pipeline works. | text, tagged, schema
+</sections>
+<extra>
+Themes: indexing, summarization, structured output
+</extra>
+<entry_extra>
+Sits beside other research notes; references the ingest design.
+</entry_extra>
+<catalog_path>Research / Marginalia</catalog_path>
+<tags>
+topic: marginalia, ingest-pipeline
+form: markdown
+language: english
+</tags>"""
         return ChatResponse(
-            text=json.dumps(payload),
+            text=tagged,
             tool_calls=[],
             stop_reason="end_turn",
             usage=TokenUsage(input_tokens=2000, output_tokens=400, cache_read_tokens=1500),
-            parsed_json=payload,
+            parsed_json=None,
         )
 
 
@@ -121,6 +118,12 @@ def _install_fake_llm() -> None:
     # text pipeline imports the symbol at module load — patch it there too.
     import marginalia.pipelines.text as text_mod
     text_mod.get_chat_client = _fake_factory  # type: ignore[assignment]
+    import marginalia.tasks.handlers.periodic_tick as pmod
+
+    async def _no_periodic_bootstrap() -> None:
+        return None
+
+    pmod.bootstrap_periodic_tick = _no_periodic_bootstrap  # type: ignore[assignment]
 
 
 # ---- helpers ---------------------------------------------------------------
@@ -196,10 +199,8 @@ async def main() -> None:
             # 3) verify the LLM was actually called via our fake
             assert len(CALL_LOG) == 1, f"expected 1 LLM call, got {len(CALL_LOG)}"
             req = CALL_LOG[0]
-            assert req.json_schema is not None
-            assert "Index the document below" in (
-                req.messages[0].content[0].text  # type: ignore[index, attr-defined]
-            )
+            assert req.json_schema is None
+            assert "Index the document below" in _request_text(req)
             print("[llm] system prompt len:", len(req.system or ""))
             print("[llm] usage path used cache_breakpoints:", req.cache_breakpoints)
 

@@ -50,6 +50,7 @@ WINDOW_DAYS = 14
 MIN_JOURNALS = 3
 CAP = 20
 SOURCE_KIND = "refresh_entry_extra"
+UNCHANGED_SENTINEL = "UNCHANGED"
 
 REFRESH_SYSTEM = """You are Marginalia's per-entry insight synthesizer.
 
@@ -63,13 +64,14 @@ Rules:
 - The new `extra` should integrate the journals into a coherent view.
 - Do NOT just list journals; synthesize.
 - Do NOT speculate beyond what's in the journals + entry metadata.
-- If the journals don't add up to anything meaningful, return the
-  `current_extra` unchanged (signaling no refresh needed).
+- If the journals don't add up to anything meaningful, output exactly
+  `UNCHANGED` inside the <extra> block. Do this even when `current_extra`
+  is empty.
 
 Output format — exactly one block:
 
   <extra>
-  free-form prose, 2-5 sentences
+  free-form prose, 2-5 sentences OR exactly UNCHANGED
   </extra>
 
 Do NOT wrap in JSON, do NOT add ``` fences.
@@ -236,7 +238,7 @@ async def _process_one(
 
     new_extra = new_extra.strip()
     old_extra = cand["current_extra"].strip()
-    if new_extra == old_extra:
+    if new_extra.upper() == UNCHANGED_SENTINEL or new_extra == old_extra:
         async with session_scope() as session:
             await record_outcome(
                 session,
@@ -315,7 +317,7 @@ async def _ask_llm(cand: dict[str, Any]) -> str | None:
     stable_prefix = (
         "Synthesize this entry's `extra` from the journal mentions and "
         "current metadata. If nothing has changed meaningfully, return "
-        "the `current_extra` unchanged.\n\n"
+        "`UNCHANGED` inside <extra>.\n\n"
     )
     file_content = (
         f"<context>\n{json.dumps(user_payload, ensure_ascii=False)}\n</context>"
@@ -333,6 +335,8 @@ async def _ask_llm(cand: dict[str, Any]) -> str | None:
     ))
     tagged = parse_tagged(resp.text or "")
     extra = tagged.get("extra", "").strip()
+    if extra.upper() == UNCHANGED_SENTINEL:
+        return UNCHANGED_SENTINEL
     if not extra:
         log.warning("refresh_entry_extra: no <extra> in response for entry %s",
                     cand["entry_id"])

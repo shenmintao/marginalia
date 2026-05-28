@@ -52,6 +52,7 @@ marginalia-worker = "marginalia.worker:main"
 dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
+    "fpdf2>=2.8",
     "moto[s3]>=5.0",
 ]
 

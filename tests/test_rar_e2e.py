@@ -20,7 +20,6 @@ When a fixture is produced, the test verifies that:
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import shutil
 import subprocess
@@ -125,24 +124,27 @@ class _FakeIngest:
 
     async def complete(self, request: ChatRequest) -> ChatResponse:
         CALL_LOG.append(request)
-        payload = {
-            "summary": "A small RAR fixture with two members.",
-            "description": {
-                "archive_kind": "rar",
-                "primary_language": None,
-                "frameworks_detected": [],
-            },
-            "kind": "container",
-            "extra": "",
-            "entry_extra": "",
-            "entry_catalog_path": ["Tests"],
-            "entry_tags": [{"name": "rar", "facet": "form"}],
-        }
+        tagged = """<summary>
+A small RAR fixture with two members.
+</summary>
+<description>
+Small archive fixture used to exercise RAR handling.
+</description>
+<kind>container</kind>
+<extra>
+archive_kind: rar
+</extra>
+<entry_extra>
+</entry_extra>
+<catalog_path>Tests</catalog_path>
+<tags>
+form: rar
+</tags>"""
         return ChatResponse(
-            text=json.dumps(payload), tool_calls=[],
+            text=tagged, tool_calls=[],
             stop_reason="end_turn",
             usage=TokenUsage(input_tokens=400, output_tokens=80),
-            parsed_json=payload,
+            parsed_json=None,
         )
 
 

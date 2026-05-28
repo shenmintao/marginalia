@@ -55,6 +55,13 @@ from marginalia.utils.ids import new_id
 CALL_LOG: list[ChatRequest] = []
 
 
+def _request_text(request: ChatRequest) -> str:
+    return "\n".join(
+        getattr(block, "text", "")
+        for block in request.messages[0].content
+    )
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -74,19 +81,24 @@ def _make_fake_llm(merges_by_facet: dict[str, list[dict]]):
 
         async def complete(self, request: ChatRequest) -> ChatResponse:
             CALL_LOG.append(request)
-            user_text = request.messages[0].content[0].text  # type: ignore[index, attr-defined]
+            user_text = _request_text(request)
             facet = None
             for f in ("topic", "form", "time", "source", "language", "extra"):
                 if f"Facet: {f}" in user_text:
                     facet = f
                     break
-            payload = {"merges": merges_by_facet.get(facet or "", [])}
+            merges = merges_by_facet.get(facet or "", [])
+            lines = [
+                f"{m['canonical_id']}: {', '.join(m['merge_in_ids'])}"
+                for m in merges
+            ]
+            tagged = "<merges>\n" + "\n".join(lines) + "\n</merges>"
             return ChatResponse(
-                text=json.dumps(payload),
+                text=tagged,
                 tool_calls=[],
                 stop_reason="end_turn",
                 usage=TokenUsage(input_tokens=400, output_tokens=80, cache_read_tokens=300),
-                parsed_json=payload,
+                parsed_json=None,
             )
 
     return _FakeChatClient()

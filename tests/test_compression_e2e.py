@@ -33,7 +33,6 @@ from __future__ import annotations
 import asyncio
 import gzip
 import io
-import json
 import os
 import shutil
 import tarfile
@@ -66,37 +65,37 @@ from marginalia.storage import get_storage  # noqa: E402
 CALL_LOG: list[ChatRequest] = []
 
 
-def _fake_archive_payload() -> dict:
-    return {
-        "summary": "A small synthetic archive used to exercise the pipeline.",
-        "description": {
-            "archive_kind": "tar.gz",
-            "primary_language": None,
-            "frameworks_detected": [],
-        },
-        "kind": "container",
-        "extra": "",
-        "entry_extra": "",
-        "entry_catalog_path": ["Tests", "Archives"],
-        "entry_tags": [
-            {"name": "archive", "facet": "form"},
-            {"name": "test-fixture", "facet": "source"},
-        ],
-    }
-
-
 class _FakeIngest:
     profile_name = "ingest"
     model = "fake-ingest"
 
     async def complete(self, request: ChatRequest) -> ChatResponse:
         CALL_LOG.append(request)
-        payload = _fake_archive_payload()
+        tagged = """<summary>
+A small synthetic archive used to exercise the pipeline.
+</summary>
+<description>
+Synthetic archive fixture used by compression tests.
+</description>
+<kind>container</kind>
+<sections>
+s1 | 1 | Archive fixture | Synthetic compressed input. | archive, test-fixture
+</sections>
+<extra>
+archive_kind: tar.gz
+</extra>
+<entry_extra>
+</entry_extra>
+<catalog_path>Tests / Archives</catalog_path>
+<tags>
+form: archive
+source: test-fixture
+</tags>"""
         return ChatResponse(
-            text=json.dumps(payload), tool_calls=[],
+            text=tagged, tool_calls=[],
             stop_reason="end_turn",
             usage=TokenUsage(input_tokens=500, output_tokens=120),
-            parsed_json=payload,
+            parsed_json=None,
         )
 
 

@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import asyncio
 import io
-import json
 import os
 import shutil
 import sys
@@ -57,26 +56,26 @@ CALL_LOG: list[tuple[str, ChatRequest]] = []
 
 
 def _make_fake(kind: str):
-    payload = {
-        "summary": f"A test {kind} used to exercise the {kind} pipeline path.",
-        "description": {
-            "sections": [{
-                "id": "s1",
-                "title": "Overview",
-                "anchor": {"unit": "lines", "value": "1-3"},
-                "summary": "Top of the document.",
-                "key_terms": ["test", "fixture", kind],
-            }],
-        },
-        "kind": kind,
-        "extra": f"Synthetic {kind} fixture — no real semantic content.",
-        "entry_extra": "Test fixture stored in /tests/office.",
-        "entry_catalog_path": ["Tests", "Office"],
-        "entry_tags": [
-            {"name": "test-fixture", "facet": "source"},
-            {"name": kind, "facet": "form"},
-        ],
-    }
+    tagged = f"""<summary>
+A test {kind} used to exercise the {kind} pipeline path.
+</summary>
+<description>
+Synthetic {kind} fixture for the office pipeline.
+</description>
+<sections>
+s1 | lines 1-3 | Overview | Top of the document. | test, fixture, {kind}
+</sections>
+<extra>
+notable: Synthetic {kind} fixture with no real semantic content.
+</extra>
+<entry_extra>
+Test fixture stored in /tests/office.
+</entry_extra>
+<catalog_path>Tests / Office</catalog_path>
+<tags>
+source: test-fixture
+form: {kind}
+</tags>"""
 
     class _Fake:
         profile_name = "ingest"
@@ -85,11 +84,11 @@ def _make_fake(kind: str):
         async def complete(self, request: ChatRequest) -> ChatResponse:
             CALL_LOG.append((kind, request))
             return ChatResponse(
-                text=json.dumps(payload),
+                text=tagged,
                 tool_calls=[],
                 stop_reason="end_turn",
                 usage=TokenUsage(input_tokens=500, output_tokens=200),
-                parsed_json=payload,
+                parsed_json=None,
             )
 
     return _Fake()
@@ -248,8 +247,8 @@ async def go() -> None:
 
     assert docx_row.ingest_status == "done", docx_row.ingest_status
     assert xlsx_row.ingest_status == "done", xlsx_row.ingest_status
-    assert docx_row.kind == "docx"
-    assert xlsx_row.kind == "spreadsheet"
+    assert docx_row.kind == "text"
+    assert xlsx_row.kind == "table"
     print(f"[2] ingest done: docx kind={docx_row.kind} xlsx kind={xlsx_row.kind}")
 
     # 3a. docx read_segment

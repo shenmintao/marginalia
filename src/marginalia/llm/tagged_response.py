@@ -225,7 +225,10 @@ def render_format_hint(*, kinds: tuple[str, ...] | None = None) -> str:
             "\n  <kind>one of: " + " | ".join(kinds) + "</kind>"
         )
     return (
-        "Output format — use these tags, in any order, in plain text:\n"
+        "Output format — plain text blocks only. Emit each requested block "
+        "exactly once, in the order shown. If a separate <sections> hint is "
+        "included, place <sections> after <description> and before <extra>. "
+        "Do not draft a block and then repeat it.\n"
         "  <summary>1-2 sentences (≤60 中文字 / ≤30 English words). "
         "The spine of the document, not a retell.</summary>\n"
         "  <description>free-form prose; multi-paragraph OK.</description>"

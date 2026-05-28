@@ -94,32 +94,29 @@ class _FakeIngest:
 
     async def complete(self, request: ChatRequest) -> ChatResponse:
         INGEST_CALLS.append(request)
-        payload = {
-            "summary": "A short scanned PDF on Raft consensus.",
-            "description": {
-                "sections": [
-                    {
-                        "id": "s1", "title": "Background",
-                        "anchor": {"unit": "pages", "value": "1-1"},
-                        "summary": "Raft motivation.",
-                        "key_terms": ["raft", "consensus"],
-                    },
-                ],
-            },
-            "kind": "text",
-            "extra": "",
-            "entry_extra": "",
-            "entry_catalog_path": ["Research", "Consensus"],
-            "entry_tags": [
-                {"name": "raft", "facet": "topic"},
-                {"name": "scanned-pdf", "facet": "form"},
-            ],
-        }
+        tagged = """<summary>
+A short scanned PDF on Raft consensus.
+</summary>
+<description>
+OCR text describes Raft motivation.
+</description>
+<sections>
+s1 | pages 1-1 | Background | Raft motivation. | raft, consensus
+</sections>
+<extra>
+</extra>
+<entry_extra>
+</entry_extra>
+<catalog_path>Research / Consensus</catalog_path>
+<tags>
+topic: raft
+form: scanned-pdf
+</tags>"""
         return ChatResponse(
-            text=json.dumps(payload), tool_calls=[],
+            text=tagged, tool_calls=[],
             stop_reason="end_turn",
             usage=TokenUsage(input_tokens=900, output_tokens=200),
-            parsed_json=payload,
+            parsed_json=None,
         )
 
 

@@ -66,12 +66,19 @@ def _now() -> datetime:
 PLAN: dict[tuple[str, str], dict[str, str]] = {}
 
 
+def _request_text(request: ChatRequest) -> str:
+    return "\n".join(
+        getattr(block, "text", "")
+        for block in request.messages[0].content
+    )
+
+
 class _FakeVetIngest:
     profile_name = "ingest"
     model = "fake-ingest"
 
     async def complete(self, request: ChatRequest) -> ChatResponse:
-        ut = request.messages[0].content[0].text  # type: ignore[attr-defined, index]
+        ut = _request_text(request)
         cs = ut.index("<candidates>") + len("<candidates>")
         ce = ut.index("</candidates>")
         cands = json.loads(ut[cs:ce].strip())["candidates"]
@@ -86,13 +93,17 @@ class _FakeVetIngest:
                 "verdict": spec["verdict"],
                 "reason": spec["reason"],
             })
-        payload = {"verdicts": verdicts}
+        lines = [
+            f"{v['pair_id']}: {v['verdict']} - {v['reason']}"
+            for v in verdicts
+        ]
+        tagged = "<verdicts>\n" + "\n".join(lines) + "\n</verdicts>"
         return ChatResponse(
-            text=json.dumps(payload),
+            text=tagged,
             tool_calls=[],
             stop_reason="end_turn",
             usage=TokenUsage(input_tokens=300, output_tokens=100),
-            parsed_json=payload,
+            parsed_json=None,
         )
 
 

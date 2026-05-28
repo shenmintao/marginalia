@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import asyncio
 import io
-import json
 import os
 import shutil
 import sys
@@ -61,31 +60,30 @@ class _FakeIngest:
 
     async def complete(self, request: ChatRequest) -> ChatResponse:
         CALL_LOG.append(request)
-        payload = {
-            "summary": "Worker-test note about Marginalia.",
-            "description": {
-                "sections": [
-                    {"id": "s1", "title": "Intro",
-                     "anchor": {"unit": "heading", "value": "1"},
-                     "summary": "Intro paragraph.",
-                     "key_terms": ["worker", "daemon"]},
-                ],
-            },
-            "kind": "text",
-            "extra": "",
-            "entry_extra": "",
-            "entry_catalog_path": ["Worker"],
-            "entry_tags": [
-                {"name": "worker-test", "facet": "topic"},
-            ],
-        }
+        tagged = """<summary>
+Worker-test note about Marginalia.
+</summary>
+<description>
+A short worker test fixture.
+</description>
+<sections>
+s1 | 1 | Intro | Intro paragraph. | worker, daemon
+</sections>
+<extra>
+</extra>
+<entry_extra>
+</entry_extra>
+<catalog_path>Worker</catalog_path>
+<tags>
+topic: worker-test
+</tags>"""
         return ChatResponse(
-            text=json.dumps(payload),
+            text=tagged,
             tool_calls=[],
             stop_reason="end_turn",
             usage=TokenUsage(input_tokens=600, output_tokens=120,
                              cache_read_tokens=400),
-            parsed_json=payload,
+            parsed_json=None,
         )
 
 
@@ -96,6 +94,12 @@ def _install_fake() -> None:
         return fake
     import marginalia.pipelines.text as tmod
     tmod.get_chat_client = _factory  # type: ignore[assignment]
+    import marginalia.tasks.handlers.periodic_tick as pmod
+
+    async def _no_periodic_bootstrap() -> None:
+        return None
+
+    pmod.bootstrap_periodic_tick = _no_periodic_bootstrap  # type: ignore[assignment]
 
 
 async def _create_schema() -> None:

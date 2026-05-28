@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import asyncio
 import io
-import json
 import os
 import shutil
 import sys
@@ -55,6 +54,13 @@ from marginalia.tasks.runner import TaskRunner
 
 VISION_CALL_LOG: list[ChatRequest] = []
 INGEST_CALL_LOG: list[ChatRequest] = []
+
+
+def _request_text(request: ChatRequest) -> str:
+    return "\n".join(
+        getattr(block, "text", "")
+        for block in request.messages[0].content
+    )
 
 
 def _make_solid_png(w: int = 200, h: int = 150,
@@ -160,7 +166,7 @@ class _FakeVision:
         VISION_CALL_LOG.append(request)
         # Pull the page/fig number from the user text to make the
         # description specific (so we can grep for it later).
-        ut = request.messages[0].content[0].text  # type: ignore[index, attr-defined]
+        ut = _request_text(request)
         return ChatResponse(
             text=f"Synthetic figure description for: {ut[:80]}",
             tool_calls=[],
@@ -176,34 +182,32 @@ class _FakeIngest:
 
     async def complete(self, request: ChatRequest) -> ChatResponse:
         INGEST_CALL_LOG.append(request)
-        payload = {
-            "summary": "PDF on Raft and Paxos with figures.",
-            "description": {
-                "sections": [
-                    {"id": "s1", "title": "Introduction",
-                     "anchor": {"unit": "pages", "value": "1-1"},
-                     "summary": "Intro with figure.", "key_terms": ["raft"]},
-                    {"id": "s2", "title": "Pipeline",
-                     "anchor": {"unit": "pages", "value": "2-2"},
-                     "summary": "Pipeline with figure.", "key_terms": ["paxos"]},
-                    {"id": "s3", "title": "Conclusion",
-                     "anchor": {"unit": "pages", "value": "3-3"},
-                     "summary": "Conclusion.", "key_terms": ["wrap"]},
-                ],
-            },
-            "kind": "text", "extra": "", "entry_extra": "",
-            "entry_catalog_path": ["Research"],
-            "entry_tags": [
-                {"name": "consensus", "facet": "topic"},
-                {"name": "pdf", "facet": "form"},
-            ],
-        }
+        tagged = """<summary>
+PDF on Raft and Paxos with figures.
+</summary>
+<description>
+The PDF includes consensus content and extracted figure descriptions.
+</description>
+<sections>
+s1 | pages 1-1 | Introduction | Intro with figure. | raft
+s2 | pages 2-2 | Pipeline | Pipeline with figure. | paxos
+s3 | pages 3-3 | Conclusion | Conclusion. | wrap
+</sections>
+<extra>
+</extra>
+<entry_extra>
+</entry_extra>
+<catalog_path>Research</catalog_path>
+<tags>
+topic: consensus
+form: pdf
+</tags>"""
         return ChatResponse(
-            text=json.dumps(payload),
+            text=tagged,
             tool_calls=[],
             stop_reason="end_turn",
             usage=TokenUsage(input_tokens=2500, output_tokens=400, cache_read_tokens=2000),
-            parsed_json=payload,
+            parsed_json=None,
         )
 
 
@@ -221,6 +225,12 @@ def _install_fakes() -> None:
             return vision
         return ingest
     pmod.get_chat_client = _pick_client  # type: ignore
+    import marginalia.tasks.handlers.periodic_tick as tickmod
+
+    async def _no_periodic_bootstrap() -> None:
+        return None
+
+    tickmod.bootstrap_periodic_tick = _no_periodic_bootstrap  # type: ignore[assignment]
 
 
 # ---- helpers ---------------------------------------------------------------
@@ -300,7 +310,7 @@ async def main():
 
     # ---- 2. ingest call has [Figure X.Y] inserted into prompt -----------
     assert len(INGEST_CALL_LOG) == 1
-    prompt = INGEST_CALL_LOG[0].messages[0].content[0].text  # type: ignore[index, attr-defined]
+    prompt = _request_text(INGEST_CALL_LOG[0])
     assert "[Figure 1.1]" in prompt, "page 1 figure label missing"
     assert "[Figure 2.1]" in prompt, "page 2 figure label missing"
     # icon should NOT have a figure label
