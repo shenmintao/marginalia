@@ -302,10 +302,20 @@ async def test_doom_loop_nudge() -> None:
         "doom-loop nudge not appended to last tool_result. "
         f"messages={[m.role for m in last_req.messages]}"
     )
-    # First message in execute messages (user_message) must be byte-identical
-    # to the original — append-only preserves prefix cache.
-    first_user = next(m for m in last_req.messages if m.role == "user")
-    assert first_user.content == "doom", first_user.content
+    # The execute prompt now starts with a cacheable snapshot prefix. The
+    # live user message must still be byte-identical and appended after
+    # that stable prefix, so doom-loop nudges never mutate the cached part
+    # or the original user turn.
+    assert last_req.cache_breakpoints == [0]
+    original_user_indices = [
+        i for i, m in enumerate(last_req.messages)
+        if m.role == "user" and m.content == "doom"
+    ]
+    assert original_user_indices, [
+        (m.role, m.content if isinstance(m.content, str) else "<blocks>")
+        for m in last_req.messages
+    ]
+    assert original_user_indices[0] > 0
     print("[3] doom-loop nudge appended; original user msg unchanged")
 
 

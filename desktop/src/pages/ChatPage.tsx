@@ -58,9 +58,10 @@ export function ChatPage() {
       if (sid) return sid;
       const s = await sessions.open(initiatingMessage);
       setSessionId(s.session_id);
+      setRefreshSignal((n) => n + 1);
       return s.session_id;
     },
-    [setSessionId],
+    [setSessionId, setRefreshSignal],
   );
 
   useEffect(() => {

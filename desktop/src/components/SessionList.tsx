@@ -7,8 +7,8 @@
  *    GET /v1/sessions/{id}/messages (sessions.messages)
  *
  *  The list refreshes when `refreshSignal` changes — ChatPage bumps
- *  it after the first turn of a new session lands so the entry shows
- *  up without a full reload.
+ *  it when a new session opens and again when the planner writes the
+ *  final title, so the entry appears immediately and then gets renamed.
  */
 import { useCallback, useEffect, useState } from "react";
 import { Plus, MessageSquare, Loader2, Lock, Trash2 } from "lucide-react";
