@@ -47,6 +47,7 @@ class EntryRelation(Base, IdMixin):
         Index("ix_entry_relations_a", "entry_a_id"),
         Index("ix_entry_relations_b", "entry_b_id"),
         Index("ix_entry_relations_observation_count", "observation_count"),
+        Index("ix_entry_relations_vetted", "vetted"),
         CheckConstraint(
             _in_clause("source_kind", ENTRY_RELATION_SOURCE_KINDS),
             name="source_kind",
@@ -111,6 +112,9 @@ class Journal(Base, IdMixin):
         Index("ix_journal_conversation_id", "conversation_id"),
         Index("ix_journal_created_at", "created_at"),
         Index("ix_journal_source_kind", "source_kind"),
+        Index("ix_journal_kind_created", "source_kind", "created_at"),
+        Index("ix_journal_active_created", "superseded_by_id", "created_at"),
+        Index("ix_journal_kind_active_created", "source_kind", "superseded_by_id", "created_at"),
         CheckConstraint(
             _in_clause("source_kind", JOURNAL_SOURCE_KINDS),
             name="source_kind",

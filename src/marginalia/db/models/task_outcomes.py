@@ -36,6 +36,19 @@ class TaskOutcome(Base, IdMixin):
     __tablename__ = "task_outcomes"
     __table_args__ = (
         Index("ix_task_outcomes_lookup", "task_kind", "object_kind", "object_id"),
+        Index(
+            "ix_task_outcomes_lookup_completed",
+            "task_kind",
+            "object_kind",
+            "object_id",
+            "completed_at",
+        ),
+        Index(
+            "ix_task_outcomes_kind_object_completed",
+            "task_kind",
+            "object_kind",
+            "completed_at",
+        ),
         Index("ix_task_outcomes_recency", "task_kind", "completed_at"),
         Index("ix_task_outcomes_completed_at", "completed_at"),
     )

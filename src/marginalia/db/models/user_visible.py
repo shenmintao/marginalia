@@ -34,7 +34,10 @@ class Folder(Base, IdMixin, TimestampMixin):
     """
 
     __tablename__ = "folders"
-    __table_args__ = (UniqueConstraint("parent_id", "name", name="uq_folders_parent_name"),)
+    __table_args__ = (
+        UniqueConstraint("parent_id", "name", name="uq_folders_parent_name"),
+        Index("ix_folders_parent_live_name", "parent_id", "deleted_at", "name"),
+    )
 
     parent_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("folders.id", ondelete="RESTRICT"), nullable=True, index=True
@@ -57,6 +60,12 @@ class FileEntry(Base, IdMixin, TimestampMixin):
         Index("ix_file_entries_file_id", "file_id"),
         Index("ix_file_entries_lifecycle", "lifecycle"),
         Index("ix_file_entries_catalog_id", "catalog_id"),
+        Index("ix_file_entries_folder_live_name", "folder_id", "deleted_at", "display_name"),
+        Index("ix_file_entries_file_live_created", "file_id", "deleted_at", "created_at"),
+        Index("ix_file_entries_catalog_live_updated", "catalog_id", "deleted_at", "updated_at"),
+        Index("ix_file_entries_lifecycle_live_created", "lifecycle", "deleted_at", "created_at"),
+        Index("ix_file_entries_lifecycle_live_updated", "lifecycle", "deleted_at", "updated_at"),
+        Index("ix_file_entries_deleted_purge", "deleted_at", "purge_after"),
         CheckConstraint(_in_clause("lifecycle", ENTRY_LIFECYCLES), name="lifecycle"),
     )
 
@@ -90,6 +99,8 @@ class File(Base, IdMixin, TimestampMixin):
     __table_args__ = (
         Index("ix_files_ingest_status", "ingest_status"),
         Index("ix_files_kind", "kind"),
+        Index("ix_files_live_created", "deleted_at", "created_at"),
+        Index("ix_files_live_ingested", "deleted_at", "ingested_at"),
         CheckConstraint(_in_clause("ingest_status", INGEST_STATUSES), name="ingest_status"),
         CheckConstraint(
             f"kind IS NULL OR {_in_clause('kind', FILE_KINDS)}",

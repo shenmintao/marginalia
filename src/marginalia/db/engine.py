@@ -17,23 +17,31 @@ def _build_engine(settings: Settings) -> AsyncEngine:
         engine = create_async_engine(
             url,
             future=True,
-            connect_args={"check_same_thread": False},
+            connect_args={"check_same_thread": False, "timeout": 30.0},
         )
 
         @event.listens_for(engine.sync_engine, "connect")
         def _set_sqlite_pragmas(dbapi_connection, _connection_record):  # type: ignore[no-untyped-def]
             cursor = dbapi_connection.cursor()
-            cursor.execute("PRAGMA journal_mode=WAL")
-            cursor.execute("PRAGMA foreign_keys=ON")
-            cursor.execute("PRAGMA synchronous=NORMAL")
-            # WAL allows readers + one writer concurrently, but a second
-            # writer (e.g. another worker committing audit_events while
-            # ingest_file commits its own) gets SQLITE_BUSY immediately
-            # unless busy_timeout is set. 30s of patient retry covers
-            # phase-3 _persist commits that hold the writer for several
-            # seconds while a batch of ingest_file tasks pile up behind.
-            cursor.execute("PRAGMA busy_timeout=30000")
-            cursor.close()
+            try:
+                cursor.execute("PRAGMA journal_mode=WAL")
+                cursor.execute("PRAGMA foreign_keys=ON")
+                cursor.execute("PRAGMA synchronous=NORMAL")
+                # WAL allows readers + one writer concurrently, but a second
+                # writer (e.g. another worker committing audit_events while
+                # ingest_file commits its own) gets SQLITE_BUSY immediately
+                # unless busy_timeout is set. 30s of patient retry covers
+                # phase-3 _persist commits that hold the writer for several
+                # seconds while a batch of ingest_file tasks pile up behind.
+                cursor.execute("PRAGMA busy_timeout=30000")
+                # Keep the personal-library hot set in process memory and
+                # avoid temp b-trees hitting disk during sort/group bursts.
+                cursor.execute("PRAGMA cache_size=-65536")
+                cursor.execute("PRAGMA temp_store=MEMORY")
+                cursor.execute("PRAGMA mmap_size=268435456")
+                cursor.execute("PRAGMA optimize")
+            finally:
+                cursor.close()
 
         return engine
 

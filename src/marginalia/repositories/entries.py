@@ -10,13 +10,28 @@ from collections.abc import Sequence
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import delete, func, not_, or_, select, update
+from sqlalchemy import (
+    bindparam,
+    column,
+    delete,
+    func,
+    literal_column,
+    not_,
+    or_,
+    select,
+    table,
+    update,
+    text as sa_text,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from marginalia.db.fts import ENTRY_METADATA_FTS_TABLE
 from marginalia.db.models import EntryTag, File, FileEntry, TaskOutcome
 
 
 ACTIVE_LIFECYCLES = ("active", "manual_active")
+_MIN_TRIGRAM_FTS_TERM_LEN = 3
+_ENTRY_METADATA_FTS = table(ENTRY_METADATA_FTS_TABLE, column("entry_id"))
 
 
 def _folder_clause(folder_id: str | None):
@@ -62,6 +77,54 @@ def _text_terms(text: str | Sequence[str] | None) -> list[str]:
         item = text.strip()
         return [item] if item else []
     return [str(item).strip() for item in text if str(item).strip()]
+
+
+def _metadata_fts_query_from_terms(terms: list[str]) -> str | None:
+    if not terms:
+        return None
+    cleaned = [term.replace("\x00", " ").strip() for term in terms]
+    if not all(len(term) >= _MIN_TRIGRAM_FTS_TERM_LEN for term in cleaned):
+        return None
+    return " OR ".join(_quote_fts_phrase(term) for term in cleaned if term)
+
+
+def _quote_fts_phrase(term: str) -> str:
+    return '"' + term.replace('"', '""') + '"'
+
+
+async def _metadata_fts_query(
+    db: AsyncSession, text: str | Sequence[str] | None,
+) -> str | None:
+    query = _metadata_fts_query_from_terms(_text_terms(text))
+    if query is None:
+        return None
+    if db.bind is None or db.bind.dialect.name != "sqlite":
+        return None
+    try:
+        exists = (
+            await db.execute(
+                sa_text(
+                    "SELECT 1 FROM sqlite_master "
+                    "WHERE type = 'table' AND name = :name"
+                ),
+                {"name": ENTRY_METADATA_FTS_TABLE},
+            )
+        ).scalar_one_or_none()
+    except Exception:
+        return None
+    return query if exists else None
+
+
+def _apply_metadata_fts_filter(stmt, fts_query: str):
+    subquery = (
+        select(_ENTRY_METADATA_FTS.c.entry_id)
+        .where(
+            literal_column(ENTRY_METADATA_FTS_TABLE).op("MATCH")(
+                bindparam("metadata_fts_query", fts_query)
+            )
+        )
+    )
+    return stmt.where(FileEntry.id.in_(subquery))
 
 
 async def list_live_in_folder(
@@ -143,21 +206,28 @@ async def search_with_file(
 ) -> list[tuple[FileEntry, File]]:
     """Free-text search across display_name, file.summary, file.original_ext.
     Returned rows are joined live-entries + their file rows, ordered by recency."""
+    stmt = (
+        select(FileEntry, File)
+        .join(File, File.id == FileEntry.file_id)
+        .where(
+            _live_entry(),
+            _live_file(),
+        )
+    )
+    fts_query = await _metadata_fts_query(db, like.strip("%"))
+    if fts_query is not None:
+        stmt = _apply_metadata_fts_filter(stmt, fts_query)
+    else:
+        stmt = stmt.where(
+            or_(
+                FileEntry.display_name.ilike(like),
+                File.summary.ilike(like),
+                File.original_ext.ilike(like),
+            )
+        )
     rows = (
         await db.execute(
-            select(FileEntry, File)
-            .join(File, File.id == FileEntry.file_id)
-            .where(
-                _live_entry(),
-                _live_file(),
-                or_(
-                    FileEntry.display_name.ilike(like),
-                    File.summary.ilike(like),
-                    File.original_ext.ilike(like),
-                ),
-            )
-            .order_by(FileEntry.updated_at.desc())
-            .limit(limit)
+            stmt.order_by(FileEntry.updated_at.desc()).limit(limit)
         )
     ).all()
     return [(e, f) for e, f in rows]
@@ -303,9 +373,11 @@ async def search_filtered(
     `materialize_view`. All filters are conjunctive; an unset filter is a
     no-op. tag filters resolve through EntryTag subqueries. Pair with
     `count_filtered` for total-count pagination."""
+    fts_query = await _metadata_fts_query(db, text)
     base = select(FileEntry, File).join(File, File.id == FileEntry.file_id)
     stmt, empty = _build_filtered_stmt(
-        text=text, lifecycle=lifecycle, kind=kind,
+        text=None if fts_query is not None else text,
+        lifecycle=lifecycle, kind=kind,
         catalog_one=catalog_one, catalog_in=catalog_in,
         folder_one=folder_one, folder_in=folder_in,
         tags_all=tags_all, tags_any=tags_any, tags_none=tags_none,
@@ -313,6 +385,8 @@ async def search_filtered(
     )
     if empty:
         return []
+    if fts_query is not None:
+        stmt = _apply_metadata_fts_filter(stmt, fts_query)
     stmt = stmt.order_by(FileEntry.updated_at.desc())
     if offset:
         stmt = stmt.offset(offset)
@@ -340,11 +414,13 @@ async def count_filtered(
     """Total rows that would match `search_filtered` with the same filters,
     ignoring limit/offset. Used to populate `total` / `has_more` in the
     pagination contract."""
+    fts_query = await _metadata_fts_query(db, text)
     base = select(func.count()).select_from(
         FileEntry.__table__.join(File.__table__, File.id == FileEntry.file_id)
     )
     stmt, empty = _build_filtered_stmt(
-        text=text, lifecycle=lifecycle, kind=kind,
+        text=None if fts_query is not None else text,
+        lifecycle=lifecycle, kind=kind,
         catalog_one=catalog_one, catalog_in=catalog_in,
         folder_one=folder_one, folder_in=folder_in,
         tags_all=tags_all, tags_any=tags_any, tags_none=tags_none,
@@ -352,6 +428,8 @@ async def count_filtered(
     )
     if empty:
         return 0
+    if fts_query is not None:
+        stmt = _apply_metadata_fts_filter(stmt, fts_query)
     return int((await db.execute(stmt)).scalar_one())
 
 

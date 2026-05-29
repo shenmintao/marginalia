@@ -32,6 +32,7 @@ from typing import Any, Callable
 import sqlalchemy as sa
 
 from marginalia.db.engine import get_engine
+from marginalia.db.fts import ENTRY_METADATA_FTS_TABLE, ENTRY_METADATA_FTS_TRIGGERS
 from marginalia.db.models import Base  # noqa: F401  (registers all tables)
 from marginalia.db.models.ai_structural import INBOX_CATALOG_ID
 
@@ -46,6 +47,139 @@ _ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
 )
 
 
+QUERY_PERFORMANCE_INDEXES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    (
+        "ix_folders_parent_live_name",
+        "folders",
+        ("parent_id", "deleted_at", "name"),
+    ),
+    (
+        "ix_file_entries_folder_live_name",
+        "file_entries",
+        ("folder_id", "deleted_at", "display_name"),
+    ),
+    (
+        "ix_file_entries_file_live_created",
+        "file_entries",
+        ("file_id", "deleted_at", "created_at"),
+    ),
+    (
+        "ix_file_entries_catalog_live_updated",
+        "file_entries",
+        ("catalog_id", "deleted_at", "updated_at"),
+    ),
+    (
+        "ix_file_entries_lifecycle_live_created",
+        "file_entries",
+        ("lifecycle", "deleted_at", "created_at"),
+    ),
+    (
+        "ix_file_entries_lifecycle_live_updated",
+        "file_entries",
+        ("lifecycle", "deleted_at", "updated_at"),
+    ),
+    (
+        "ix_file_entries_deleted_purge",
+        "file_entries",
+        ("deleted_at", "purge_after"),
+    ),
+    (
+        "ix_files_live_created",
+        "files",
+        ("deleted_at", "created_at"),
+    ),
+    (
+        "ix_files_live_ingested",
+        "files",
+        ("deleted_at", "ingested_at"),
+    ),
+    (
+        "ix_sessions_deleted_started",
+        "sessions",
+        ("deleted_at", "started_at"),
+    ),
+    (
+        "ix_conversations_ended_at",
+        "conversations",
+        ("ended_at",),
+    ),
+    (
+        "ix_catalogs_parent_live_name",
+        "catalogs",
+        ("parent_id", "deleted_at", "name"),
+    ),
+    (
+        "ix_catalogs_live_name",
+        "catalogs",
+        ("deleted_at", "name"),
+    ),
+    (
+        "ix_views_name",
+        "views",
+        ("name",),
+    ),
+    (
+        "ix_tags_facet_alias_doc_count",
+        "tags",
+        ("facet", "alias_of", "doc_count", "name"),
+    ),
+    (
+        "ix_tags_alias_doc_count",
+        "tags",
+        ("alias_of", "doc_count"),
+    ),
+    (
+        "ix_entry_relations_vetted",
+        "entry_relations",
+        ("vetted",),
+    ),
+    (
+        "ix_journal_kind_created",
+        "journal",
+        ("source_kind", "created_at"),
+    ),
+    (
+        "ix_journal_active_created",
+        "journal",
+        ("superseded_by_id", "created_at"),
+    ),
+    (
+        "ix_journal_kind_active_created",
+        "journal",
+        ("source_kind", "superseded_by_id", "created_at"),
+    ),
+    (
+        "ix_task_outcomes_lookup_completed",
+        "task_outcomes",
+        ("task_kind", "object_kind", "object_id", "completed_at"),
+    ),
+    (
+        "ix_task_outcomes_kind_object_completed",
+        "task_outcomes",
+        ("task_kind", "object_kind", "completed_at"),
+    ),
+    (
+        "ix_tasks_claim",
+        "tasks",
+        ("status", "priority", "scheduled_at"),
+    ),
+    (
+        "ix_tasks_status_lease",
+        "tasks",
+        ("status", "lease_expires_at"),
+    ),
+    (
+        "ix_tasks_kind_status_finished",
+        "tasks",
+        ("kind", "status", "finished_at"),
+    ),
+    (
+        "ix_tasks_status_finished",
+        "tasks",
+        ("status", "finished_at"),
+    ),
+)
+
 def _apply_additive_columns(bind) -> None:
     inspector = sa.inspect(bind)
     existing_tables = set(inspector.get_table_names())
@@ -56,6 +190,184 @@ def _apply_additive_columns(bind) -> None:
         if column in cols:
             continue
         bind.execute(sa.text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}"))
+
+
+def _quote_ident(name: str) -> str:
+    if '"' in name:
+        raise ValueError(f"invalid identifier: {name!r}")
+    return f'"{name}"'
+
+
+def _ensure_query_performance_indexes(bind) -> None:
+    """Add query-shape indexes that landed after the baseline schema.
+
+    Fresh databases get these through SQLAlchemy model metadata. Existing
+    databases need explicit CREATE INDEX calls because create_all() does not
+    backfill indexes on already-created tables.
+    """
+    inspector = sa.inspect(bind)
+    existing_tables = set(inspector.get_table_names())
+    for index_name, table_name, columns in QUERY_PERFORMANCE_INDEXES:
+        if table_name not in existing_tables:
+            continue
+        column_sql = ", ".join(_quote_ident(c) for c in columns)
+        bind.execute(sa.text(
+            f"CREATE INDEX IF NOT EXISTS {_quote_ident(index_name)} "
+            f"ON {_quote_ident(table_name)} ({column_sql})"
+        ))
+
+
+def _sqlite_supports_metadata_fts(bind) -> bool:
+    if bind.dialect.name != "sqlite":
+        return False
+    try:
+        bind.execute(sa.text(
+            "CREATE VIRTUAL TABLE temp._marginalia_fts5_probe "
+            "USING fts5(x, tokenize='trigram')"
+        ))
+        bind.execute(sa.text("DROP TABLE temp._marginalia_fts5_probe"))
+    except Exception:
+        return False
+    return True
+
+
+def _ensure_entry_metadata_fts(bind) -> None:
+    """Create a SQLite FTS5 trigram index over already-stored metadata.
+
+    This intentionally indexes only existing DB metadata surfaces, not raw
+    file contents: file_entries.display_name, file_entries.extra, files.summary,
+    files.extra, and files.original_ext. Triggers keep the virtual table in
+    sync after the initial backfill.
+    """
+    if not _sqlite_supports_metadata_fts(bind):
+        return
+    inspector = sa.inspect(bind)
+    if not {"files", "file_entries"}.issubset(set(inspector.get_table_names())):
+        return
+
+    bind.execute(sa.text(f"""
+        CREATE VIRTUAL TABLE IF NOT EXISTS {ENTRY_METADATA_FTS_TABLE}
+        USING fts5(
+            entry_id UNINDEXED,
+            display_name,
+            file_summary,
+            file_extra,
+            file_original_ext,
+            entry_extra,
+            tokenize='trigram'
+        )
+    """))
+    bind.execute(sa.text(f"""
+        CREATE TRIGGER IF NOT EXISTS entry_metadata_fts_file_entries_ai
+        AFTER INSERT ON file_entries
+        BEGIN
+            INSERT INTO {ENTRY_METADATA_FTS_TABLE}
+                (rowid, entry_id, display_name, file_summary, file_extra,
+                 file_original_ext, entry_extra)
+            SELECT
+                new.rowid,
+                new.id,
+                COALESCE(new.display_name, ''),
+                COALESCE(files.summary, ''),
+                COALESCE(files.extra, ''),
+                COALESCE(files.original_ext, ''),
+                COALESCE(new.extra, '')
+            FROM files
+            WHERE files.id = new.file_id;
+        END
+    """))
+    bind.execute(sa.text(f"""
+        CREATE TRIGGER IF NOT EXISTS entry_metadata_fts_file_entries_au
+        AFTER UPDATE OF id, file_id, display_name, extra ON file_entries
+        BEGIN
+            DELETE FROM {ENTRY_METADATA_FTS_TABLE}
+            WHERE rowid = old.rowid;
+            INSERT INTO {ENTRY_METADATA_FTS_TABLE}
+                (rowid, entry_id, display_name, file_summary, file_extra,
+                 file_original_ext, entry_extra)
+            SELECT
+                new.rowid,
+                new.id,
+                COALESCE(new.display_name, ''),
+                COALESCE(files.summary, ''),
+                COALESCE(files.extra, ''),
+                COALESCE(files.original_ext, ''),
+                COALESCE(new.extra, '')
+            FROM files
+            WHERE files.id = new.file_id;
+        END
+    """))
+    bind.execute(sa.text(f"""
+        CREATE TRIGGER IF NOT EXISTS entry_metadata_fts_file_entries_ad
+        AFTER DELETE ON file_entries
+        BEGIN
+            DELETE FROM {ENTRY_METADATA_FTS_TABLE}
+            WHERE rowid = old.rowid;
+        END
+    """))
+    bind.execute(sa.text(f"""
+        CREATE TRIGGER IF NOT EXISTS entry_metadata_fts_files_au
+        AFTER UPDATE OF summary, extra, original_ext ON files
+        BEGIN
+            DELETE FROM {ENTRY_METADATA_FTS_TABLE}
+            WHERE rowid IN (
+                SELECT rowid FROM file_entries WHERE file_id = old.id
+            );
+            INSERT INTO {ENTRY_METADATA_FTS_TABLE}
+                (rowid, entry_id, display_name, file_summary, file_extra,
+                 file_original_ext, entry_extra)
+            SELECT
+                file_entries.rowid,
+                file_entries.id,
+                COALESCE(file_entries.display_name, ''),
+                COALESCE(new.summary, ''),
+                COALESCE(new.extra, ''),
+                COALESCE(new.original_ext, ''),
+                COALESCE(file_entries.extra, '')
+            FROM file_entries
+            WHERE file_entries.file_id = new.id;
+        END
+    """))
+    bind.execute(sa.text(f"""
+        CREATE TRIGGER IF NOT EXISTS entry_metadata_fts_files_ad
+        AFTER DELETE ON files
+        BEGIN
+            DELETE FROM {ENTRY_METADATA_FTS_TABLE}
+            WHERE rowid IN (
+                SELECT rowid FROM file_entries WHERE file_id = old.id
+            );
+        END
+    """))
+    bind.execute(sa.text(f"""
+        INSERT INTO {ENTRY_METADATA_FTS_TABLE}
+            (rowid, entry_id, display_name, file_summary, file_extra,
+             file_original_ext, entry_extra)
+        SELECT
+            file_entries.rowid,
+            file_entries.id,
+            COALESCE(file_entries.display_name, ''),
+            COALESCE(files.summary, ''),
+            COALESCE(files.extra, ''),
+            COALESCE(files.original_ext, ''),
+            COALESCE(file_entries.extra, '')
+        FROM file_entries
+        JOIN files ON files.id = file_entries.file_id
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM {ENTRY_METADATA_FTS_TABLE} existing
+            WHERE existing.rowid = file_entries.rowid
+        )
+    """))
+
+
+def _drop_entry_metadata_fts(bind) -> None:
+    if bind.dialect.name != "sqlite":
+        return
+    for trigger_name in ENTRY_METADATA_FTS_TRIGGERS:
+        bind.execute(sa.text(f"DROP TRIGGER IF EXISTS {_quote_ident(trigger_name)}"))
+    bind.execute(sa.text(
+        f"DROP TABLE IF EXISTS {_quote_ident(ENTRY_METADATA_FTS_TABLE)}"
+    ))
 
 
 def _relax_file_entries_folder_id_nullable(bind) -> None:
@@ -328,6 +640,8 @@ POST_BASELINE_SHIMS: tuple[tuple[str, Callable[[Any], None]], ...] = (
     ("0005_sessions_end_reason_check", _relax_sessions_end_reason_check),
     ("0006_conversations_session_turn_unique", _ensure_conversations_session_turn_unique),
     ("0007_tasks_active_dedup_unique", _ensure_tasks_active_dedup_unique),
+    ("0008_query_performance_indexes", _ensure_query_performance_indexes),
+    ("0009_entry_metadata_fts", _ensure_entry_metadata_fts),
 )
 
 ALEMBIC_HEAD_REVISION = POST_BASELINE_SHIMS[-1][0]
