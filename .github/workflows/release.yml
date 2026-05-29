@@ -7,8 +7,10 @@ name: Release
 #     desktop/src-tauri/resources/backend/ via scripts/prepare-backend.mjs,
 #     so the shipped bundles do NOT depend on a system Python.
 #   - A portable .zip on Windows in addition to the NSIS installer.
-#   - A multi-arch (currently amd64 only) Docker image pushed to
-#     ghcr.io/<owner>/marginalia tagged with the version and `latest`.
+#   - Native desktop bundles for Windows x64/arm64, macOS arm64, and
+#     Linux x64/arm64.
+#   - A multi-arch Docker image pushed to ghcr.io/<owner>/marginalia
+#     tagged with the version and `latest`.
 #
 # Tag-driven releases keep the version in tauri.conf.json + pyproject.toml
 # in lockstep with the binary names. To cut a release:
@@ -38,20 +40,39 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - target: windows
+          - target: windows-x64
+            platform: windows
             runner: windows-latest
+            artifact_glob: |
+              desktop/src-tauri/target/release/bundle/nsis/*.exe
+              desktop/src-tauri/target/release/bundle/nsis/*portable*.zip
+          - target: windows-arm64
+            platform: windows
+            runner: windows-11-arm
             artifact_glob: |
               desktop/src-tauri/target/release/bundle/nsis/*.exe
               desktop/src-tauri/target/release/bundle/nsis/*portable*.zip
           # Apple Silicon only — we don't have an Apple Developer account,
           # so x86_64 dmg signing is moot, and Apple Silicon Macs are the
           # overwhelming share of new macOS hardware.
-          - target: macos
-            runner: macos-latest
+          - target: macos-arm64
+            platform: macos
+            runner: macos-15
             artifact_glob: |
               desktop/src-tauri/target/release/bundle/dmg/*.dmg
-          - target: linux
+          - target: linux-x64
+            platform: linux
             runner: ubuntu-latest
+            # AppImage is intentionally dropped: linuxdeploy chokes on the
+            # bundled python runtime's thousands of .so files. deb + rpm
+            # cover the supported distros without the fragility.
+            tauri_args: "--bundles deb,rpm"
+            artifact_glob: |
+              desktop/src-tauri/target/release/bundle/deb/*.deb
+              desktop/src-tauri/target/release/bundle/rpm/*.rpm
+          - target: linux-arm64
+            platform: linux
+            runner: ubuntu-24.04-arm
             # AppImage is intentionally dropped: linuxdeploy chokes on the
             # bundled python runtime's thousands of .so files. deb + rpm
             # cover the supported distros without the fragility.
@@ -85,7 +106,7 @@ jobs:
           workspaces: desktop/src-tauri
 
       - name: Install Linux Tauri deps
-        if: matrix.target == 'linux'
+        if: matrix.platform == 'linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -121,8 +142,9 @@ jobs:
           releaseName: "Marginalia ${{ github.event.inputs.tag || github.ref_name }}"
           releaseBody: |
             Desktop bundles built from `${{ github.event.inputs.tag || github.ref_name }}`.
+            Desktop targets: Windows x64/arm64, macOS arm64, Linux x64/arm64.
             Each bundle ships a self-contained Python runtime — no system Python required.
-            Docker image: `ghcr.io/${{ github.repository_owner }}/marginalia:${{ github.event.inputs.tag || github.ref_name }}`
+            Docker image: `ghcr.io/${{ github.repository_owner }}/marginalia:${{ github.event.inputs.tag || github.ref_name }}` (linux/amd64, linux/arm64)
 
             **First-launch notes for unsigned binaries:**
             - Windows: SmartScreen will say "Windows protected your PC". Click "More info" → "Run anyway".
@@ -135,11 +157,11 @@ jobs:
       # we can reuse the same target/release/ tree NSIS was assembled
       # from. The zip lands inside bundle/nsis/ to match the glob above.
       - name: Package Windows portable zip
-        if: matrix.target == 'windows'
+        if: matrix.platform == 'windows'
         run: node scripts/package-windows-portable.mjs
 
       - name: Upload Windows portable zip
-        if: matrix.target == 'windows'
+        if: matrix.platform == 'windows'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
