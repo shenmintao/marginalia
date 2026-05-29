@@ -18,15 +18,21 @@ Verifies:
 from __future__ import annotations
 
 import asyncio
+import atexit
 import os
 import shutil
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from uuid import uuid4
 
-_TEST_ROOT = Path(__file__).resolve().parent / "_mine_tag_overlap_e2e_data"
-if _TEST_ROOT.exists():
-    shutil.rmtree(_TEST_ROOT)
+_TEST_PARENT = Path(os.environ.get(
+    "MARGINALIA_TEST_TMP",
+    str(Path(__file__).resolve().parent),
+))
+_TEST_PARENT.mkdir(parents=True, exist_ok=True)
+_TEST_ROOT = _TEST_PARENT / f"_mine_tag_overlap_e2e_{os.getpid()}_{uuid4().hex[:8]}"
 _TEST_ROOT.mkdir(parents=True)
+atexit.register(lambda: shutil.rmtree(_TEST_ROOT, ignore_errors=True))
 os.environ["MARGINALIA_HOME"] = str(_TEST_ROOT)
 os.environ["STORAGE_BACKEND"] = "local"
 os.environ["WORKER_ENABLED"] = "false"
@@ -154,13 +160,13 @@ async def _seed():
                 created_at=now,
             ))
 
-        # Seed an existing relation between A and B that the miner
-        # should INCREMENT, not duplicate.
+        # Seed an existing stronger relation between A and B. The miner
+        # should increment it without replacing source_kind/note.
         a_id, b_id = sorted((e_a.id, e_b.id))
         s.add(EntryRelation(
             id=new_id(),
             entry_a_id=a_id, entry_b_id=b_id,
-            note="seeded earlier",
+            note="seeded by session co-occurrence",
             source_kind="mine_session_cooccurrence",
             last_observed_at=now - timedelta(days=5),
             observation_count=1,
@@ -189,7 +195,7 @@ async def _main() -> None:
             await s.execute(
                 select(EntryRelation).where(
                     EntryRelation.source_kind.in_(
-                        ["mine_tag_overlap", "reflect"]
+                        ["mine_tag_overlap", "mine_session_cooccurrence"]
                     )
                 )
             )
@@ -198,15 +204,19 @@ async def _main() -> None:
 
     a, b, c, d, e_id = ids["A"], ids["B"], ids["C"], ids["D"], ids["E"]
 
-    # 1. A-B: existing relation → incremented; source_kind on the row
-    #    stays 'reflect' (we only bump observation_count, not retag).
+    # 1. A-B: existing stronger relation → incremented, but the weaker
+    #    tag-overlap attribution must not replace source_kind/note.
     ab = tuple(sorted((a, b)))
     assert ab in by_pair, f"A-B should exist, got pairs {list(by_pair)}"
     ab_row = by_pair[ab]
     assert ab_row.observation_count >= 2, \
         f"A-B observation_count should be incremented from 1, got {ab_row.observation_count}"
-    print(f"[1] A-B existing reflect-row incremented: "
-          f"obs_count={ab_row.observation_count}")
+    assert ab_row.source_kind == "mine_session_cooccurrence", \
+        f"weaker tag overlap should not replace source_kind: {ab_row.source_kind}"
+    assert ab_row.note == "seeded by session co-occurrence", \
+        f"weaker tag overlap should not replace note: {ab_row.note!r}"
+    print(f"[1] A-B existing stronger row incremented without re-attribution: "
+          f"source={ab_row.source_kind} obs_count={ab_row.observation_count}")
 
     # 2. B-C: new pair from tag overlap. Should appear with source_kind.
     bc = tuple(sorted((b, c)))

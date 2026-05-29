@@ -6,12 +6,13 @@ Run:
 
 Verifies:
   1. Candidates are formed from pairs sharing a tag OR catalog subtree.
-  2. Pair already linked by a pre-existing entry_relation is excluded.
+  2. Pair already linked by a weaker pre-existing entry_relation can be
+     upgraded when corpus evidence accepts it.
   3. Pair containing a soft-deleted / archived entry is excluded.
   4. Pair already evaluated (task_outcomes row exists) is excluded —
      re-running the handler does not re-evaluate.
   5. Fake LLM returns a mix of accept / reject decisions.
-  6. Accepted pairs INSERT entry_relation with source_kind=
+  6. Accepted pairs INSERT or upgrade entry_relation with source_kind=
      'mine_corpus_evidence' and note = LLM reason.
   7. Rejected pairs do NOT write entry_relation; only task_outcomes
      (rejected) is recorded with the reason.
@@ -20,17 +21,23 @@ Verifies:
 from __future__ import annotations
 
 import asyncio
+import atexit
 import json
 import os
 import shutil
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from uuid import uuid4
 
-_TEST_ROOT = Path(__file__).resolve().parent / "_mine_corpus_evidence_e2e_data"
-if _TEST_ROOT.exists():
-    shutil.rmtree(_TEST_ROOT)
+_TEST_PARENT = Path(os.environ.get(
+    "MARGINALIA_TEST_TMP",
+    str(Path(__file__).resolve().parent),
+))
+_TEST_PARENT.mkdir(parents=True, exist_ok=True)
+_TEST_ROOT = _TEST_PARENT / f"_mine_corpus_evidence_e2e_{os.getpid()}_{uuid4().hex[:8]}"
 _TEST_ROOT.mkdir(parents=True)
+atexit.register(lambda: shutil.rmtree(_TEST_ROOT, ignore_errors=True))
 os.environ["MARGINALIA_HOME"] = str(_TEST_ROOT)
 os.environ["STORAGE_BACKEND"] = "local"
 os.environ["WORKER_ENABLED"] = "false"
@@ -199,16 +206,17 @@ async def _seed():
                      source="ingest", created_at=now),
         ])
 
-        # Pre-existing entry_relation between Raft and BFT (e.g. via reflect):
-        # this pair must be EXCLUDED from candidate generation.
+        # Pre-existing weak entry_relation between Raft and BFT. Corpus
+        # evidence should be allowed to review and upgrade it.
         a_id, b_id = sorted((e_raft.id, e_bft.id))
-        s.add(EntryRelation(
+        existing_rel = EntryRelation(
             id=new_id(), entry_a_id=a_id, entry_b_id=b_id,
-            note="pre-existing reflect relation",
+            note="pre-existing session co-occurrence relation",
             source_kind="mine_session_cooccurrence",
             last_observed_at=now, observation_count=2,
             created_at=now,
-        ))
+        )
+        s.add(existing_rel)
         await s.commit()
 
         return {
@@ -216,6 +224,7 @@ async def _seed():
             "e_bft": e_bft.id, "e_btree": e_btree.id,
             "e_archived": e_archived.id,
             "c_consensus": c_consensus.id, "c_database": c_database.id,
+            "existing_relation_id": existing_rel.id,
         }
 
 
@@ -231,7 +240,7 @@ async def main():
 
     # Expected candidate pairs after exclusion:
     #   Raft↔Paxos (shared tag "distributed-systems" + shared catalog Consensus)
-    #   Raft↔BFT — EXCLUDED (pre-existing relation)
+    #   Raft↔BFT (pre-existing weaker relation, eligible for upgrade)
     #   Paxos↔BFT (shared catalog Consensus)
     # Excluded:
     #   any pair with `archived` (archived lifecycle)
@@ -240,10 +249,12 @@ async def main():
 
     expected_pair_pp_id = _pair_id(seeded["e_paxos"], seeded["e_bft"])
     expected_pair_rp_id = _pair_id(seeded["e_raft"], seeded["e_paxos"])
+    expected_pair_rb_id = _pair_id(seeded["e_raft"], seeded["e_bft"])
 
-    # LLM plan: accept Raft↔Paxos, reject Paxos↔BFT
+    # LLM plan: accept Raft↔Paxos and upgrade Raft↔BFT, reject Paxos↔BFT.
     plan = {
         expected_pair_rp_id: ("accept", "Both cover consensus algorithms; closely related."),
+        expected_pair_rb_id: ("accept", "Both discuss consensus fault tolerance; corpus evidence upgrades the link."),
         expected_pair_pp_id: ("reject", "Co-located in catalog but discuss different mechanisms; not directly related."),
     }
     fake = _make_fake(plan)
@@ -253,7 +264,7 @@ async def main():
         handle_mine_corpus_evidence,
     )
 
-    # ---- 1. first run: 2 candidates → 1 accept + 1 reject ----------------
+    # ---- 1. first run: 3 candidates → 2 accept + 1 reject ----------------
     await handle_mine_corpus_evidence({})
 
     async with factory() as s:
@@ -281,8 +292,7 @@ async def main():
         assert rel_pp is None
         print("[2] rejected (paxos,bft) NOT written")
 
-        # 1.c Pre-existing (raft,bft) was NOT included in candidates;
-        # only the seeded mine_session_cooccurrence row remains intact.
+        # 1.c Pre-existing weak (raft,bft) row was upgraded in place.
         a_rb, b_rb = sorted((seeded["e_raft"], seeded["e_bft"]))
         rel_rb = (await s.execute(
             select(EntryRelation).where(
@@ -290,8 +300,11 @@ async def main():
                 EntryRelation.entry_b_id == b_rb,
             )
         )).scalar_one()
-        assert rel_rb.source_kind == "mine_session_cooccurrence"
-        print("[3] pre-existing (raft,bft) untouched")
+        assert rel_rb.id == seeded["existing_relation_id"]
+        assert rel_rb.source_kind == "mine_corpus_evidence"
+        assert rel_rb.observation_count == 3
+        assert "fault tolerance" in (rel_rb.note or "").lower()
+        print("[3] pre-existing weak (raft,bft) upgraded")
 
         # 1.d Archived entry never participated
         archived_id = seeded["e_archived"]
@@ -304,7 +317,7 @@ async def main():
         assert any_with_archived is None
         print("[4] archived entry never appears in any relation")
 
-        # 1.e Per-pair task_outcomes recorded (1 accept + 1 reject + 1 global)
+        # 1.e Per-pair task_outcomes recorded (2 accept + 1 reject + 1 global)
         outcomes = (await s.execute(text(
             "SELECT object_kind, outcome FROM task_outcomes "
             "WHERE task_kind='mine_corpus_evidence' ORDER BY object_kind"
@@ -313,7 +326,7 @@ async def main():
         for ok, o in outcomes:
             breakdown[(ok, o)] += 1
         print(f"[5] outcome breakdown: {breakdown}")
-        assert breakdown.get(("entry_pair", "applied"), 0) == 1
+        assert breakdown.get(("entry_pair", "applied"), 0) == 2
         assert breakdown.get(("entry_pair", "rejected"), 0) == 1
         assert breakdown.get(("global", "applied"), 0) == 1
 

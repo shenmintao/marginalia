@@ -7,10 +7,48 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import delete, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from marginalia.db.models import EntryRelation, File, FileEntry
+
+
+SOURCE_STRENGTH: dict[str, int] = {
+    "mine_tag_overlap": 10,
+    "mine_session_cooccurrence": 20,
+    "mine_citation_graph": 30,
+    "mine_corpus_evidence": 40,
+}
+
+
+def should_replace_attribution(
+    existing_source_kind: str | None,
+    new_source_kind: str,
+) -> bool:
+    """Whether a new mining signal may replace source_kind/note.
+
+    Observation counts are always cumulative. Attribution is different: a weak
+    later miner should not erase a stronger explanation that already exists.
+    Equal strength is allowed so a miner can refresh its own note.
+    """
+    existing_strength = SOURCE_STRENGTH.get(existing_source_kind or "", 0)
+    new_strength = SOURCE_STRENGTH.get(new_source_kind, 0)
+    return new_strength >= existing_strength
+
+
+def is_weaker_attribution(
+    existing_source_kind: str | None,
+    new_source_kind: str,
+) -> bool:
+    """Whether `existing_source_kind` is strictly weaker than `new_source_kind`.
+
+    Unlike `should_replace_attribution`, equal strength is not enough here.
+    Corpus evidence uses this to decide whether an existing row deserves an
+    LLM review for possible upgrade.
+    """
+    existing_strength = SOURCE_STRENGTH.get(existing_source_kind or "", 0)
+    new_strength = SOURCE_STRENGTH.get(new_source_kind, 0)
+    return new_strength > existing_strength
 
 
 async def list_top_for_entry(
@@ -33,6 +71,28 @@ async def list_top_for_entry(
         )
     ).scalars().all()
     return list(rows)
+
+
+async def delete_all_touching_entries(
+    db: AsyncSession, entry_ids: list[str],
+) -> int:
+    """Delete relation rows where either endpoint is one of `entry_ids`.
+
+    Used by reprocess: relation rows are AI-derived from old summaries, tags,
+    citations, and co-occurrence signals. Once an entry's backing file is
+    re-ingested, those edges must be rebuilt by the mining tasks.
+    """
+    if not entry_ids:
+        return 0
+    result = await db.execute(
+        delete(EntryRelation).where(
+            or_(
+                EntryRelation.entry_a_id.in_(entry_ids),
+                EntryRelation.entry_b_id.in_(entry_ids),
+            )
+        )
+    )
+    return int(result.rowcount or 0)
 
 
 async def list_edges_with_live_a(
@@ -76,30 +136,35 @@ async def find_pair(
 async def bump_observation(
     db: AsyncSession,
     *,
-    relation_id: str,
+    relation: EntryRelation,
     new_count: int,
     last_observed_at: datetime,
     source_kind: str,
     note: str,
-) -> None:
+) -> bool:
     """Step 2 of upsert_relation_pair when a row already exists. Bumps the
-    observation_count, refreshes last_observed_at, and overwrites
-    source_kind/note to reflect the most recent miner's attribution.
+    observation_count and refreshes last_observed_at. source_kind/note are
+    replaced only when the new source is at least as strong as the existing
+    attribution.
 
     Provenance history (which miner observed this pair when, with what
     payload) lives in audit_events.relation_mined — the entry_relations
-    row only needs the latest writer's metadata.
+    row keeps the strongest current attribution.
     """
+    values: dict[str, Any] = {
+        "observation_count": new_count,
+        "last_observed_at": last_observed_at,
+    }
+    replaced = should_replace_attribution(relation.source_kind, source_kind)
+    if replaced:
+        values.update({"source_kind": source_kind, "note": note})
+
     await db.execute(
         update(EntryRelation)
-        .where(EntryRelation.id == relation_id)
-        .values(
-            observation_count=new_count,
-            last_observed_at=last_observed_at,
-            source_kind=source_kind,
-            note=note,
-        )
+        .where(EntryRelation.id == relation.id)
+        .values(**values)
     )
+    return replaced
 
 
 async def update_vetted(
@@ -204,6 +269,32 @@ async def list_pair_keys(db: AsyncSession) -> list[tuple[str, str]]:
         )
     ).all()
     return [(a, b) for a, b in rows]
+
+
+async def list_pair_attributions(db: AsyncSession) -> list[dict[str, Any]]:
+    """Relation attribution metadata for every linked pair."""
+    rows = (
+        await db.execute(
+            select(
+                EntryRelation.id,
+                EntryRelation.entry_a_id,
+                EntryRelation.entry_b_id,
+                EntryRelation.source_kind,
+                EntryRelation.observation_count,
+            )
+        )
+    ).all()
+    return [
+        {
+            "id": rel_id,
+            "entry_a_id": entry_a_id,
+            "entry_b_id": entry_b_id,
+            "source_kind": source_kind,
+            "observation_count": observation_count,
+        }
+        for rel_id, entry_a_id, entry_b_id, source_kind, observation_count
+        in rows
+    ]
 
 
 async def list_vetted_pair_keys(db: AsyncSession) -> list[tuple[str, str]]:

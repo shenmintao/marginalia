@@ -193,6 +193,11 @@ async def list_child_folders(db: AsyncSession, parent_id: str) -> list[Folder]:
 async def get_folder(db: AsyncSession, folder_id: str) -> Folder | None:
     return await folders_repo.get_live(db, folder_id)
 
+async def ingest_summaries_for_subtrees(
+    db: AsyncSession, folder_ids: list[str],
+) -> dict[str, dict[str, int]]:
+    return await folders_repo.ingest_summaries_for_subtrees(db, folder_ids)
+
 # ---- user-side mutations (DESIGN.md §14.1) ---------------------------------
 
 class FolderNotFoundError(Exception):

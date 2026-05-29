@@ -17,15 +17,21 @@ Verifies:
 from __future__ import annotations
 
 import asyncio
+import atexit
 import os
 import shutil
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from uuid import uuid4
 
-_TEST_ROOT = Path(__file__).resolve().parent / "_mine_citation_graph_e2e_data"
-if _TEST_ROOT.exists():
-    shutil.rmtree(_TEST_ROOT)
+_TEST_PARENT = Path(os.environ.get(
+    "MARGINALIA_TEST_TMP",
+    str(Path(__file__).resolve().parent),
+))
+_TEST_PARENT.mkdir(parents=True, exist_ok=True)
+_TEST_ROOT = _TEST_PARENT / f"_mine_citation_graph_e2e_{os.getpid()}_{uuid4().hex[:8]}"
 _TEST_ROOT.mkdir(parents=True)
+atexit.register(lambda: shutil.rmtree(_TEST_ROOT, ignore_errors=True))
 os.environ["MARGINALIA_HOME"] = str(_TEST_ROOT)
 os.environ["STORAGE_BACKEND"] = "local"
 os.environ["WORKER_ENABLED"] = "false"
@@ -100,12 +106,13 @@ async def _seed():
         e_e.deleted_at = now
         e_e.purge_after = now + timedelta(days=7)
 
-        # Pre-existing AB relation that should be incremented.
+        # Pre-existing AB relation from a weaker source. Citation evidence
+        # should increment it and replace source_kind/note.
         a_id, b_id = sorted((e_a.id, e_b.id))
         s.add(EntryRelation(
             id=new_id(),
             entry_a_id=a_id, entry_b_id=b_id,
-            note="seeded earlier",
+            note="seeded by session co-occurrence",
             source_kind="mine_session_cooccurrence",
             last_observed_at=now - timedelta(days=20),
             observation_count=1,
@@ -191,14 +198,19 @@ async def _main() -> None:
 
     a, b, c, d, e_id = ids["A"], ids["B"], ids["C"], ids["D"], ids["E"]
 
-    # 1. A-B: recent co-citations (count=2). Existing reflect-row
-    #    should be incremented by 2.
+    # 1. A-B: recent co-citations (count=2). Existing weaker row
+    #    should be incremented by 2 and re-attributed to citation graph.
     ab = tuple(sorted((a, b)))
     assert ab in by_pair, f"A-B should exist; got {list(by_pair)}"
     ab_row = by_pair[ab]
     assert ab_row.observation_count >= 3, \
         f"A-B obs_count expected ≥3 (1 seed + 2 from window), got {ab_row.observation_count}"
-    print(f"[1] A-B existing relation incremented: obs={ab_row.observation_count}")
+    assert ab_row.source_kind == "mine_citation_graph", \
+        f"stronger citation graph should replace source_kind: {ab_row.source_kind}"
+    assert ab_row.note != "seeded by session co-occurrence", \
+        "stronger citation graph should replace note"
+    print(f"[1] A-B existing relation incremented and re-attributed: "
+          f"source={ab_row.source_kind} obs={ab_row.observation_count}")
 
     # 2. C-D: 2 recent conversations co-citing → new relation.
     cd = tuple(sorted((c, d)))

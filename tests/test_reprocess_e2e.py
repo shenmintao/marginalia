@@ -1,15 +1,16 @@
 """End-to-end reprocess sanity check.
 
 The reprocess primitive lets a user say "AI got smarter, redo this." It
-clears the write-once gate (ingested_at = NULL), purges entry_tags, and
-re-enqueues KIND_INGEST_FILE. This test locks in:
+clears the write-once gate (ingested_at = NULL), purges entry_tags and
+entry_relations, and re-enqueues KIND_INGEST_FILE. This test locks in:
 
   1. After upload + first ingest, summary/tags are populated.
   2. POST /v1/files/{file_id}/reprocess clears state and enqueues a new
      ingest_file task.
   3. The runner re-runs the pipeline. The new (different) summary
      overwrites the old one — write-once gate is broken.
-  4. Old entry_tags are gone; new ones from the second run are present.
+  4. Old entry_tags / entry_relations are gone; new tags from the second
+     run are present.
   5. Bulk reprocess by file_ids enqueues for every listed file.
   6. Bulk by `all=true` covers live files only (skips deleted).
   7. Body validation: 422 on zero or multiple filters.
@@ -20,16 +21,23 @@ Run:
 from __future__ import annotations
 
 import asyncio
+import atexit
 import io
 import os
 import shutil
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
+from uuid import uuid4
 
-_TEST_ROOT = Path(__file__).resolve().parent / "_reprocess_e2e_data"
-if _TEST_ROOT.exists():
-    shutil.rmtree(_TEST_ROOT)
+_TEST_PARENT = Path(os.environ.get(
+    "MARGINALIA_TEST_TMP",
+    str(Path(__file__).resolve().parent),
+))
+_TEST_PARENT.mkdir(parents=True, exist_ok=True)
+_TEST_ROOT = _TEST_PARENT / f"_reprocess_e2e_{os.getpid()}_{uuid4().hex[:8]}"
 _TEST_ROOT.mkdir(parents=True)
+atexit.register(lambda: shutil.rmtree(_TEST_ROOT, ignore_errors=True))
 os.environ["MARGINALIA_HOME"] = str(_TEST_ROOT)
 os.environ["STORAGE_BACKEND"] = "local"
 os.environ["WORKER_ENABLED"] = "false"
@@ -46,12 +54,13 @@ get_settings.cache_clear()  # type: ignore[attr-defined]
 from marginalia import llm
 from marginalia.db.engine import get_engine, get_session_factory
 from marginalia.db.models import (
-    Base, EntryTag, File, FileEntry, Tag,
+    Base, EntryRelation, EntryTag, File, FileEntry, Tag,
 )
 from marginalia.llm.types import ChatRequest, ChatResponse, TokenUsage
 from marginalia.main import app
 from marginalia.tasks.kinds import KIND_INGEST_FILE
 from marginalia.tasks.runner import TaskRunner
+from marginalia.utils.ids import new_id
 
 
 # Two canned LLM payloads — first vs. reprocessed. Different summary
@@ -114,6 +123,10 @@ class _FakeChatClient:
 
 
 _FAKE = _FakeChatClient()
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def _install_fake_llm() -> None:
@@ -219,6 +232,35 @@ async def main() -> None:
                     )).scalars().all())
                     assert "alpha" in tag_names_before
                     first_ingested_at = file_row.ingested_at
+                    now = _now()
+                    peer_file = File(
+                        id=new_id(), storage_key=f"sk-{new_id()}",
+                        sha256=("b" * 64), size_bytes=10,
+                        ingest_status="done", ingested_at=now,
+                        summary="peer summary", deleted_at=now,
+                    )
+                    s.add(peer_file); await s.flush()
+                    peer_entry = FileEntry(
+                        id=new_id(), folder_id=None, file_id=peer_file.id,
+                        display_name="peer.md", lifecycle="active",
+                    )
+                    s.add(peer_entry); await s.flush()
+                    a_id, b_id = sorted([entry_id, peer_entry.id])
+                    s.add(EntryRelation(
+                        id=new_id(),
+                        entry_a_id=a_id,
+                        entry_b_id=b_id,
+                        note="old relation",
+                        source_kind="mine_corpus_evidence",
+                        last_observed_at=now,
+                        observation_count=3,
+                        vetted=True,
+                        vetted_reason="old verdict",
+                        vetted_at=now,
+                        vetted_observation_count=3,
+                        created_at=now,
+                    ))
+                    await s.commit()
                 print("[1] initial ingest done; summary='first summary', tags include 'alpha'")
 
                 # ---- single-file reprocess ----
@@ -244,7 +286,14 @@ async def main() -> None:
                         select(EntryTag).where(EntryTag.entry_id == entry_id)
                     )).all()
                     assert len(n_tags) == 0, "entry_tags should be cleared"
-                print("[2] reprocess request: state cleared, new task enqueued, tags purged")
+                    n_relations = (await s.execute(
+                        select(EntryRelation).where(
+                            (EntryRelation.entry_a_id == entry_id)
+                            | (EntryRelation.entry_b_id == entry_id)
+                        )
+                    )).all()
+                    assert len(n_relations) == 0, "entry_relations should be cleared"
+                print("[2] reprocess request: state cleared, new task enqueued, tags/relations purged")
 
                 assert await _wait_for_task_done(second_task) == "done"
 

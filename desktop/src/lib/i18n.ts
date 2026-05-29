@@ -69,7 +69,7 @@ const en = {
       tokensOut: string,
       cachePct: number,
       llmCalls: number,
-    ) => `last ${count} · ${duration} · ↑ ${tokensIn} / ↓ ${tokensOut} · ${cachePct}% cache · ${llmCalls} llm calls`,
+    ) => `last ${count} · ${duration} · in ${tokensIn} / out ${tokensOut} tokens · ${cachePct}% cache · ${llmCalls} llm calls`,
     inFlight: "In flight",
     recent: "Recent",
     noTasks: "No tasks yet.",
@@ -177,6 +177,16 @@ const en = {
     deleteFileConfirm: (name: string) =>
       `Delete "${name}"?\n\nThe file is moved to trash and purged after 7 days.`,
     ingestFailed: "ingest failed",
+    folderIngestSummary: (
+      total: number,
+      done: number,
+      pending: number,
+      processing: number,
+      failed: number,
+    ) =>
+      `Subtree files: ${done}/${total} done, ${pending} pending, ${processing} processing, ${failed} failed`,
+    folderFailedBadge: (n: number) => `${n} failed`,
+    folderUnfinishedBadge: (n: number) => `${n} unfinished`,
     retryAnalysisTitle: "Retry AI analysis (previous run failed)",
     reprocessAnalysisTitle: "Re-run AI analysis",
     download: "Download",
@@ -359,7 +369,7 @@ const zh: I18nStrings = {
       tokensOut: string,
       cachePct: number,
       llmCalls: number,
-    ) => `最近 ${count} 个 · ${duration} · ↑ ${tokensIn} / ↓ ${tokensOut} · 缓存 ${cachePct}% · ${llmCalls} 次 LLM`,
+    ) => `最近 ${count} 个 · ${duration} · 输入 ${tokensIn} / 输出 ${tokensOut} tokens · 缓存 ${cachePct}% · ${llmCalls} 次 LLM`,
     inFlight: "进行中",
     recent: "最近完成",
     noTasks: "暂无任务。",
@@ -464,6 +474,16 @@ const zh: I18nStrings = {
     deleteFileConfirm: (name: string) =>
       `删除 "${name}"？\n\n该文件会移入回收站，并在 7 天后清理。`,
     ingestFailed: "ingest 失败",
+    folderIngestSummary: (
+      total: number,
+      done: number,
+      pending: number,
+      processing: number,
+      failed: number,
+    ) =>
+      `子树文件：${done}/${total} 已完成，${pending} 等待，${processing} 处理中，${failed} 失败`,
+    folderFailedBadge: (n: number) => `${n} 个失败`,
+    folderUnfinishedBadge: (n: number) => `${n} 个未完成`,
     retryAnalysisTitle: "重试 AI 分析（上次失败）",
     reprocessAnalysisTitle: "重新运行 AI 分析",
     download: "下载",

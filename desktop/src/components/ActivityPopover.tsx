@@ -1,8 +1,7 @@
 /** Activity popover anchored to the StatusBar busy indicator.
  *
  *  Top section: live running + pending tasks (kind · label · age).
- *  Bottom section: recently-finished tasks with per-run usage —
- *    `kind · label · 1m 54s · ↑ 84k / ↓ 12k · 73% cache · ✓`.
+ *  Bottom section: recently-finished tasks with per-run usage.
  *
  *  Polls /v1/tasks/active and /v1/tasks/recent on the same cadence as
  *  the StatusBar itself; opens above the footer so it doesn't obscure
@@ -69,11 +68,20 @@ export function ActivityPopover({ open, pollMs }: Props) {
   const cachePct = totals.tokens_in > 0
     ? Math.round((totals.cache_read / totals.tokens_in) * 100)
     : 0;
+  const recentSummary = t.activity.recentSummary(
+    recent.length,
+    fmtDuration(totals.duration_ms),
+    fmtTokens(totals.tokens_in),
+    fmtTokens(totals.tokens_out),
+    cachePct,
+    totals.llm_calls,
+  );
 
   return (
     <div
       className={cn(
-        "absolute bottom-7 right-3 z-50 w-[420px] max-h-[60vh]",
+        "absolute bottom-7 right-3 z-50 max-h-[60vh]",
+        "w-[500px] max-w-[calc(100vw-24px)]",
         "overflow-hidden rounded-md border border-border bg-bg-elevated shadow-lg",
         "flex flex-col text-xs",
       )}
@@ -84,15 +92,11 @@ export function ActivityPopover({ open, pollMs }: Props) {
           {loading && <Loader2 size={11} className="animate-spin text-fg-subtle" />}
         </div>
         {recent.length > 0 && (
-          <div className="mt-1 font-mono text-[10.5px] text-fg-subtle">
-            {t.activity.recentSummary(
-              recent.length,
-              fmtDuration(totals.duration_ms),
-              fmtTokens(totals.tokens_in),
-              fmtTokens(totals.tokens_out),
-              cachePct,
-              totals.llm_calls,
-            )}
+          <div
+            className="mt-1 truncate whitespace-nowrap font-mono text-[10.5px] text-fg-subtle"
+            title={recentSummary}
+          >
+            {recentSummary}
           </div>
         )}
       </div>
@@ -155,6 +159,11 @@ function RecentRow({ task }: { task: RecentTask }) {
   const cachePct = task.tokens_in
     ? Math.round(((task.cache_read ?? 0) / task.tokens_in) * 100)
     : 0;
+  const usageLine = [
+    t.chat.tokens(fmtTokens(task.tokens_in ?? 0), fmtTokens(task.tokens_out ?? 0)),
+    task.tokens_in ? t.activity.cache(cachePct) : null,
+    task.llm_calls ? t.activity.llm(task.llm_calls) : null,
+  ].filter(Boolean).join(" · ");
   return (
     <div className="border-b border-border px-3 py-1.5">
       <div className="flex items-center gap-2">
@@ -172,10 +181,11 @@ function RecentRow({ task }: { task: RecentTask }) {
         )}
       </div>
       {hasUsage && (
-        <div className="ml-[19px] mt-0.5 font-mono text-[10.5px] text-fg-subtle">
-          ↑ {fmtTokens(task.tokens_in ?? 0)} / ↓ {fmtTokens(task.tokens_out ?? 0)}
-          {task.tokens_in ? ` · ${t.activity.cache(cachePct)}` : ""}
-          {task.llm_calls ? ` · ${t.activity.llm(task.llm_calls)}` : ""}
+        <div
+          className="ml-[19px] mt-0.5 truncate whitespace-nowrap font-mono text-[10.5px] text-fg-subtle"
+          title={usageLine}
+        >
+          {usageLine}
         </div>
       )}
       {!ok && task.last_error && (
