@@ -18,6 +18,7 @@ import asyncio
 import json
 import logging
 import re
+from dataclasses import replace
 from typing import Any
 
 from marginalia.config import get_settings, resolve_profile
@@ -55,6 +56,8 @@ MAX_TEXT_BYTES = 60_000
 MAX_TEXT_INDEX_BYTES = 8 * 1024 * 1024
 TEXT_CHUNK_CHARS = 50_000
 TEXT_SECTION_DIGEST_BYTES = 60_000
+TEXT_INDEX_MIN_OUTPUT_TOKENS = 8192
+TEXT_INDEX_MAX_OUTPUT_TOKENS = 16384
 
 # read_segment limits — we read more than the LLM-indexing path because the
 # agent might want late chunks of a long file.
@@ -121,6 +124,31 @@ technical terms, and high-value line ranges from the section map.
 
 # Schema kept for legacy callers but no longer fed to the LLM.
 TEXT_PIPELINE_SCHEMA: dict[str, Any] = {}
+
+
+def _index_output_tokens(char_count: int) -> int:
+    return min(
+        TEXT_INDEX_MAX_OUTPUT_TOKENS,
+        max(TEXT_INDEX_MIN_OUTPUT_TOKENS, char_count // 8),
+    )
+
+
+def _should_retry_empty_index(resp: Any, max_tokens: int) -> bool:
+    if max_tokens >= TEXT_INDEX_MAX_OUTPUT_TOKENS:
+        return False
+    return not (getattr(resp, "text", None) or "").strip() or (
+        getattr(resp, "stop_reason", None) == "max_tokens"
+    )
+
+
+def _response_diag(resp: Any) -> str:
+    usage = getattr(resp, "usage", None)
+    input_tokens = getattr(usage, "input_tokens", 0) if usage else 0
+    output_tokens = getattr(usage, "output_tokens", 0) if usage else 0
+    return (
+        f"stop_reason={getattr(resp, 'stop_reason', None) or 'unknown'}, "
+        f"input_tokens={input_tokens}, output_tokens={output_tokens}"
+    )
 
 
 @register_pipeline(
@@ -191,20 +219,34 @@ class TextPipeline(Pipeline):
         )
 
         client = get_chat_client("ingest")
-        resp = await client.complete(ChatRequest(
+        request = ChatRequest(
             system=TEXT_PIPELINE_SYSTEM,
             messages=cacheable_prompt_messages(stable_prefix, file_content),
-            max_tokens=min(8192, max(2048, len(body) // 8)),
+            max_tokens=_index_output_tokens(len(body)),
             temperature=0.2,
             cache_breakpoints=[0],
-        ))
+        )
+        resp = await client.complete(request)
         fields = parse_index_response(resp, anchor_unit="lines")
+        if not fields.summary and _should_retry_empty_index(resp, request.max_tokens):
+            log.warning(
+                "text pipeline: empty index response; retrying with larger "
+                "output budget (%s)",
+                _response_diag(resp),
+            )
+            request = replace(request, max_tokens=TEXT_INDEX_MAX_OUTPUT_TOKENS)
+            resp = await client.complete(request)
+            fields = parse_index_response(resp, anchor_unit="lines")
         if not fields.summary:
             log.warning(
-                "text pipeline: no <summary> in response. text=%r",
+                "text pipeline: no <summary> in response (%s). text=%r",
+                _response_diag(resp),
                 (resp.text or "")[:300],
             )
-            raise ValueError("text pipeline produced empty summary")
+            raise ValueError(
+                "text pipeline produced empty summary "
+                f"({_response_diag(resp)})"
+            )
         total_lines = max(1, len(body.splitlines()))
         sections = fields.sections or [
             fallback_section(
@@ -275,14 +317,32 @@ class TextPipeline(Pipeline):
                     f"<context>\n{json.dumps(payload, ensure_ascii=False)}\n</context>\n\n"
                     f"<document>\n{text}\n</document>"
                 )
-                resp = await client.complete(ChatRequest(
+                request = ChatRequest(
                     system=TEXT_CHUNK_SYSTEM,
                     messages=cacheable_prompt_messages(stable_prefix, file_content),
-                    max_tokens=min(8192, max(2048, len(text) // 8)),
+                    max_tokens=_index_output_tokens(len(text)),
                     temperature=0.2,
                     cache_breakpoints=[0],
-                ))
-            fields = parse_index_response(resp, anchor_unit="lines")
+                )
+                resp = await client.complete(request)
+                fields = parse_index_response(resp, anchor_unit="lines")
+                if not fields.summary and _should_retry_empty_index(
+                    resp,
+                    request.max_tokens,
+                ):
+                    log.warning(
+                        "text chunk pipeline: empty index response for lines "
+                        "%s-%s; retrying with larger output budget (%s)",
+                        line_start,
+                        line_end,
+                        _response_diag(resp),
+                    )
+                    retry_request = replace(
+                        request,
+                        max_tokens=TEXT_INDEX_MAX_OUTPUT_TOKENS,
+                    )
+                    resp = await client.complete(retry_request)
+                    fields = parse_index_response(resp, anchor_unit="lines")
             summary = fields.summary or fields.description_text or f"Lines {line_start}-{line_end}"
             local_sections = fields.sections or [
                 fallback_section(
@@ -329,7 +389,7 @@ class TextPipeline(Pipeline):
             f"<context>\n{json.dumps(aggregate_payload, ensure_ascii=False)}\n</context>\n\n"
             f"<section_map>\n{render_sections_digest(sections, max_chars=TEXT_SECTION_DIGEST_BYTES)}\n</section_map>"
         )
-        resp = await client.complete(ChatRequest(
+        request = ChatRequest(
             system=TEXT_AGGREGATE_SYSTEM,
             messages=cacheable_prompt_messages(
                 (
@@ -342,8 +402,21 @@ class TextPipeline(Pipeline):
             max_tokens=8192,
             temperature=0.2,
             cache_breakpoints=[0],
-        ))
+        )
+        resp = await client.complete(request)
         fields = parse_index_response(resp, anchor_unit="lines")
+        if not fields.summary and _should_retry_empty_index(resp, request.max_tokens):
+            log.warning(
+                "text aggregate pipeline: empty index response; retrying "
+                "with larger output budget (%s)",
+                _response_diag(resp),
+            )
+            retry_request = replace(
+                request,
+                max_tokens=TEXT_INDEX_MAX_OUTPUT_TOKENS,
+            )
+            resp = await client.complete(retry_request)
+            fields = parse_index_response(resp, anchor_unit="lines")
         if not fields.summary:
             first = chunk_summaries[0]["summary"] if chunk_summaries else "text document"
             fields.summary = (

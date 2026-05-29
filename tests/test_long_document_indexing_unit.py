@@ -82,6 +82,55 @@ def _build_text_pdf(page_count: int) -> bytes:
     return bytes(pdf.output())
 
 
+@pytest.mark.asyncio
+async def test_text_single_ingest_retries_empty_response_with_larger_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = b"# Note\n\nA short markdown document about retrying empty LLM output."
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.requests: list[ChatRequest] = []
+
+        async def complete(self, request: ChatRequest) -> ChatResponse:
+            self.requests.append(request)
+            if len(self.requests) == 1:
+                return ChatResponse(
+                    text="",
+                    tool_calls=[],
+                    stop_reason="max_tokens",
+                    usage=TokenUsage(
+                        input_tokens=1200,
+                        output_tokens=request.max_tokens,
+                    ),
+                )
+            return ChatResponse(
+                text=_tagged(
+                    summary="A short markdown note about retrying empty LLM output.",
+                    sections=(
+                        "s1 | 1-3 | Note | Describes an ingest retry case. | "
+                        "ingest, retry"
+                    ),
+                    tags="topic: ingest\nform: markdown\nlanguage: en",
+                ),
+                tool_calls=[],
+                stop_reason="end_turn",
+                usage=TokenUsage(input_tokens=1200, output_tokens=300),
+            )
+
+    fake = FakeClient()
+    monkeypatch.setattr(text_mod, "get_chat_client", lambda profile="ingest": fake)
+
+    ctx = _ctx(size=len(body))
+    ctx.mime_type = "text/markdown"
+    ctx.original_ext = ".md"
+    ctx.display_name = "note.md"
+    result = await TextPipeline().run(ctx=ctx, storage=_BytesStorage(body))
+
+    assert result.summary == "A short markdown note about retrying empty LLM output."
+    assert [r.max_tokens for r in fake.requests] == [8192, 16384]
+
+
 def test_pdf_read_segment_can_access_pages_past_ingest_cap() -> None:
     pdf_bytes = _build_text_pdf(100)
     seg = PdfPipeline()._slice(pdf_bytes, {"page_start": 90, "page_end": 91})

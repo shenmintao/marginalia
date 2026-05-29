@@ -602,31 +602,31 @@ function useQuoteJump(
       return;
     }
     const root = ref.current;
-    let mark: HTMLElement | null = null;
+    let marks: HTMLElement[] = [];
     let cleanup: number | null = null;
+    let handle2: number | null = null;
     // rAF to wait for layout to settle (mammoth-rendered HTML, syntax
     // highlighting, KaTeX). Two frames is enough for prism + react-markdown.
     const handle1 = window.requestAnimationFrame(() => {
-      const handle2 = window.requestAnimationFrame(() => {
-        mark = highlightQuoteInDom(root, quote);
-        if (mark) {
-          mark.scrollIntoView({ block: "center", behavior: "smooth" });
+      handle2 = window.requestAnimationFrame(() => {
+        marks = highlightQuoteInDom(root, quote);
+        if (marks.length > 0) {
+          marks[0].scrollIntoView({ block: "center", behavior: "smooth" });
           setHit("found");
           cleanup = window.setTimeout(() => {
-            unwrapMark(mark);
+            marks.forEach(unwrapMark);
           }, 1600);
         } else {
           setHit("missing");
         }
         onScrolled?.();
       });
-      // Cancel inner rAF on unmount
-      return () => window.cancelAnimationFrame(handle2);
     });
     return () => {
       window.cancelAnimationFrame(handle1);
+      if (handle2 != null) window.cancelAnimationFrame(handle2);
       if (cleanup != null) window.clearTimeout(cleanup);
-      if (mark) unwrapMark(mark);
+      marks.forEach(unwrapMark);
     };
   }, [content, quote, onScrolled, ref]);
   const banner = quote && hit === "found"
@@ -637,7 +637,13 @@ function useQuoteJump(
   return { banner };
 }
 
-function highlightQuoteInDom(root: HTMLElement, quote: string): HTMLElement | null {
+function highlightQuoteInDom(root: HTMLElement, quote: string): HTMLElement[] {
+  const exact = highlightExactQuoteInDom(root, quote);
+  if (exact.length > 0) return exact;
+  return highlightNormalizedQuoteInDom(root, quote);
+}
+
+function highlightExactQuoteInDom(root: HTMLElement, quote: string): HTMLElement[] {
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
   for (let node = walker.nextNode(); node; node = walker.nextNode()) {
     const tn = node as Text;
@@ -650,9 +656,97 @@ function highlightQuoteInDom(root: HTMLElement, quote: string): HTMLElement | nu
     const mark = document.createElement("mark");
     mark.className = "rounded bg-accent/30 px-0.5";
     range.surroundContents(mark);
-    return mark;
+    return [mark];
   }
-  return null;
+  return [];
+}
+
+interface SearchChar {
+  node: Text;
+  offset: number;
+}
+
+interface TextSegment {
+  node: Text;
+  start: number;
+  end: number;
+}
+
+function highlightNormalizedQuoteInDom(root: HTMLElement, quote: string): HTMLElement[] {
+  const needle = normalizeSearchText(quote);
+  if (needle.length < 3) return [];
+  const index = buildDomSearchIndex(root);
+  const start = index.text.indexOf(needle);
+  if (start === -1) return [];
+  const end = start + needle.length;
+  const segments = segmentsForMatch(index.map.slice(start, end));
+  const marks: HTMLElement[] = [];
+  for (let i = segments.length - 1; i >= 0; i -= 1) {
+    const mark = wrapTextSegment(segments[i]);
+    if (mark) marks.unshift(mark);
+  }
+  return marks;
+}
+
+function buildDomSearchIndex(root: HTMLElement): { text: string; map: SearchChar[] } {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  let text = "";
+  const map: SearchChar[] = [];
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    const tn = node as Text;
+    for (let i = 0; i < tn.data.length; i += 1) {
+      const normalized = normalizeSearchChar(tn.data[i]);
+      for (const ch of normalized) {
+        text += ch;
+        map.push({ node: tn, offset: i });
+      }
+    }
+  }
+  return { text, map };
+}
+
+function normalizeSearchText(value: string): string {
+  let out = "";
+  for (let i = 0; i < value.length; i += 1) {
+    out += normalizeSearchChar(value[i]);
+  }
+  return out;
+}
+
+function normalizeSearchChar(value: string): string {
+  let out = "";
+  for (const ch of value.normalize("NFKC").toLowerCase()) {
+    if (/[\p{L}\p{N}_]/u.test(ch)) out += ch;
+  }
+  return out;
+}
+
+function segmentsForMatch(chars: SearchChar[]): TextSegment[] {
+  const segments: TextSegment[] = [];
+  for (const ch of chars) {
+    const last = segments[segments.length - 1];
+    if (last && last.node === ch.node && ch.offset <= last.end) {
+      last.end = Math.max(last.end, ch.offset + 1);
+      continue;
+    }
+    segments.push({ node: ch.node, start: ch.offset, end: ch.offset + 1 });
+  }
+  return segments;
+}
+
+function wrapTextSegment(segment: TextSegment): HTMLElement | null {
+  if (segment.start >= segment.end) return null;
+  try {
+    const range = document.createRange();
+    range.setStart(segment.node, segment.start);
+    range.setEnd(segment.node, segment.end);
+    const mark = document.createElement("mark");
+    mark.className = "rounded bg-accent/30 px-0.5";
+    range.surroundContents(mark);
+    return mark;
+  } catch {
+    return null;
+  }
 }
 
 function unwrapMark(mark: HTMLElement | null) {
