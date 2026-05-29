@@ -21,6 +21,7 @@ class Task(Base, IdMixin):
     __tablename__ = "tasks"
     __table_args__ = (
         Index("ix_tasks_status_sched_priority", "status", "scheduled_at", "priority"),
+        Index("ix_tasks_claim", "status", "priority", "scheduled_at"),
         Index("ix_tasks_dedup_key_active", "dedup_key"),
         Index(
             "uq_tasks_active_dedup_key",
@@ -34,6 +35,9 @@ class Task(Base, IdMixin):
             ),
         ),
         Index("ix_tasks_kind_status", "kind", "status"),
+        Index("ix_tasks_status_lease", "status", "lease_expires_at"),
+        Index("ix_tasks_kind_status_finished", "kind", "status", "finished_at"),
+        Index("ix_tasks_status_finished", "status", "finished_at"),
         CheckConstraint(_in_clause("status", TASK_STATUSES), name="status"),
     )
 

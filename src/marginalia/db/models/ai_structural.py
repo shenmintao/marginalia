@@ -48,7 +48,11 @@ class Catalog(Base, IdMixin, TimestampMixin):
     """
 
     __tablename__ = "catalogs"
-    __table_args__ = (Index("ix_catalogs_parent_id", "parent_id"),)
+    __table_args__ = (
+        Index("ix_catalogs_parent_id", "parent_id"),
+        Index("ix_catalogs_parent_live_name", "parent_id", "deleted_at", "name"),
+        Index("ix_catalogs_live_name", "deleted_at", "name"),
+    )
 
     parent_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("catalogs.id", ondelete="RESTRICT"), nullable=True
@@ -71,6 +75,7 @@ class View(Base, IdMixin, TimestampMixin):
     """
 
     __tablename__ = "views"
+    __table_args__ = (Index("ix_views_name", "name"),)
 
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -94,6 +99,8 @@ class Tag(Base, IdMixin, TimestampMixin):
         UniqueConstraint("name", "facet", name="uq_tags_name_facet"),
         Index("ix_tags_facet", "facet"),
         Index("ix_tags_alias_of", "alias_of"),
+        Index("ix_tags_facet_alias_doc_count", "facet", "alias_of", "doc_count", "name"),
+        Index("ix_tags_alias_doc_count", "alias_of", "doc_count"),
         CheckConstraint(_in_clause("facet", TAG_FACETS), name="facet"),
     )
 

@@ -72,6 +72,7 @@ class Session(Base, IdMixin):
 
     __tablename__ = "sessions"
     __table_args__ = (
+        Index("ix_sessions_deleted_started", "deleted_at", "started_at"),
         CheckConstraint(
             f"end_reason IS NULL OR {_in_clause('end_reason', SESSION_END_REASONS)}",
             name="end_reason",
@@ -125,6 +126,7 @@ class Conversation(Base, IdMixin):
             name="uq_conversations_session_turn",
         ),
         Index("ix_conversations_started_at", "started_at"),
+        Index("ix_conversations_ended_at", "ended_at"),
     )
 
     session_id: Mapped[str] = mapped_column(
