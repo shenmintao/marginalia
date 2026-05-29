@@ -3,9 +3,9 @@
 > Chinese README: [README.zh-CN.md](README.zh-CN.md)
 > Detailed design: [DESIGN.md](DESIGN.md)
 
-Marginalia is an AI retrieval infrastructure for private heterogeneous knowledge bases. It is designed for personal or small-team libraries made of PDFs, notes, office documents, images, spreadsheets, logs, archives, and evolving investigation history.
+![Marginalia promotional hero](docs/images/marginalia-promo-en.png)
 
-![Marginalia desktop GUI](docs/images/desktop-gui.jpg)
+Marginalia is an AI retrieval infrastructure for private heterogeneous knowledge bases. It is designed for personal or small-team libraries made of PDFs, notes, office documents, images, spreadsheets, logs, archives, and evolving investigation history.
 
 The core idea is not "embed everything and search vectors." Marginalia uses a structured retrieval funnel:
 
