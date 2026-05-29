@@ -104,9 +104,12 @@ async def main() -> None:
         # --- (3) dispatch guard (race scenario) -----------------------------
         # Simulate something enqueueing after start(): the runner's per-task
         # guard must catch it on dispatch even though the sweep already ran.
+        # Stop the background loop first so this manual claim cannot race the
+        # worker's own poll cycle on slower CI platforms.
+        await runner.stop()
         late_id = await _enqueue(KIND_INGEST_FILE, "ingest:late")
         # Drive one claim+process cycle by hand instead of waiting on the loop.
-        claimed = await runner._claim_batch(self_size := 4)  # type: ignore[attr-defined]
+        claimed = await runner._claim_batch(4)  # type: ignore[attr-defined]
         assert late_id in claimed
         for tid in claimed:
             await runner._process(tid)  # type: ignore[attr-defined]
