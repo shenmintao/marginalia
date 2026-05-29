@@ -35,6 +35,7 @@ os.environ["STORAGE_BACKEND"] = "local"
 os.environ["WORKER_ENABLED"] = "false"
 os.environ["LLM_DEFAULT_API_KEY"] = "sk-fake"
 os.environ["LLM_DEFAULT_MODEL"] = "fake-model"
+os.environ["LLM_VISION_MODEL"] = "fake-vision"
 
 from sqlalchemy import text  # noqa: E402
 
