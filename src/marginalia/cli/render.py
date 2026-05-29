@@ -10,9 +10,12 @@ from __future__ import annotations
 
 import itertools
 import os
+import re
+import shutil
 import sys
 import threading
 import time
+import urllib.parse
 from contextlib import contextmanager
 
 from glowpy import ColorDepth, Theme, get_theme, render as _glow_render
@@ -103,7 +106,254 @@ _THEME_ACCENT = _theme_accent()
 
 # ---- markdown rendering ---------------------------------------------------
 
-def render_markdown(md: str) -> str:
+_TABLE_DELIMITER_CELL_RE = re.compile(r"^:?-{3,}:?$")
+_ENTRY_LINK_RE = re.compile(r"\[([^\]\n]+)\]\(entry:([^)]+)\)")
+_RAW_ENTRY_FOOTNOTE_RE = re.compile(
+    r"(^\[\^[^\]]+\]:\s*)entry_id\s*=\s*`?"
+    r"([0-9a-fA-F][0-9a-fA-F\-]{6,35})`?"
+    r"((?:\s*[,，]\s*[^-—–\n]+)*)"
+    r"(?:\s*[-—–]\s*(.*))?$",
+    re.MULTILINE,
+)
+
+
+def _split_table_cells(line: str) -> list[str]:
+    if "|" not in line:
+        return []
+    text = line.strip()
+    if text.startswith("|"):
+        text = text[1:]
+    if text.endswith("|"):
+        text = text[:-1]
+    return [cell.strip() for cell in text.split("|")]
+
+
+def _is_table_header_line(line: str) -> bool:
+    cells = _split_table_cells(line)
+    return len(cells) >= 2 and any(cells)
+
+
+def _is_table_delimiter_line(line: str) -> bool:
+    cells = _split_table_cells(line)
+    return (
+        len(cells) >= 2
+        and all(_TABLE_DELIMITER_CELL_RE.fullmatch(cell) for cell in cells)
+    )
+
+
+def _strip_blockquote_prefix(line: str) -> str:
+    stripped = line.lstrip()
+    if not stripped.startswith(">"):
+        return line
+    rest = stripped[1:]
+    if rest.startswith(" "):
+        rest = rest[1:]
+    return rest
+
+
+def _strip_fence_indent(line: str) -> str | None:
+    text = line.rstrip("\r\n")
+    idx = 0
+    col = 0
+    for ch in text:
+        if ch == " ":
+            idx += 1
+            col += 1
+        elif ch == "\t":
+            idx += 1
+            col += 4
+        else:
+            break
+        if col >= 4:
+            return None
+    return text[idx:]
+
+
+def _parse_fence_open(line: str) -> tuple[str, int, bool, bool] | None:
+    trimmed = _strip_fence_indent(line)
+    if trimmed is None:
+        return None
+    text = trimmed.lstrip()
+    is_blockquoted = text.startswith(">")
+    scan = _strip_blockquote_prefix(text) if is_blockquoted else text
+    if not scan.startswith(("```", "~~~")):
+        return None
+    marker = scan[0]
+    marker_len = len(scan) - len(scan.lstrip(marker))
+    if marker_len < 3:
+        return None
+    info = scan[marker_len:].strip()
+    is_markdown = info.lower() in ("md", "markdown")
+    return marker, marker_len, is_blockquoted, is_markdown
+
+
+def _is_fence_close(
+    line: str, *, marker: str, marker_len: int, is_blockquoted: bool
+) -> bool:
+    trimmed = _strip_fence_indent(line)
+    if trimmed is None:
+        return False
+    text = trimmed.lstrip()
+    if is_blockquoted:
+        if not text.startswith(">"):
+            return False
+        text = _strip_blockquote_prefix(text)
+    if not text.startswith(marker * marker_len):
+        return False
+    close_len = len(text) - len(text.lstrip(marker))
+    return close_len >= marker_len and not text[close_len:].strip()
+
+
+def _markdown_lines_contain_table(
+    lines: list[str], *, is_blockquoted: bool
+) -> bool:
+    previous: str | None = None
+    for line in lines:
+        text = line.rstrip("\r\n")
+        if is_blockquoted:
+            text = _strip_blockquote_prefix(text)
+        text = text.strip()
+        if not text:
+            previous = None
+            continue
+        if (
+            previous is not None
+            and _is_table_header_line(previous)
+            and not _is_table_delimiter_line(previous)
+            and _is_table_delimiter_line(text)
+        ):
+            return True
+        previous = text
+    return False
+
+
+def _unwrap_markdown_table_fences(md: str) -> str:
+    """Unwrap ```md/```markdown fences only when they contain tables.
+
+    Codex TUI does this before rendering agent output because models often
+    wrap Markdown tables in Markdown fences, which would otherwise render as
+    code instead of a table.
+    """
+    if "```" not in md and "~~~" not in md:
+        return md
+
+    lines = md.splitlines(keepends=True)
+    out: list[str] = []
+    changed = False
+    i = 0
+    while i < len(lines):
+        parsed = _parse_fence_open(lines[i])
+        if parsed is None:
+            out.append(lines[i])
+            i += 1
+            continue
+
+        marker, marker_len, is_blockquoted, is_markdown = parsed
+        opening = lines[i]
+        content: list[str] = []
+        j = i + 1
+        while j < len(lines) and not _is_fence_close(
+            lines[j],
+            marker=marker,
+            marker_len=marker_len,
+            is_blockquoted=is_blockquoted,
+        ):
+            content.append(lines[j])
+            j += 1
+
+        if j >= len(lines):
+            out.append(opening)
+            out.extend(content)
+            break
+
+        closing = lines[j]
+        if is_markdown and _markdown_lines_contain_table(
+            content, is_blockquoted=is_blockquoted
+        ):
+            out.extend(content)
+            changed = True
+        else:
+            out.append(opening)
+            out.extend(content)
+            out.append(closing)
+        i = j + 1
+
+    return "".join(out) if changed else md
+
+
+def _render_width(width: int | None, *, reserve_columns: int = 0) -> int:
+    if width is not None:
+        return max(0, int(width))
+    if not sys.stdout.isatty():
+        return 0
+    try:
+        columns = shutil.get_terminal_size(fallback=(100, 24)).columns
+    except Exception:
+        return 0
+    return max(20, columns - max(0, reserve_columns))
+
+
+def _entry_locator_suffix(target: str) -> str:
+    entry_id, _, query = target.partition("?")
+    short = entry_id.strip()[:8] or "unknown"
+    parts = [f"entry {short}"]
+    if query:
+        params = urllib.parse.parse_qs(query, keep_blank_values=True)
+        page = (params.get("page") or [""])[0]
+        quote = (params.get("q") or [""])[0]
+        if page:
+            parts.append(f"page {page}")
+        elif quote:
+            compact = " ".join(quote.split())
+            if len(compact) > 48:
+                compact = compact[:45].rstrip() + "..."
+            parts.append(f'q="{compact}"')
+    return "; ".join(parts)
+
+
+def _replace_entry_link(match: re.Match[str]) -> str:
+    label = match.group(1).strip()
+    target = match.group(2).strip()
+    return f"{label} ({_entry_locator_suffix(target)})"
+
+
+def _replace_raw_entry_footnote(match: re.Match[str]) -> str:
+    prefix = match.group(1)
+    entry_id = match.group(2)
+    fields = match.group(3) or ""
+    reason = (match.group(4) or "").strip()
+    parts = [f"entry {entry_id[:8]}"]
+    page_match = re.search(
+        r"page\s*=\s*`?([0-9]+(?:-[0-9]+)?)`?", fields, re.IGNORECASE
+    )
+    quote_match = re.search(r'quote\s*=\s*"((?:[^"\\]|\\.)*)"', fields)
+    if page_match:
+        parts.append(f"page {page_match.group(1)}")
+    elif quote_match:
+        quote = quote_match.group(1).replace(r"\"", '"').replace(r"\\", "\\")
+        quote = " ".join(quote.split())
+        if len(quote) > 48:
+            quote = quote[:45].rstrip() + "..."
+        parts.append(f'q="{quote}"')
+    text = prefix + "; ".join(parts)
+    if reason:
+        text += f" — {reason}"
+    return text
+
+
+def _normalize_cli_footnotes(md: str) -> str:
+    if "entry:" not in md and "entry_id" not in md:
+        return md
+    out = _ENTRY_LINK_RE.sub(_replace_entry_link, md)
+    return _RAW_ENTRY_FOOTNOTE_RE.sub(_replace_raw_entry_footnote, out)
+
+
+def render_markdown(
+    md: str,
+    *,
+    width: int | None = None,
+    reserve_columns: int = 0,
+) -> str:
     """Return an ANSI-rendered version of `md` using the claude-code theme.
 
     When colour is unsupported (no TTY, NO_COLOR, TERM=dumb, or VT enable
@@ -112,8 +362,13 @@ def render_markdown(md: str) -> str:
     indentation) regardless of whether colour is on."""
     try:
         depth = None if _COLOR else ColorDepth.NONE
+        normalized = _normalize_cli_footnotes(_unwrap_markdown_table_fences(md))
         return _glow_render(
-            md, theme=_THEME, hyperlinks=_COLOR, color_depth=depth
+            normalized,
+            theme=_THEME,
+            hyperlinks=_COLOR,
+            color_depth=depth,
+            width=_render_width(width, reserve_columns=reserve_columns),
         ).rstrip("\n")
     except Exception:
         return md

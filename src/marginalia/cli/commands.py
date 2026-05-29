@@ -832,7 +832,7 @@ async def chat(ctx: CliContext, message: str) -> None:
     if sp is not None:
         sp.finish("answer ready")
     print()
-    for ln in render_markdown(answer).split("\n"):
+    for ln in render_markdown(answer, reserve_columns=4).split("\n"):
         print(f"    {ln}" if ln else "")
     print()
     truncated = bool(done_payload.get("truncated"))
