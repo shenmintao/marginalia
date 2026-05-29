@@ -5,16 +5,18 @@ usage-driven (journal-based statistical), this task is structurally
 guided: we sample candidate (entry_a, entry_b) pairs from the corpus
 itself — pairs that share a catalog subtree or any tag — and ask the
 LLM to judge whether the pair is genuinely related. Accept → write a
-new entry_relation; reject → record the reason in task_outcomes so
-this pair is not re-evaluated until the corpus changes.
+new entry_relation or upgrade an existing weaker relation; reject →
+record the reason in task_outcomes so this pair is not re-evaluated
+until the corpus changes.
 
 Hard rules (philosophy boundary, see prior cycle discussion):
   - Pairs already evaluated (any task_outcomes row with object_kind
     'entry_pair' and object_id "{a}|{b}" exists) are NEVER re-fed to
     the LLM. This is the key cost guard — the corpus pool is huge but
     the per-pair LLM cost is paid once.
-  - Pairs already linked by an entry_relation (any source_kind) are
-    skipped — we don't second-guess existing relations.
+  - Pairs already linked by an equal/stronger entry_relation are
+    skipped. Weaker mined relations may be reviewed and upgraded if
+    corpus evidence accepts them.
   - Either entry being soft-deleted, lifecycle ∈ {demoted, archived,
     manual_archived} excludes the pair.
   - Generation pool is bounded; per run we evaluate up to MAX_PAIRS
@@ -156,28 +158,71 @@ async def handle_mine_corpus_evidence(payload: Mapping[str, Any]) -> None:
                 continue
             entry_a, entry_b = cand["entry_a_id"], cand["entry_b_id"]
 
-            if decision == "accept" and not dry_run:
-                rel_id = new_id()
-                session.add(EntryRelation(
-                    id=rel_id,
-                    entry_a_id=entry_a,
-                    entry_b_id=entry_b,
-                    note=reason,
-                    source_kind=SOURCE_KIND,
-                    last_observed_at=_utcnow(),
-                    observation_count=1,
-                    created_at=_utcnow(),
-                ))
+            if decision == "accept":
+                action = "dry_run"
+                rel_id = ""
+                attribution_replaced = False
+
+                if not dry_run:
+                    existing_relation_id = cand.get("existing_relation_id")
+                    if existing_relation_id:
+                        existing = await session.get(
+                            EntryRelation, existing_relation_id,
+                        )
+                        if (
+                            existing is not None
+                            and relations_repo.is_weaker_attribution(
+                                existing.source_kind, SOURCE_KIND,
+                            )
+                        ):
+                            rel_id = existing.id
+                            attribution_replaced = (
+                                await relations_repo.bump_observation(
+                                    session,
+                                    relation=existing,
+                                    new_count=(
+                                        existing.observation_count or 0
+                                    ) + 1,
+                                    last_observed_at=_utcnow(),
+                                    source_kind=SOURCE_KIND,
+                                    note=reason,
+                                )
+                            )
+                            action = (
+                                "upgraded"
+                                if attribution_replaced else "incremented"
+                            )
+                        elif existing is not None:
+                            skipped += 1
+                            continue
+                    if not rel_id:
+                        rel_id = new_id()
+                        now = _utcnow()
+                        session.add(EntryRelation(
+                            id=rel_id,
+                            entry_a_id=entry_a,
+                            entry_b_id=entry_b,
+                            note=reason,
+                            source_kind=SOURCE_KIND,
+                            last_observed_at=now,
+                            observation_count=1,
+                            created_at=now,
+                        ))
+                        attribution_replaced = True
+                        action = "created"
+
+                    await audit_events_repo.append(
+                        session, kind="relation_mined",
+                        payload={
+                            "relation_id": rel_id,
+                            "entry_a_id": entry_a, "entry_b_id": entry_b,
+                            "source_kind": SOURCE_KIND,
+                            "action": action,
+                            "attribution_replaced": attribution_replaced,
+                            "previous_source_kind": cand.get("existing_source_kind"),
+                        },
+                    )
                 accepted += 1
-                await audit_events_repo.append(
-                    session, kind="relation_mined",
-                    payload={
-                        "relation_id": rel_id,
-                        "entry_a_id": entry_a, "entry_b_id": entry_b,
-                        "source_kind": SOURCE_KIND,
-                        "action": "created",
-                    },
-                )
                 await record_outcome(
                     session,
                     task_kind="mine_corpus_evidence",
@@ -187,6 +232,9 @@ async def handle_mine_corpus_evidence(payload: Mapping[str, Any]) -> None:
                         "entry_a_id": entry_a, "entry_b_id": entry_b,
                         "decision": "accept", "reason": reason,
                         "shared_signal": cand["shared_signal"],
+                        "action": action,
+                        "previous_source_kind": cand.get("existing_source_kind"),
+                        "dry_run": dry_run,
                     },
                 )
             else:
@@ -222,15 +270,20 @@ async def handle_mine_corpus_evidence(payload: Mapping[str, Any]) -> None:
 
 
 async def _build_candidate_pool(*, max_pairs: int) -> list[dict[str, Any]]:
-    """Sample structurally-linked pairs not previously evaluated/related."""
+    """Sample structurally-linked pairs not previously evaluated.
+
+    Existing equal/stronger relations are skipped; strictly weaker relations
+    remain eligible so corpus evidence can upgrade them after LLM review.
+    """
     async with session_scope() as session:
         already_evaluated_ids = await select_object_ids(
             session,
             task_kind="mine_corpus_evidence",
             object_kind="entry_pair",
         )
-        existing_pairs: set[str] = {
-            f"{a}|{b}" for a, b in await relations_repo.list_pair_keys(session)
+        existing_by_pair = {
+            f"{r['entry_a_id']}|{r['entry_b_id']}": r
+            for r in await relations_repo.list_pair_attributions(session)
         }
 
         live_entries = await entries_repo.list_live_active_with_file(session)
@@ -265,7 +318,12 @@ async def _build_candidate_pool(*, max_pairs: int) -> list[dict[str, Any]]:
                     break
                 eb, fb = rows[j]
                 pid = _pair_id(ea.id, eb.id)
-                if pid in seen_pair_ids or pid in existing_pairs or pid in already_evaluated_ids:
+                if pid in seen_pair_ids or pid in already_evaluated_ids:
+                    continue
+                existing = existing_by_pair.get(pid)
+                if existing is not None and not relations_repo.is_weaker_attribution(
+                    existing.get("source_kind"), SOURCE_KIND,
+                ):
                     continue
 
                 shared_tags = tags_by_entry.get(ea.id, set()) & tags_by_entry.get(eb.id, set())
@@ -290,6 +348,17 @@ async def _build_candidate_pool(*, max_pairs: int) -> list[dict[str, Any]]:
                     "entry_a_kind": fa.kind,
                     "entry_b_kind": fb.kind,
                     "shared_signal": shared_signal,
+                    "existing_relation_id": (
+                        existing.get("id") if existing is not None else None
+                    ),
+                    "existing_source_kind": (
+                        existing.get("source_kind")
+                        if existing is not None else None
+                    ),
+                    "existing_observation_count": (
+                        existing.get("observation_count")
+                        if existing is not None else None
+                    ),
                 })
         await session.commit()
     return candidates

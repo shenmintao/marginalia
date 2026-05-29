@@ -3,7 +3,8 @@
 Why these live here and not under /file-entries: reprocess targets the
 File row (the content + AI-filled metadata), not a per-position FileEntry.
 A single file may have multiple entries across folders; reprocessing
-clears `entry_tags` for all of them and re-runs the ingest pipeline once.
+clears `entry_tags` and AI-derived `entry_relations` for all of them, then
+re-runs the ingest pipeline once.
 
 The mental model: "user upgraded their LLM, redo the analysis." See
 [[feedback-reprocess-scope]] and [[feedback-llm-first-class]].

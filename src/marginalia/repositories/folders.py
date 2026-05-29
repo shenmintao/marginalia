@@ -11,7 +11,15 @@ from __future__ import annotations
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from marginalia.db.models import FileEntry, Folder
+from marginalia.db.models import File, FileEntry, Folder
+from marginalia.db.models.enums import INGEST_STATUSES
+
+
+def _empty_ingest_summary() -> dict[str, int]:
+    return {
+        "total": 0,
+        **{status: 0 for status in INGEST_STATUSES},
+    }
 
 
 async def get_live(db: AsyncSession, folder_id: str) -> Folder | None:
@@ -117,6 +125,67 @@ async def count_children(
         Folder.deleted_at.is_(None),
     )
     return int((await db.execute(stmt)).scalar_one())
+
+
+async def ingest_summaries_for_subtrees(
+    db: AsyncSession, root_ids: list[str],
+) -> dict[str, dict[str, int]]:
+    """Recursive ingest-status counts for each requested live folder subtree.
+
+    The GUI lists folders lazily, so collapsed rows need their own summary
+    instead of deriving status from already-loaded descendants. This walks all
+    requested subtrees together and then aggregates file statuses in one query.
+    """
+    root_ids = list(dict.fromkeys(root_ids))
+    summaries = {root_id: _empty_ingest_summary() for root_id in root_ids}
+    if not root_ids:
+        return summaries
+
+    roots_by_folder: dict[str, set[str]] = {
+        root_id: {root_id} for root_id in root_ids
+    }
+    frontier: set[str] = set(root_ids)
+    while frontier:
+        child_rows = (
+            await db.execute(
+                select(Folder.id, Folder.parent_id).where(
+                    Folder.parent_id.in_(list(frontier)),
+                    Folder.deleted_at.is_(None),
+                )
+            )
+        ).all()
+        next_frontier: set[str] = set()
+        for child_id, parent_id in child_rows:
+            parent_roots = roots_by_folder.get(parent_id)
+            if not parent_roots:
+                continue
+            child_roots = roots_by_folder.setdefault(child_id, set())
+            before = len(child_roots)
+            child_roots.update(parent_roots)
+            if len(child_roots) > before:
+                next_frontier.add(child_id)
+        frontier = next_frontier
+
+    folder_ids = list(roots_by_folder)
+    count_rows = (
+        await db.execute(
+            select(FileEntry.folder_id, File.ingest_status, func.count())
+            .join(File, File.id == FileEntry.file_id)
+            .where(
+                FileEntry.folder_id.in_(folder_ids),
+                FileEntry.deleted_at.is_(None),
+            )
+            .group_by(FileEntry.folder_id, File.ingest_status)
+        )
+    ).all()
+
+    for folder_id, status, count in count_rows:
+        for root_id in roots_by_folder.get(folder_id, ()):
+            summary = summaries[root_id]
+            summary["total"] += int(count)
+            if status in INGEST_STATUSES:
+                summary[status] += int(count)
+    return summaries
 
 
 async def find_sibling_id_by_name(

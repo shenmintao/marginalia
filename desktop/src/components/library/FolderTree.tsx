@@ -8,15 +8,15 @@
  *  Background activity (ingest tasks) lights up an `<Loader2>` next to
  *  any file row whose file_id matches an entry in the active-tasks set.
  */
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import {
   ChevronDown, ChevronRight, Folder as FolderIcon, FolderOpen,
   FileText, Loader2, Plus, Upload as UploadIcon, Download, RefreshCw, Trash2,
-  AlertTriangle,
+  AlertTriangle, CircleDashed,
 } from "lucide-react";
 
 import { folders, fileEntries, files, ApiError } from "@/api/client";
-import type { Folder, FileEntrySummary } from "@/types/api";
+import type { Folder, FolderIngestSummary, FileEntrySummary } from "@/types/api";
 import { cn } from "@/lib/utils";
 import { useI18n, type I18nStrings } from "@/lib/i18n";
 
@@ -202,12 +202,18 @@ function FolderRow({
   const [entries, setEntries] = useState<FileEntrySummary[] | null>(null);
   const [loading, setLoading] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const loadedRef = useRef(false);
   const { t } = useI18n();
 
-  const loadDetail = useCallback(() => {
-    setLoading(true);
+  const loadDetail = useCallback((showSpinner = !loadedRef.current) => {
+    if (showSpinner) setLoading(true);
     folders.get(folder.id).then(
-      (d) => { setChildren(d.children); setEntries(d.entries); setLoading(false); },
+      (d) => {
+        loadedRef.current = true;
+        setChildren(d.children);
+        setEntries(d.entries);
+        setLoading(false);
+      },
       () => setLoading(false),
     );
   }, [folder.id]);
@@ -280,7 +286,8 @@ function FolderRow({
           {open
             ? <FolderOpen size={13} className="text-fg-muted" />
             : <FolderIcon size={13} className="text-fg-muted" />}
-          <span className="truncate">{folder.name}</span>
+          <span className="min-w-0 flex-1 truncate">{folder.name}</span>
+          <FolderIngestBadge summary={folder.ingest_summary} t={t} />
         </button>
         <div className="hidden items-center gap-0.5 group-hover:flex">
           <button
@@ -358,6 +365,49 @@ function FolderRow({
         </div>
       )}
     </div>
+  );
+}
+
+function FolderIngestBadge({ summary, t }: {
+  summary?: FolderIngestSummary | null;
+  t: I18nStrings;
+}) {
+  if (!summary || summary.total <= 0 || summary.incomplete <= 0) return null;
+
+  const failed = summary.failed > 0;
+  const processing = !failed && summary.processing > 0;
+  const count = failed ? summary.failed : summary.incomplete;
+  const label = failed
+    ? t.library.folderFailedBadge(summary.failed)
+    : t.library.folderUnfinishedBadge(summary.incomplete);
+  const title = t.library.folderIngestSummary(
+    summary.total,
+    summary.done,
+    summary.pending,
+    summary.processing,
+    summary.failed,
+  );
+
+  return (
+    <span
+      title={title}
+      aria-label={label}
+      className={cn(
+        "inline-flex h-4 shrink-0 items-center gap-0.5 rounded border px-1 text-[10px] leading-none tabular-nums",
+        failed
+          ? "border-danger/30 bg-danger/10 text-danger"
+          : "border-border bg-bg-muted text-fg-muted",
+      )}
+    >
+      {failed ? (
+        <AlertTriangle size={10} />
+      ) : processing ? (
+        <Loader2 size={10} className="animate-spin" />
+      ) : (
+        <CircleDashed size={10} />
+      )}
+      <span>{count}</span>
+    </span>
   );
 }
 

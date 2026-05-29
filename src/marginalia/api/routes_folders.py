@@ -30,14 +30,46 @@ class PatchFolderBody(BaseModel):
     update_parent: bool = False  # set true to actually act on parent_id
 
 
-def _serialize_folder(folder: Any) -> dict[str, Any]:
+def _derive_folder_ingest_status(summary: dict[str, int]) -> str | None:
+    if summary.get("total", 0) <= 0:
+        return None
+    if summary.get("failed", 0) > 0:
+        return "failed"
+    if summary.get("processing", 0) > 0:
+        return "processing"
+    if summary.get("pending", 0) > 0:
+        return "pending"
+    return "done"
+
+
+def _serialize_ingest_summary(summary: dict[str, int]) -> dict[str, Any]:
+    total = int(summary.get("total", 0))
+    done = int(summary.get("done", 0))
     return {
+        "total": total,
+        "pending": int(summary.get("pending", 0)),
+        "processing": int(summary.get("processing", 0)),
+        "done": done,
+        "failed": int(summary.get("failed", 0)),
+        "incomplete": max(0, total - done),
+        "status": _derive_folder_ingest_status(summary),
+    }
+
+
+def _serialize_folder(
+    folder: Any,
+    ingest_summary: dict[str, int] | None = None,
+) -> dict[str, Any]:
+    payload = {
         "id": folder.id,
         "parent_id": folder.parent_id,
         "name": folder.name,
         "created_at": folder.created_at.isoformat() if folder.created_at else None,
         "updated_at": folder.updated_at.isoformat() if folder.updated_at else None,
     }
+    if ingest_summary is not None:
+        payload["ingest_summary"] = _serialize_ingest_summary(ingest_summary)
+    return payload
 
 
 def _serialize_entry(e: FileEntry, ingest_status: str | None = None) -> dict[str, Any]:
@@ -63,8 +95,11 @@ async def list_folder(
     else:
         rows = await folder_service.list_child_folders(session, parent_id)
         entries = await entries_repo.list_live_in_folder(session, parent_id)
+    summaries = await folder_service.ingest_summaries_for_subtrees(
+        session, [f.id for f in rows],
+    )
     return {
-        "folders": [_serialize_folder(f) for f in rows],
+        "folders": [_serialize_folder(f, summaries.get(f.id)) for f in rows],
         "entries": [_serialize_entry(e, st) for e, st in entries],
     }
 
@@ -109,9 +144,12 @@ async def get_folder(
         raise HTTPException(status_code=404, detail="folder not found")
     children = await folder_service.list_child_folders(session, folder.id)
     entries = await entries_repo.list_live_in_folder(session, folder.id)
+    summaries = await folder_service.ingest_summaries_for_subtrees(
+        session, [folder.id, *[c.id for c in children]],
+    )
     return {
-        **_serialize_folder(folder),
-        "children": [_serialize_folder(c) for c in children],
+        **_serialize_folder(folder, summaries.get(folder.id)),
+        "children": [_serialize_folder(c, summaries.get(c.id)) for c in children],
         "entries": [_serialize_entry(e, st) for e, st in entries],
     }
 

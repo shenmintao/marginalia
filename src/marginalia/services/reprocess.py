@@ -7,8 +7,10 @@ Used by:
 
 The mental model: "AI got smarter, redo this." The handler does all the
 real work — reprocess just unblocks its write-once gate by clearing
-`ingested_at` and purges entry_tags so the new run's tags fully replace
-the old. dedup_key matches upload.py:318 so a stale pending/running
+`ingested_at`, purges entry_tags so the new run's tags fully replace
+the old, and drops entry_relations touching the file's live entries so
+derived recommendation edges can be rebuilt. dedup_key matches upload.py:318
+so a stale pending/running
 ingest_file row short-circuits cleanly.
 
 Caller owns the transaction; this function never commits.
@@ -22,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from marginalia.db.models import File
 from marginalia.repositories import audit_events as audit_events_repo
 from marginalia.repositories import entries as entries_repo
+from marginalia.repositories import entry_relations as entry_relations_repo
 from marginalia.repositories import entry_tags as entry_tags_repo
 from marginalia.repositories import files as files_repo
 from marginalia.tasks.enqueue import enqueue
@@ -50,6 +53,9 @@ async def reprocess_file(
     entry_ids = await files_repo.list_live_entry_ids_for_file(session, file_row.id)
     for eid in entry_ids:
         await entry_tags_repo.delete_all_for_entry(session, eid)
+    relation_count = await entry_relations_repo.delete_all_touching_entries(
+        session, entry_ids,
+    )
 
     seed = await entries_repo.find_seed_by_file_id(session, file_row.id)
     display_name = seed.display_name if seed is not None else None
@@ -64,6 +70,7 @@ async def reprocess_file(
         payload={
             "file_id": file_row.id,
             "entry_count": len(entry_ids),
+            "relation_count": relation_count,
             "scheduled_by": scheduled_by,
         },
     )

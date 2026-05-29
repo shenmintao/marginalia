@@ -4,16 +4,17 @@ Three miners (session_cooccurrence, tag_overlap, citation_graph) emit
 candidate edges with the same upsert shape:
 
   - if (entry_a_id, entry_b_id) exists: bump observation_count by N,
-    update last_observed_at, audit kind=relation_mined action=incremented
+    update last_observed_at, and replace source_kind/note only when this
+    source is at least as strong as the existing attribution
   - else: insert a fresh row with observation_count=N, audit
     kind=relation_mined action=created
 
 Centralising this avoids three copies drifting (e.g. one miner forgetting
-to bump last_observed_at, leaving the TTL-based revet stale).
+to preserve a stronger attribution while bumping observation_count).
 
-corpus_evidence does NOT use this helper — it only inserts; its semantics
-("LLM judged this single piece of evidence relevant") is wrong to
-collapse with statistical observations.
+corpus_evidence does NOT use this helper: it only creates rows or upgrades
+strictly weaker rows after an LLM decision. That is different from the
+statistical miners, which can bump observation_count by aggregate counts.
 """
 from __future__ import annotations
 
@@ -52,9 +53,9 @@ async def upsert_relation_pair(
     )
 
     if existing is not None:
-        await relations_repo.bump_observation(
+        attribution_replaced = await relations_repo.bump_observation(
             session,
-            relation_id=existing.id,
+            relation=existing,
             new_count=(existing.observation_count or 0) + observation_add,
             last_observed_at=now,
             source_kind=source_kind,
@@ -63,6 +64,7 @@ async def upsert_relation_pair(
         rid = existing.id
         action: UpsertAction = "incremented"
     else:
+        attribution_replaced = True
         rid = new_id()
         session.add(EntryRelation(
             id=rid,
@@ -83,6 +85,7 @@ async def upsert_relation_pair(
         "source_kind": source_kind,
         "observation_added": observation_add,
         "action": action,
+        "attribution_replaced": attribution_replaced,
     }
     if audit_extra:
         payload.update(audit_extra)

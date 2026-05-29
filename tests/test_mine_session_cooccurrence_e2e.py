@@ -18,16 +18,22 @@ Verifies:
 from __future__ import annotations
 
 import asyncio
+import atexit
 import os
 import shutil
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from uuid import uuid4
 
-_TEST_ROOT = Path(__file__).resolve().parent / "_mine_session_cooccurrence_e2e_data"
-if _TEST_ROOT.exists():
-    shutil.rmtree(_TEST_ROOT)
+_TEST_PARENT = Path(os.environ.get(
+    "MARGINALIA_TEST_TMP",
+    str(Path(__file__).resolve().parent),
+))
+_TEST_PARENT.mkdir(parents=True, exist_ok=True)
+_TEST_ROOT = _TEST_PARENT / f"_mine_session_cooccurrence_e2e_{os.getpid()}_{uuid4().hex[:8]}"
 _TEST_ROOT.mkdir(parents=True)
+atexit.register(lambda: shutil.rmtree(_TEST_ROOT, ignore_errors=True))
 os.environ["MARGINALIA_HOME"] = str(_TEST_ROOT)
 os.environ["STORAGE_BACKEND"] = "local"
 os.environ["WORKER_ENABLED"] = "false"
@@ -92,9 +98,9 @@ async def _seed():
         e_e.deleted_at = _now()
         e_e.purge_after = _now() + timedelta(days=7)
 
-        # Pre-existing entry_relation between A and C, written by a different
-        # miner (mine_tag_overlap) earlier. The bumper should overwrite
-        # source_kind/note to mine_session_cooccurrence on increment.
+        # Pre-existing entry_relation between A and C, written by a weaker
+        # miner (mine_tag_overlap) earlier. Session co-occurrence should
+        # overwrite source_kind/note while incrementing observation_count.
         a_id, c_id = sorted((e_a.id, e_c.id))
         existing_rel = EntryRelation(
             id=new_id(),
@@ -200,9 +206,9 @@ async def main():
         assert rel_ac.id == seeded["existing_rel_id"], \
             "(A,C) was duplicated instead of incremented"
         assert rel_ac.source_kind == "mine_session_cooccurrence", \
-            "source_kind should be overwritten to the most recent miner"
-        assert rel_ac.note != "seeded by reflect previously", \
-            "note should also be overwritten on bump"
+            "stronger source should replace weaker source_kind"
+        assert rel_ac.note != "seeded by mine_tag_overlap previously", \
+            "stronger source should replace weaker note"
         assert rel_ac.observation_count == 1 + 2, \
             f"observation_count = {rel_ac.observation_count}"
         print(f"[2] existing (A,C) incremented & re-attributed: "

@@ -11,6 +11,8 @@ Asserts:
      the folder, with values matching the seeded `File.ingest_status`.
   3. The four legal status values (pending / processing / done / failed)
      all round-trip unchanged.
+  4. Folder rows carry recursive `ingest_summary` values so collapsed
+     directories can show unfinished descendants.
 
 Run:
     .venv/Scripts/python tests/test_folders_ingest_status_e2e.py
@@ -18,15 +20,21 @@ Run:
 from __future__ import annotations
 
 import asyncio
+import atexit
 import os
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
+from uuid import uuid4
 
-_TEST_ROOT = Path(__file__).resolve().parent / "_folders_ingest_status_e2e_data"
-if _TEST_ROOT.exists():
-    shutil.rmtree(_TEST_ROOT)
+_TEST_PARENT = Path(os.environ.get(
+    "MARGINALIA_TEST_TMP",
+    str(Path(__file__).resolve().parent),
+))
+_TEST_PARENT.mkdir(parents=True, exist_ok=True)
+_TEST_ROOT = _TEST_PARENT / f"_folders_ingest_status_e2e_{os.getpid()}_{uuid4().hex[:8]}"
 _TEST_ROOT.mkdir(parents=True)
+atexit.register(lambda: shutil.rmtree(_TEST_ROOT, ignore_errors=True))
 os.environ["MARGINALIA_HOME"] = str(_TEST_ROOT)
 os.environ["STORAGE_BACKEND"] = "local"
 os.environ["WORKER_ENABLED"] = "false"
@@ -55,9 +63,11 @@ async def _create_schema() -> None:
 
 
 async def _seed() -> dict:
-    """One folder with four entries, each backed by a File row in a
-    distinct ingest_status. Plus one root-level entry whose file failed
-    ingest, to cover the parent_id=None path."""
+    """Seed direct entry statuses plus a nested-only pending branch.
+
+    The nested branch verifies that folder rows summarize descendant files,
+    not just direct children.
+    """
     factory = get_session_factory()
     now = _now()
     async with factory() as s:
@@ -93,8 +103,31 @@ async def _seed() -> dict:
         )
         s.add(root_e)
 
+        nested_parent = Folder(id=new_id(), parent_id=None, name="NestedOnly")
+        s.add(nested_parent); await s.flush()
+        nested_child = Folder(
+            id=new_id(), parent_id=nested_parent.id, name="NeedsWork"
+        )
+        s.add(nested_child); await s.flush()
+        nested_f = File(
+            id=new_id(), storage_key=f"sk-{new_id()}",
+            sha256=("c" * 64), size_bytes=30,
+            ingest_status="pending",
+        )
+        s.add(nested_f); await s.flush()
+        nested_e = FileEntry(
+            id=new_id(), folder_id=nested_child.id, file_id=nested_f.id,
+            display_name="nested-pending.txt", lifecycle="active",
+        )
+        s.add(nested_e)
+
         await s.commit()
-        return {"folder_id": folder.id, "entries": entries}
+        return {
+            "folder_id": folder.id,
+            "nested_parent_id": nested_parent.id,
+            "nested_child_id": nested_child.id,
+            "entries": entries,
+        }
 
 
 async def test_ingest_status_surfaces() -> None:
@@ -112,6 +145,19 @@ async def test_ingest_status_surfaces() -> None:
             assert orphan["ingest_status"] == "failed", orphan
             print("[1] root listing surfaces ingest_status=failed")
 
+            root_folders = {f["name"]: f for f in r.json()["folders"]}
+            nested_parent = root_folders["NestedOnly"]
+            assert nested_parent["ingest_summary"] == {
+                "total": 1,
+                "pending": 1,
+                "processing": 0,
+                "done": 0,
+                "failed": 0,
+                "incomplete": 1,
+                "status": "pending",
+            }, nested_parent
+            print("[1b] root folder rows summarize descendant ingest status")
+
             # Folder detail — all four statuses round-trip.
             r = await c.get(f"/v1/folders/{seeded['folder_id']}")
             assert r.status_code == 200, r.text
@@ -124,6 +170,14 @@ async def test_ingest_status_surfaces() -> None:
             for key in ("id", "folder_id", "file_id", "display_name", "lifecycle"):
                 assert key in sample, (key, sample)
             print("[3] entry payload preserves existing fields")
+
+            r = await c.get(f"/v1/folders/{seeded['nested_parent_id']}")
+            assert r.status_code == 200, r.text
+            child = next(c for c in r.json()["children"] if c["name"] == "NeedsWork")
+            assert child["ingest_summary"]["status"] == "pending", child
+            assert child["ingest_summary"]["incomplete"] == 1, child
+            assert r.json()["ingest_summary"]["status"] == "pending", r.json()
+            print("[4] folder detail recursively summarizes child folders")
 
 
 async def main() -> None:

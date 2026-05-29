@@ -3,12 +3,27 @@
  *  update both — the typed client is the only thing keeping them honest.
  */
 
+export type IngestStatus = "pending" | "processing" | "done" | "failed";
+
+export interface FolderIngestSummary {
+  total: number;
+  pending: number;
+  processing: number;
+  done: number;
+  failed: number;
+  incomplete: number;
+  status: IngestStatus | null;
+}
+
 export interface Folder {
   id: string;
   parent_id: string | null;
   name: string;
   created_at: string | null;
   updated_at: string | null;
+  /** Recursive file ingest summary for this folder subtree. Present on
+   *  folder-listing responses so collapsed rows can show unfinished work. */
+  ingest_summary?: FolderIngestSummary | null;
 }
 
 export interface FolderDetail extends Folder {
@@ -30,7 +45,7 @@ export interface FileEntrySummary {
   /** File-side ingest state — pending | processing | done | failed.
    *  Sourced from the joined `files.ingest_status` so the row can
    *  paint a "failed" badge without a second round-trip. */
-  ingest_status?: string | null;
+  ingest_status?: IngestStatus | null;
   created_at?: string | null;
 }
 

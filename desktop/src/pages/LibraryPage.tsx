@@ -9,7 +9,7 @@
  *  - Background ingest tasks are reflected by spinners on the matching file rows
  *    via a single 4 s poll of /v1/tasks/active
  */
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Inbox } from "lucide-react";
 
@@ -29,6 +29,8 @@ export function LibraryPage() {
   const [metaLoading, setMetaLoading] = useState(false);
   const [metaOpen, setMetaOpen] = useState(true);
   const [refreshKey, setRefreshKey] = useState(0);
+  const triggerRefresh = useCallback(() => setRefreshKey((k) => k + 1), []);
+  const activeFileIdsRef = useRef<Set<string>>(new Set());
   // Folder ids that should be force-expanded on the next render — set
   // when arriving from search/chat with `?entry=<id>` so each ancestor
   // opens in turn. Cleared once consumed.
@@ -60,13 +62,23 @@ export function LibraryPage() {
   useEffect(() => {
     let cancelled = false;
     const tick = () => tasks.active().then(
-      (r) => { if (!cancelled) setActive(r); },
+      (r) => {
+        if (cancelled) return;
+        const nextFileIds = activeTaskFileIds(r);
+        const settledFileTask = [...activeFileIdsRef.current]
+          .some((fileId) => !nextFileIds.has(fileId));
+        activeFileIdsRef.current = nextFileIds;
+        if (settledFileTask) {
+          triggerRefresh();
+        }
+        setActive(r);
+      },
       () => {},
     );
     tick();
     const handle = window.setInterval(tick, 4000);
     return () => { cancelled = true; window.clearInterval(handle); };
-  }, []);
+  }, [triggerRefresh]);
 
   // ?entry=<id> deep-link: ask the backend for the folder ancestor
   // chain, hand the ids to FolderTree as expandPath so each parent
@@ -137,8 +149,6 @@ export function LibraryPage() {
     setSelectedEntry(null);
     setMeta(null);
   }, []);
-
-  const triggerRefresh = useCallback(() => setRefreshKey((k) => k + 1), []);
 
   const clearSelection = useCallback(() => {
     setSelectedEntry(null);
@@ -227,6 +237,13 @@ export function LibraryPage() {
       )}
     </div>
   );
+}
+
+function activeTaskFileIds(active: ActiveTasks): Set<string> {
+  const ids = new Set<string>();
+  for (const task of active.running) if (task.file_id) ids.add(task.file_id);
+  for (const task of active.pending) if (task.file_id) ids.add(task.file_id);
+  return ids;
 }
 
 function EmptyViewer({
