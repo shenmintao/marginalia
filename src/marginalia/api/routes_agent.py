@@ -21,6 +21,7 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from marginalia.agent.runtime import _rewrite_footnotes_for_display
+from marginalia.agent.runtime import _strip_session_name_line
 from marginalia.agent.runtime import TOOL_RESULT_PREVIEW_LEN
 from marginalia.agent import tool_display
 from marginalia.db.models import Session as SessionRow
@@ -222,7 +223,7 @@ async def session_messages(
             if isinstance(call, dict) and call.get("phase") == "plan":
                 pt = call.get("plan_text") or call.get("extra", {}).get("plan_text")
                 if isinstance(pt, str) and pt.strip():
-                    plan_text = pt
+                    plan_text = _strip_session_name_line(pt)
                     break
 
         tool_calls = []

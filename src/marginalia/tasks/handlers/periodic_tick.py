@@ -51,11 +51,10 @@ SUMMARIZE_MIN_TURNS = 3
 SUMMARIZE_MIN_AGE = timedelta(hours=24)
 SUMMARIZE_MAX_DISPATCH_PER_TICK = 10
 
-# Self-heal: files whose ingest finished but produced a useless summary.
-# Trim threshold matches kb-lite's 50-char rule of thumb — anything
-# shorter is essentially "we tried, the LLM gave up". Cooldown matches
-# the summarize cadence so a stuck file doesn't churn every tick.
-LOW_QUALITY_MIN_SUMMARY_CHARS = 50
+# Self-heal: files whose ingest finished but produced no summary. Short
+# summaries can be valid for short or placeholder files, so hidden automatic
+# reprocess stays conservative and only retries NULL/whitespace summaries.
+LOW_QUALITY_MIN_SUMMARY_CHARS = 1
 LOW_QUALITY_COOLDOWN = timedelta(hours=24)
 LOW_QUALITY_MAX_DISPATCH_PER_TICK = 5
 LOW_QUALITY_OUTCOME_KIND = "reprocess_low_quality"

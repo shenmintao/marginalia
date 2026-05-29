@@ -170,14 +170,14 @@ async def list_live_entry_ids_for_file(
 async def find_low_quality(
     db: AsyncSession, *, min_summary_chars: int, limit: int,
 ) -> list[str]:
-    """Live, already-ingested file ids whose summary is empty or shorter
-    than `min_summary_chars`. Oldest-ingested first so the periodic
-    self-heal makes steady forward progress instead of thrashing the
-    same recent file. Used by periodic_tick._dispatch_reprocess_low_quality.
+    """Live, already-ingested file ids whose summary is empty/whitespace.
+    Oldest-ingested first so the periodic self-heal makes steady forward
+    progress instead of thrashing the same recent file. Used by
+    periodic_tick._dispatch_reprocess_low_quality.
 
     `ingested_at IS NOT NULL` filters out files mid-pipeline — those will
     set their summary on this run; we only want files that already
-    finished and produced a poor result.
+    finished without producing a usable summary.
     """
     rows = (
         await db.execute(

@@ -85,7 +85,12 @@ async def _seed() -> dict:
             id=new_id(), session_id=sess.id, turn_index=0,
             started_at=now, ended_at=_now(),
             user_message="raft?", agent_response=agent_response,
-            tool_calls=[], llm_calls=[],
+            tool_calls=[],
+            llm_calls=[{
+                "phase": "plan",
+                "model": "fake",
+                "plan_text": "1. Read the Raft note.\nSession name: Raft note",
+            }],
             total_input_tokens=0, total_output_tokens=0,
             total_tool_calls=0, total_llm_calls=0, total_duration_ms=0,
         )
@@ -106,6 +111,8 @@ async def test_transcript_rewrites_entry_id() -> None:
             ar = body["turns"][0]["agent_response"]
             assert f"[raft.md](entry:{seeded['eid']})" in ar, ar
             assert "entry_id=" not in ar, ar
+            plan = body["turns"][0]["plan_text"]
+            assert plan == "1. Read the Raft note.", plan
             print("[1] transcript rewrites raw entry_id to [name](entry:<uuid>)")
 
 

@@ -5,9 +5,10 @@ for SSE streaming. One `run_turn(session_id, user_message)` invocation:
 
   1. Open one conversation row (turn_index = next). Yield "conversation".
   2. Plan phase: yield "planning", do ONE LLM call with `tools=[]`,
-     yield "plan" with full plan_text. Stored in conversations.llm_calls
-     under phase='plan'. If plan_text starts with `NO_PLAN:` the trailing
-     answer is treated as the final answer and execute is skipped.
+     yield "plan" with the user-visible plan text. Stored in
+     conversations.llm_calls under phase='plan'. If plan_text starts with
+     `NO_PLAN:` the trailing answer is treated as the final answer and
+     execute is skipped.
   3. Execute phase: up to `settings.agent_execute_max_turns` (default 15)
      LLM calls. For each:
          - yield "thinking", LLM call (records usage)
@@ -365,11 +366,12 @@ async def run_turn(
     session_name = _extract_session_name(plan_text)
     if session_name:
         await _store_session_name(session_id, session_name)
-    yield AgentEvent(event_type="plan", data=plan_text)
+    public_plan_text = _strip_session_name_line(plan_text)
+    yield AgentEvent(event_type="plan", data=public_plan_text)
 
     outcome = _ExecuteOutcome()
-    no_plan_answer = _extract_no_plan_answer(plan_text)
-    plan_for_execute = _strip_session_name_line(plan_text)
+    no_plan_answer = _extract_no_plan_answer(public_plan_text)
+    plan_for_execute = public_plan_text
     if no_plan_answer is not None:
         # Planner declared the user's turn is trivial — skip execute,
         # still emit one fake "thinking" so the SSE stream shape stays
@@ -578,6 +580,7 @@ async def _run_plan_phase(
     ))
     duration_ms = int((time.monotonic() - started) * 1000)
     plan_text = resp.text or ""
+    stored_plan_text = _strip_session_name_line(plan_text)
     async with session_scope() as db:
         await session_service.append_llm_call(
             db,
@@ -589,7 +592,7 @@ async def _run_plan_phase(
             cache_read_tokens=resp.usage.cache_read_tokens,
             cache_creation_tokens=resp.usage.cache_creation_tokens,
             duration_ms=duration_ms,
-            extra={"plan_text": plan_text},
+            extra={"plan_text": stored_plan_text},
         )
         await db.commit()
     return plan_text

@@ -168,6 +168,26 @@ class TextPipeline(Pipeline):
         body, indexed_bytes, read_truncated = await self._read_text_with_meta(
             storage, ctx.storage_key, cap=MAX_TEXT_INDEX_BYTES,
         )
+        if not body.strip():
+            coverage = self._coverage(
+                total_bytes=ctx.size_bytes,
+                indexed_bytes=indexed_bytes,
+                chunk_count=0,
+                read_truncated=read_truncated,
+            )
+            return PipelineResult(
+                summary="Empty file.",
+                description={
+                    "sections": [],
+                    "coverage": coverage,
+                    "text": "The file contains no non-whitespace text content.",
+                },
+                kind="text",
+                extra=None,
+                entry_extra=None,
+                entry_catalog_path=None,
+                entry_tags=[],
+            )
         if len(body) > MAX_TEXT_BYTES:
             return await self._run_chunked_index(
                 ctx=ctx,

@@ -69,6 +69,20 @@ async def index_extracted_text(
 ) -> PipelineResult:
     """Run the indexing LLM call and return a PipelineResult."""
     coverage = dict(coverage or {})
+    if not body.strip():
+        return PipelineResult(
+            summary=f"No {kind} content extracted.",
+            description={
+                "sections": [],
+                **({"coverage": coverage} if coverage else {}),
+                "text": "No non-whitespace text content was extracted.",
+            },
+            kind=kind,
+            extra=None,
+            entry_extra=None,
+            entry_catalog_path=None,
+            entry_tags=[],
+        )
     user_payload = {
         "folder_path": ctx.folder_path,
         "sibling_names": ctx.sibling_names,

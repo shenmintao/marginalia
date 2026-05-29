@@ -40,6 +40,8 @@ os.environ["LLM_DEFAULT_MODEL"] = "fake-model"
 from marginalia.config import get_settings
 get_settings.cache_clear()  # type: ignore[attr-defined]
 
+from sqlalchemy import select
+
 from marginalia.db.engine import get_engine, get_session_factory
 from marginalia.db.models import Base, Conversation, Session
 from marginalia.llm.types import (
@@ -48,6 +50,11 @@ from marginalia.llm.types import (
 from marginalia.utils.ids import new_id
 import marginalia.agent.runtime as runtime
 from marginalia.agent import tools as tools_pkg
+
+
+def _stored_plan_text(conv: Conversation) -> str:
+    first = conv.llm_calls[0]
+    return first.get("plan_text") or first.get("extra", {}).get("plan_text") or ""
 
 
 def _now() -> datetime:
@@ -164,6 +171,8 @@ async def test_no_plan_fast_path() -> None:
     seq = [e[0] for e in events]
     assert "planning" in seq
     assert "plan" in seq
+    plan = next(d for ev, d in events if ev == "plan")
+    assert "Session name:" not in plan, plan
     # No execute phase: no `thinking` event.
     assert "thinking" not in seq, seq
     assert "tool_call" not in seq
@@ -176,6 +185,11 @@ async def test_no_plan_fast_path() -> None:
     async with factory() as s:
         row = await s.get(Session, sid)
         assert row and row.initiating_user_message == "Quick thanks"
+        conv = (
+            await s.execute(select(Conversation).where(Conversation.session_id == sid))
+        ).scalar_one()
+        stored_plan = _stored_plan_text(conv)
+        assert "Session name:" not in stored_plan, stored_plan
     # Exactly one LLM call (the plan).
     assert len(chat.requests) == 1, len(chat.requests)
     print("[1] NO_PLAN fast-path: 1 LLM call, no execute")
@@ -346,6 +360,8 @@ async def test_final_answer_continuation_is_buffered() -> None:
     _install_chat(chat)
 
     events = await _drive(sid, "make it long")
+    plan = next(d for ev, d in events if ev == "plan")
+    assert "Session name:" not in plan, plan
     answers = [d for ev, d in events if ev == "answer"]
     assert answers == ["Part A Part B."], answers
     done = json.loads(next(d for ev, d in events if ev == "done"))
@@ -359,6 +375,8 @@ async def test_final_answer_continuation_is_buffered() -> None:
     async with factory() as s:
         conv = await s.get(Conversation, done["conversation_id"])
         assert conv and conv.agent_response == "Part A Part B."
+        stored_plan = _stored_plan_text(conv)
+        assert "Session name:" not in stored_plan, stored_plan
     print("[4] final-answer continuation: buffered into one answer event")
 
 

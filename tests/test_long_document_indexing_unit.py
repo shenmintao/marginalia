@@ -131,6 +131,27 @@ async def test_text_single_ingest_retries_empty_response_with_larger_budget(
     assert [r.max_tokens for r in fake.requests] == [8192, 16384]
 
 
+@pytest.mark.asyncio
+async def test_empty_text_ingest_is_deterministic_without_llm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _boom(profile: str = "ingest"):
+        raise AssertionError("empty text ingest should not call the LLM")
+
+    monkeypatch.setattr(text_mod, "get_chat_client", _boom)
+
+    ctx = _ctx(size=0)
+    ctx.mime_type = "text/markdown"
+    ctx.original_ext = ".md"
+    ctx.display_name = "empty.md"
+    result = await TextPipeline().run(ctx=ctx, storage=_BytesStorage(b""))
+
+    assert result.summary == "Empty file."
+    assert result.description["sections"] == []
+    assert result.description["coverage"]["total_bytes"] == 0
+    assert result.entry_tags == []
+
+
 def test_pdf_read_segment_can_access_pages_past_ingest_cap() -> None:
     pdf_bytes = _build_text_pdf(100)
     seg = PdfPipeline()._slice(pdf_bytes, {"page_start": 90, "page_end": 91})

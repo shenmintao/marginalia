@@ -1,14 +1,13 @@
-"""Periodic self-heal: re-ingest files whose summary is empty/short.
+"""Periodic self-heal: re-ingest files whose summary is empty.
 
 The contract being locked in:
-  1. A live, ingested File whose `summary` is shorter than 50 chars (or
-     NULL) is picked up by `_dispatch_reprocess_low_quality` on the next
-     periodic_tick fire.
+  1. A live, ingested File whose `summary` is NULL or blank is picked up
+     by `_dispatch_reprocess_low_quality` on the next periodic_tick fire.
   2. The dispatcher uses the shared `services.reprocess.reprocess_file`
      primitive — same effect as a user clicking Reprocess in the GUI.
   3. A `task_outcomes` row keyed (reprocess_low_quality, file, file_id)
      is recorded so the next tick within LOW_QUALITY_COOLDOWN skips it.
-  4. Files with healthy summaries (>= 50 chars) are not touched.
+  4. Files with non-empty summaries, even concise ones, are not touched.
   5. Files that have never been ingested (`ingested_at IS NULL`) are not
      touched — they belong to the normal ingest pipeline + recover_stuck.
 
@@ -93,13 +92,14 @@ async def main() -> None:
     factory = get_session_factory()
 
     # The fake_low fixture set:
-    #   bad_short  : "abc" — picked up
-    #   bad_empty  : NULL  — picked up
+    #   bad_blank  : whitespace — picked up
+    #   bad_empty  : NULL       — picked up
+    #   short_ok   : concise but usable summary — left alone
     #   ok         : 80-char summary — left alone
     #   not_yet    : ingested_at IS NULL — left alone (different pipeline)
     #   deleted    : soft-deleted — left alone
-    bad_short = await _insert_file(
-        summary="abc", ingested=True, ingested_offset_seconds=300,
+    bad_blank = await _insert_file(
+        summary="   ", ingested=True, ingested_offset_seconds=300,
     )
     bad_empty = await _insert_file(
         summary=None, ingested=True, ingested_offset_seconds=200,
@@ -107,6 +107,10 @@ async def main() -> None:
     ok = await _insert_file(
         summary=("real summary " * 6).strip(), ingested=True,
         ingested_offset_seconds=100,
+    )
+    short_ok = await _insert_file(
+        summary="usable short summary", ingested=True,
+        ingested_offset_seconds=90,
     )
     not_yet = await _insert_file(summary=None, ingested=False)
     deleted = await _insert_file(
@@ -118,15 +122,15 @@ async def main() -> None:
         enqueued = await _dispatch_reprocess_low_quality(s, _utcnow())
         await s.commit()
 
-    assert set(enqueued) == {bad_short, bad_empty}, (
-        f"expected only bad_short/bad_empty enqueued, got {enqueued}"
+    assert set(enqueued) == {bad_blank, bad_empty}, (
+        f"expected only bad_blank/bad_empty enqueued, got {enqueued}"
     )
-    print("[1] dispatch picked exactly the two bad-summary files")
+    print("[1] dispatch picked exactly the two empty-summary files")
 
     # ---- check the side effects ----
     async with factory() as s:
-        # bad_short / bad_empty: ingest state cleared, new ingest_file task
-        for fid in (bad_short, bad_empty):
+        # bad_blank / bad_empty: ingest state cleared, new ingest_file task
+        for fid in (bad_blank, bad_empty):
             row = await s.get(File, fid)
             assert row.ingested_at is None, f"{fid}: ingested_at should be NULL"
             assert row.ingest_status == "pending", \
@@ -136,8 +140,13 @@ async def main() -> None:
             ), {"k": KIND_INGEST_FILE, "p": f'%\"{fid}\"%'})).all()
             assert len(tasks) == 1, f"{fid}: expected 1 ingest task, got {len(tasks)}"
 
-        # ok / not_yet / deleted: untouched
-        for fid, label in ((ok, "ok"), (not_yet, "not_yet"), (deleted, "deleted")):
+        # short_ok / ok / not_yet / deleted: untouched
+        for fid, label in (
+            (short_ok, "short_ok"),
+            (ok, "ok"),
+            (not_yet, "not_yet"),
+            (deleted, "deleted"),
+        ):
             row = await s.get(File, fid)
             tasks = (await s.execute(text(
                 "SELECT id FROM tasks WHERE kind = :k AND payload LIKE :p"
@@ -151,7 +160,7 @@ async def main() -> None:
             )
         )).scalars().all()
         recorded = {o.object_id for o in outcomes}
-        assert recorded == {bad_short, bad_empty}, \
+        assert recorded == {bad_blank, bad_empty}, \
             f"task_outcomes object_ids: {recorded}"
         for o in outcomes:
             assert o.outcome == "applied", \
@@ -169,10 +178,10 @@ async def main() -> None:
     )
     print("[3] within cooldown: dispatcher skipped both files (no churn)")
 
-    # ---- after cooldown + re-ingest produced another bad summary ----
+    # ---- after cooldown + re-ingest produced another empty summary ----
     # Real flow: worker picks up the enqueued ingest_file, runs the
     # pipeline, writes a NEW summary, sets ingested_at. If that new
-    # summary is also bad, the next tick (after cooldown) should pick it
+    # summary is also empty, the next tick (after cooldown) should pick it
     # up again. Simulate that here without spinning up the worker:
     # mark the prior ingest_file rows done, restore ingested_at, leave
     # the bad summaries untouched, and backdate the task_outcomes.
@@ -185,8 +194,8 @@ async def main() -> None:
             "UPDATE files SET ingested_at = :now, ingest_status='done', "
             "summary = :sum WHERE id IN (:a, :b)"
         ), {
-            "now": _utcnow(), "sum": "still bad",
-            "a": bad_short, "b": bad_empty,
+            "now": _utcnow(), "sum": "   ",
+            "a": bad_blank, "b": bad_empty,
         })
         await s.execute(text(
             "UPDATE task_outcomes SET completed_at = :t "
@@ -200,8 +209,8 @@ async def main() -> None:
     async with factory() as s:
         enqueued3 = await _dispatch_reprocess_low_quality(s, _utcnow())
         await s.commit()
-    assert set(enqueued3) == {bad_short, bad_empty}, (
-        f"after cooldown + still-bad summary, expected both files re-enqueued, "
+    assert set(enqueued3) == {bad_blank, bad_empty}, (
+        f"after cooldown + empty summary, expected both files re-enqueued, "
         f"got {enqueued3}"
     )
     print("[4] after cooldown: bad files re-enqueued for another reprocess pass")
