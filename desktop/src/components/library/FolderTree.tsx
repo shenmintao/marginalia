@@ -166,6 +166,7 @@ export function FolderTree(props: Props) {
             key={f.id}
             folder={f}
             depth={0}
+            onFolderReprocessed={load}
             {...props}
           />
         ))}
@@ -178,6 +179,7 @@ export function FolderTree(props: Props) {
             ingesting={props.ingestingFileIds.has(e.file_id)}
             onClick={() => props.onSelectFile(e)}
             onDeleted={(id) => { load(); props.onEntryDeleted(id); }}
+            onReprocessed={load}
             t={t}
           />
         ))}
@@ -196,18 +198,20 @@ function FolderRow({
   onUploadHere, onNewFolderHere,
   onEntryDeleted, onFolderDeleted,
   onClearSelection,
-}: { folder: Folder; depth: number } & Props) {
+  onFolderReprocessed,
+}: { folder: Folder; depth: number; onFolderReprocessed: () => void } & Props) {
   const [open, setOpen] = useState(false);
   const [children, setChildren] = useState<Folder[] | null>(null);
   const [entries, setEntries] = useState<FileEntrySummary[] | null>(null);
   const [loading, setLoading] = useState(false);
+  const [reprocessingFolder, setReprocessingFolder] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const loadedRef = useRef(false);
   const { t } = useI18n();
 
   const loadDetail = useCallback((showSpinner = !loadedRef.current) => {
     if (showSpinner) setLoading(true);
-    folders.get(folder.id).then(
+    return folders.get(folder.id).then(
       (d) => {
         loadedRef.current = true;
         setChildren(d.children);
@@ -217,6 +221,13 @@ function FolderRow({
       () => setLoading(false),
     );
   }, [folder.id]);
+
+  const refreshAfterSubtreeReprocess = useCallback(() => {
+    onFolderReprocessed();
+    if (loadedRef.current) {
+      void loadDetail(false);
+    }
+  }, [loadDetail, onFolderReprocessed]);
 
   // If this folder sits on the active expandPath, force it open and
   // forward the remainder of the chain to descendants. The first id
@@ -247,6 +258,7 @@ function FolderRow({
   const childExpandPath = onPath ? expandPath!.slice(1) : expandPath;
 
   const isSelected = selectedFolderId === folder.id;
+  const folderFailed = (folder.ingest_summary?.failed ?? 0) > 0;
   const indent = { paddingLeft: 8 + depth * 12 };
 
   const onDeleteFolder = async (e: React.MouseEvent) => {
@@ -261,6 +273,25 @@ function FolderRow({
       const msg = err instanceof ApiError ? err.message : String(err);
       alert(t.library.deleteFailed(msg));
       setDeleting(false);
+    }
+  };
+
+  const onReprocessFolder = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (reprocessingFolder) return;
+    if (!confirm(t.library.reprocessFolderConfirm(folder.name))) return;
+    setReprocessingFolder(true);
+    try {
+      const r = await files.reprocessBulk({ folder_id: folder.id });
+      alert(
+        t.library.queuedReprocess(r.task_ids.length, r.reused_count, r.skipped_count),
+      );
+      refreshAfterSubtreeReprocess();
+    } catch (err) {
+      const msg = err instanceof ApiError ? err.message : String(err);
+      alert(t.library.bulkReprocessFailed(msg));
+    } finally {
+      setReprocessingFolder(false);
     }
   };
 
@@ -289,7 +320,27 @@ function FolderRow({
           <span className="min-w-0 flex-1 truncate">{folder.name}</span>
           <FolderIngestBadge summary={folder.ingest_summary} t={t} />
         </button>
-        <div className="hidden items-center gap-0.5 group-hover:flex">
+        <div
+          className={cn(
+            "items-center gap-0.5",
+            folderFailed || reprocessingFolder ? "flex" : "hidden group-hover:flex",
+          )}
+        >
+          <button
+            onClick={onReprocessFolder}
+            disabled={reprocessingFolder}
+            title={t.library.reprocessFolderTitle(folder.name)}
+            className={cn(
+              "rounded p-0.5 hover:bg-bg-base disabled:opacity-50",
+              folderFailed
+                ? "text-danger hover:text-danger"
+                : "text-fg-subtle hover:text-fg-base",
+            )}
+          >
+            {reprocessingFolder
+              ? <Loader2 size={11} className="animate-spin" />
+              : <RefreshCw size={11} />}
+          </button>
           <button
             onClick={(e) => {
               e.stopPropagation();
@@ -346,6 +397,7 @@ function FolderRow({
               onUploadHere={onUploadHere}
               onNewFolderHere={onNewFolderHere}
               onEntryDeleted={onEntryDeleted}
+              onFolderReprocessed={refreshAfterSubtreeReprocess}
               onFolderDeleted={(id) => { loadDetail(); onFolderDeleted(id); }}
               onClearSelection={onClearSelection}
             />
@@ -359,6 +411,7 @@ function FolderRow({
               ingesting={ingestingFileIds.has(e.file_id)}
               onClick={() => onSelectFile(e)}
               onDeleted={(id) => { loadDetail(); onEntryDeleted(id); }}
+              onReprocessed={refreshAfterSubtreeReprocess}
               t={t}
             />
           ))}
@@ -411,18 +464,28 @@ function FolderIngestBadge({ summary, t }: {
   );
 }
 
-function FileRow({ entry, depth, selected, ingesting, onClick, onDeleted, t }: {
+function FileRow({
+  entry, depth, selected, ingesting, onClick, onDeleted, onReprocessed, t,
+}: {
   entry: FileEntrySummary; depth: number; selected: boolean;
   ingesting: boolean; onClick: () => void;
   onDeleted: (entryId: string) => void;
+  onReprocessed: () => void;
   t: I18nStrings;
 }) {
   const [reprocessing, setReprocessing] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const failed = entry.ingest_status === "failed";
+  const failureTitle = failed && entry.ingest_error
+    ? t.library.ingestFailedReason(entry.ingest_error)
+    : t.library.ingestFailed;
+  const blockedByIngest = ingesting && !failed;
+  const reprocessTitle = failed
+    ? `${t.library.retryAnalysisTitle}\n${failureTitle}`
+    : t.library.reprocessAnalysisTitle;
   const onReprocess = async (e: React.MouseEvent) => {
     e.stopPropagation();
-    if (reprocessing || ingesting) return;
+    if (reprocessing || blockedByIngest) return;
     const prompt = failed
       ? t.library.retryAnalysisConfirm(entry.display_name)
       : t.library.reprocessFileConfirm(entry.display_name);
@@ -432,6 +495,7 @@ function FileRow({ entry, depth, selected, ingesting, onClick, onDeleted, t }: {
     setReprocessing(true);
     try {
       await files.reprocess(entry.file_id);
+      onReprocessed();
     } catch (err) {
       const msg = err instanceof ApiError ? err.message : String(err);
       alert(t.library.reprocessFailed(msg));
@@ -470,18 +534,22 @@ function FileRow({ entry, depth, selected, ingesting, onClick, onDeleted, t }: {
         <FileText size={12} className="shrink-0 text-fg-subtle" />
         <span className="flex-1 truncate">{entry.display_name}</span>
         {failed && (
-          <AlertTriangle
-            size={11}
+          <span
             className="shrink-0 text-danger"
-            aria-label={t.library.ingestFailed}
-          />
+            title={failureTitle}
+            aria-label={failureTitle}
+          >
+            <AlertTriangle size={11} />
+          </span>
         )}
       </button>
-      {ingesting && <Loader2 size={11} className="shrink-0 animate-spin text-fg-subtle" />}
+      {blockedByIngest && (
+        <Loader2 size={11} className="shrink-0 animate-spin text-fg-subtle" />
+      )}
       <button
         onClick={onReprocess}
-        disabled={reprocessing || ingesting}
-        title={failed ? t.library.retryAnalysisTitle : t.library.reprocessAnalysisTitle}
+        disabled={reprocessing || blockedByIngest}
+        title={reprocessTitle}
         className={cn(
           "shrink-0 rounded p-0.5 disabled:opacity-50",
           failed

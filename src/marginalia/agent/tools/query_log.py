@@ -252,7 +252,7 @@ async def _read_text(storage: StorageBackend, file_row: Any, display_name: str) 
 
 
 def _decode(data: bytes) -> str:
-    for encoding in ("utf-8", "utf-8-sig", "utf-16", "latin-1"):
+    for encoding in ("utf-8-sig", "utf-8", "utf-16", "latin-1"):
         try:
             return data.decode(encoding)
         except UnicodeDecodeError:

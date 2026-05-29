@@ -13,6 +13,8 @@ Asserts:
      all round-trip unchanged.
   4. Folder rows carry recursive `ingest_summary` values so collapsed
      directories can show unfinished descendants.
+  5. Failed file rows carry the latest ingest task error so the GUI can
+     explain the red warning icon.
 
 Run:
     .venv/Scripts/python tests/test_folders_ingest_status_e2e.py
@@ -48,7 +50,7 @@ from marginalia.config import get_settings
 get_settings.cache_clear()  # type: ignore[attr-defined]
 
 from marginalia.db.engine import get_engine, get_session_factory
-from marginalia.db.models import Base, File, FileEntry, Folder
+from marginalia.db.models import AuditEvent, Base, File, FileEntry, Folder, Task
 from marginalia.main import app
 from marginalia.utils.ids import new_id
 
@@ -76,6 +78,7 @@ async def _seed() -> dict:
 
         statuses = ["pending", "processing", "done", "failed"]
         entries: dict[str, str] = {}  # display_name -> status
+        folder_failed_error = "RuntimeError: markdown decode failed"
         for st in statuses:
             f = File(
                 id=new_id(), storage_key=f"sk-{new_id()}",
@@ -89,8 +92,20 @@ async def _seed() -> dict:
             )
             s.add(e)
             entries[e.display_name] = st
+            if st == "failed":
+                s.add(Task(
+                    id=new_id(),
+                    kind="ingest_file",
+                    payload={"file_id": f.id},
+                    status="dead",
+                    last_error=folder_failed_error,
+                    scheduled_at=now,
+                    created_at=now,
+                    finished_at=now,
+                ))
 
         # Root-level "failed" file — mirror the GUI's mixed root tree.
+        root_failed_error = "ValueError: no pipeline could read this file"
         root_f = File(
             id=new_id(), storage_key=f"sk-{new_id()}",
             sha256=("b" * 64), size_bytes=20,
@@ -102,6 +117,39 @@ async def _seed() -> dict:
             display_name="orphan.txt", lifecycle="active",
         )
         s.add(root_e)
+        s.add(Task(
+            id=new_id(),
+            kind="ingest_file",
+            payload={"file_id": root_f.id},
+            status="dead",
+            last_error=root_failed_error,
+            scheduled_at=now,
+            created_at=now,
+            finished_at=now,
+        ))
+
+        audit_only_error = "no_live_entry"
+        audit_only_f = File(
+            id=new_id(), storage_key=f"sk-{new_id()}",
+            sha256=("d" * 64), size_bytes=25,
+            ingest_status="failed",
+        )
+        s.add(audit_only_f); await s.flush()
+        audit_only_e = FileEntry(
+            id=new_id(), folder_id=None, file_id=audit_only_f.id,
+            display_name="audit-only-failed.txt", lifecycle="active",
+        )
+        s.add(audit_only_e)
+        s.add(AuditEvent(
+            id=new_id(),
+            occurred_at=now,
+            kind="ingest_status_changed",
+            payload={
+                "file_id": audit_only_f.id,
+                "status": "failed",
+                "reason": audit_only_error,
+            },
+        ))
 
         nested_parent = Folder(id=new_id(), parent_id=None, name="NestedOnly")
         s.add(nested_parent); await s.flush()
@@ -127,6 +175,9 @@ async def _seed() -> dict:
             "nested_parent_id": nested_parent.id,
             "nested_child_id": nested_child.id,
             "entries": entries,
+            "folder_failed_error": folder_failed_error,
+            "root_failed_error": root_failed_error,
+            "audit_only_error": audit_only_error,
         }
 
 
@@ -143,6 +194,16 @@ async def test_ingest_status_surfaces() -> None:
             orphan = next((e for e in root_entries if e["display_name"] == "orphan.txt"), None)
             assert orphan is not None, "orphan.txt missing from root listing"
             assert orphan["ingest_status"] == "failed", orphan
+            assert orphan["ingest_error"] == seeded["root_failed_error"], orphan
+            audit_only = next(
+                (
+                    e for e in root_entries
+                    if e["display_name"] == "audit-only-failed.txt"
+                ),
+                None,
+            )
+            assert audit_only is not None, "audit-only-failed.txt missing"
+            assert audit_only["ingest_error"] == seeded["audit_only_error"], audit_only
             print("[1] root listing surfaces ingest_status=failed")
 
             root_folders = {f["name"]: f for f in r.json()["folders"]}
@@ -164,6 +225,9 @@ async def test_ingest_status_surfaces() -> None:
             got = {e["display_name"]: e["ingest_status"] for e in r.json()["entries"]}
             assert got == seeded["entries"], (got, seeded["entries"])
             print("[2] folder detail surfaces all four statuses correctly")
+            failed = next(e for e in r.json()["entries"] if e["display_name"] == "failed.txt")
+            assert failed["ingest_error"] == seeded["folder_failed_error"], failed
+            print("[2b] failed entries carry the latest ingest task error")
 
             # Sanity: shape carries other expected fields too.
             sample = r.json()["entries"][0]

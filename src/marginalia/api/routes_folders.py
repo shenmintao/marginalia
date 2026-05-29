@@ -9,7 +9,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from marginalia.db.models import FileEntry
 from marginalia.db.session import get_session
+from marginalia.repositories import audit_events as audit_events_repo
 from marginalia.repositories import entries as entries_repo
+from marginalia.repositories import tasks as tasks_repo
 from marginalia.services import folders as folder_service
 
 router = APIRouter(prefix="/folders", tags=["folders"])
@@ -72,7 +74,11 @@ def _serialize_folder(
     return payload
 
 
-def _serialize_entry(e: FileEntry, ingest_status: str | None = None) -> dict[str, Any]:
+def _serialize_entry(
+    e: FileEntry,
+    ingest_status: str | None = None,
+    ingest_error: str | None = None,
+) -> dict[str, Any]:
     return {
         "id": e.id,
         "folder_id": e.folder_id,
@@ -80,8 +86,30 @@ def _serialize_entry(e: FileEntry, ingest_status: str | None = None) -> dict[str
         "display_name": e.display_name,
         "lifecycle": e.lifecycle,
         "ingest_status": ingest_status,
+        "ingest_error": ingest_error,
         "created_at": e.created_at.isoformat() if e.created_at else None,
     }
+
+
+async def _serialize_entries_with_errors(
+    session: AsyncSession,
+    entries: list[tuple[FileEntry, str | None]],
+) -> list[dict[str, Any]]:
+    failed_file_ids = [e.file_id for e, status in entries if status == "failed"]
+    errors = await tasks_repo.latest_failed_ingest_errors_for_files(
+        session, failed_file_ids,
+    )
+    missing = [file_id for file_id in failed_file_ids if file_id not in errors]
+    if missing:
+        errors.update(
+            await audit_events_repo.latest_failed_ingest_reasons_for_files(
+                session, missing,
+            )
+        )
+    return [
+        _serialize_entry(e, st, errors.get(e.file_id))
+        for e, st in entries
+    ]
 
 
 @router.get("")
@@ -100,7 +128,7 @@ async def list_folder(
     )
     return {
         "folders": [_serialize_folder(f, summaries.get(f.id)) for f in rows],
-        "entries": [_serialize_entry(e, st) for e, st in entries],
+        "entries": await _serialize_entries_with_errors(session, entries),
     }
 
 
@@ -150,7 +178,7 @@ async def get_folder(
     return {
         **_serialize_folder(folder, summaries.get(folder.id)),
         "children": [_serialize_folder(c, summaries.get(c.id)) for c in children],
-        "entries": [_serialize_entry(e, st) for e, st in entries],
+        "entries": await _serialize_entries_with_errors(session, entries),
     }
 
 

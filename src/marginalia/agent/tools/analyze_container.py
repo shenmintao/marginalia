@@ -312,7 +312,7 @@ def _do_search(
 
 
 def _decode(b: bytes) -> str:
-    for enc in ("utf-8", "utf-8-sig", "utf-16"):
+    for enc in ("utf-8-sig", "utf-8", "utf-16"):
         try:
             return b.decode(enc)
         except UnicodeDecodeError:

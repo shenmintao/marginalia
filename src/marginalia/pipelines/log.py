@@ -451,7 +451,7 @@ def _log_pattern_search(
 
 
 def _decode_log_bytes(buf: bytes) -> str:
-    for enc in ("utf-8", "utf-8-sig", "latin-1"):
+    for enc in ("utf-8-sig", "utf-8", "latin-1"):
         try:
             return buf.decode(enc)
         except UnicodeDecodeError:

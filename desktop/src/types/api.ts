@@ -46,6 +46,7 @@ export interface FileEntrySummary {
    *  Sourced from the joined `files.ingest_status` so the row can
    *  paint a "failed" badge without a second round-trip. */
   ingest_status?: IngestStatus | null;
+  ingest_error?: string | null;
   created_at?: string | null;
 }
 

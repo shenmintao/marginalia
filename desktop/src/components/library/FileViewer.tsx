@@ -308,7 +308,7 @@ function useTextResource(url: string, maxBytes = 2_000_000) {
         if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
         const buf = await r.arrayBuffer();
         const slice = buf.byteLength > maxBytes ? buf.slice(0, maxBytes) : buf;
-        const t = new TextDecoder("utf-8", { fatal: false }).decode(slice);
+        const t = decodeTextBytes(slice, r.headers.get("content-type") || "");
         if (!cancelled) {
           setText(t);
           setTruncated(buf.byteLength > maxBytes);
@@ -318,6 +318,85 @@ function useTextResource(url: string, maxBytes = 2_000_000) {
     return () => { cancelled = true; };
   }, [url, maxBytes]);
   return { text, err, truncated };
+}
+
+function decodeTextBytes(buf: ArrayBuffer, contentType: string): string {
+  const bytes = new Uint8Array(buf);
+  if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
+    return stripLeadingBom(new TextDecoder("utf-8").decode(bytes.subarray(3)));
+  }
+  if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe) {
+    return stripLeadingBom(decodeWith("utf-16le", bytes.subarray(2)) ?? "");
+  }
+  if (bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff) {
+    return stripLeadingBom(decodeWith("utf-16be", bytes.subarray(2)) ?? "");
+  }
+
+  const charset = parseCharset(contentType);
+  if (charset) {
+    const decoded = decodeWith(charset, bytes);
+    if (decoded != null) return stripLeadingBom(decoded);
+  }
+
+  const utf8 = decodeUtf8Strict(bytes);
+  if (utf8 != null) return stripLeadingBom(utf8);
+
+  const utf16 = decodeLikelyUtf16(bytes);
+  if (utf16 != null) return stripLeadingBom(utf16);
+
+  // Common for Chinese Markdown edited by Windows-era tools. Only tried
+  // after strict UTF-8 fails, so normal UTF-8 content keeps the fast path.
+  const gb18030 = decodeWith("gb18030", bytes);
+  if (gb18030 != null) return stripLeadingBom(gb18030);
+
+  return stripLeadingBom(new TextDecoder("utf-8", { fatal: false }).decode(bytes));
+}
+
+function parseCharset(contentType: string): string | null {
+  const m = /(?:^|;)\s*charset\s*=\s*"?([^";]+)"?/i.exec(contentType);
+  if (!m) return null;
+  const label = m[1].trim().toLowerCase();
+  return label === "utf8" ? "utf-8" : label;
+}
+
+function decodeWith(label: string, bytes: Uint8Array): string | null {
+  try {
+    return new TextDecoder(label, { fatal: false }).decode(bytes);
+  } catch {
+    return null;
+  }
+}
+
+function decodeUtf8Strict(bytes: Uint8Array): string | null {
+  for (let trim = 0; trim <= 3 && trim < bytes.length; trim += 1) {
+    try {
+      const view = trim === 0 ? bytes : bytes.subarray(0, bytes.length - trim);
+      return new TextDecoder("utf-8", { fatal: true }).decode(view);
+    } catch {
+      /* A truncated preview can cut a multi-byte char; trim and retry. */
+    }
+  }
+  return null;
+}
+
+function decodeLikelyUtf16(bytes: Uint8Array): string | null {
+  const sample = bytes.subarray(0, Math.min(bytes.length, 1024));
+  if (sample.length < 8) return null;
+  let evenNulls = 0;
+  let oddNulls = 0;
+  for (let i = 0; i < sample.length; i += 1) {
+    if (sample[i] !== 0) continue;
+    if (i % 2 === 0) evenNulls += 1;
+    else oddNulls += 1;
+  }
+  const pairs = Math.floor(sample.length / 2);
+  if (oddNulls > pairs / 3) return decodeWith("utf-16le", bytes);
+  if (evenNulls > pairs / 3) return decodeWith("utf-16be", bytes);
+  return null;
+}
+
+function stripLeadingBom(text: string): string {
+  return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
 }
 
 interface JumpProps {

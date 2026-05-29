@@ -358,3 +358,35 @@ async def list_recent_with_usage(
         }
         for t, detail in rows
     ]
+
+
+async def latest_failed_ingest_errors_for_files(
+    db: AsyncSession, file_ids: Sequence[str],
+) -> dict[str, str]:
+    """Latest dead ingest_file error per file_id.
+
+    Folder listings use this to make a failed file row explainable in the
+    GUI. The queue payload is JSON, but every ingest_file task carries a
+    `file_id`, including legacy rows without a dedup_key.
+    """
+    wanted = set(file_ids)
+    if not wanted:
+        return {}
+    file_id_expr = Task.payload["file_id"].as_string()
+    rows = (
+        await db.execute(
+            select(file_id_expr, Task.last_error)
+            .where(
+                Task.kind == "ingest_file",
+                Task.status == "dead",
+                Task.last_error.is_not(None),
+                file_id_expr.in_(list(wanted)),
+            )
+            .order_by(Task.finished_at.desc(), Task.created_at.desc())
+        )
+    ).all()
+    errors: dict[str, str] = {}
+    for file_id, error in rows:
+        if file_id and error and file_id not in errors:
+            errors[file_id] = error
+    return errors

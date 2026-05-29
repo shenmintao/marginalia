@@ -177,6 +177,7 @@ const en = {
     deleteFileConfirm: (name: string) =>
       `Delete "${name}"?\n\nThe file is moved to trash and purged after 7 days.`,
     ingestFailed: "ingest failed",
+    ingestFailedReason: (reason: string) => `ingest failed: ${reason}`,
     folderIngestSummary: (
       total: number,
       done: number,
@@ -474,6 +475,7 @@ const zh: I18nStrings = {
     deleteFileConfirm: (name: string) =>
       `删除 "${name}"？\n\n该文件会移入回收站，并在 7 天后清理。`,
     ingestFailed: "ingest 失败",
+    ingestFailedReason: (reason: string) => `ingest 失败：${reason}`,
     folderIngestSummary: (
       total: number,
       done: number,

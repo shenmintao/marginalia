@@ -802,7 +802,7 @@ def _pattern_search(
 def _decode_text(buf: bytes) -> str:
     """Robust decode — text mime says "should be utf-8" but we tolerate
     BOM / utf-16 / arbitrary as last resort."""
-    for enc in ("utf-8", "utf-8-sig", "utf-16"):
+    for enc in ("utf-8-sig", "utf-8", "utf-16"):
         try:
             return buf.decode(enc)
         except UnicodeDecodeError:

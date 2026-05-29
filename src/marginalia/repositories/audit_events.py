@@ -56,3 +56,32 @@ async def delete_before(db: AsyncSession, cutoff: datetime) -> int:
             delete(AuditEvent).where(AuditEvent.occurred_at < cutoff)
         )
     ).rowcount or 0
+
+
+async def latest_failed_ingest_reasons_for_files(
+    db: AsyncSession, file_ids: list[str],
+) -> dict[str, str]:
+    """Latest audit `reason` for failed ingest_status changes per file_id."""
+    wanted = set(file_ids)
+    if not wanted:
+        return {}
+    file_id_expr = AuditEvent.payload["file_id"].as_string()
+    status_expr = AuditEvent.payload["status"].as_string()
+    reason_expr = AuditEvent.payload["reason"].as_string()
+    rows = (
+        await db.execute(
+            select(file_id_expr, reason_expr)
+            .where(
+                AuditEvent.kind == "ingest_status_changed",
+                status_expr == "failed",
+                reason_expr.is_not(None),
+                file_id_expr.in_(list(wanted)),
+            )
+            .order_by(AuditEvent.occurred_at.desc())
+        )
+    ).all()
+    reasons: dict[str, str] = {}
+    for file_id, reason in rows:
+        if file_id and reason and file_id not in reasons:
+            reasons[file_id] = reason
+    return reasons
