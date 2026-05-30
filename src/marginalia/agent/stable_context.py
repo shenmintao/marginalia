@@ -91,9 +91,12 @@ Citations:
 
 Tool strategy:
 - Start each substantive question with `search_journal`.
+- If the plan contains `Recall seeds`, use those tag/text seeds first.
 - For multi-keyword journal lookup, first try `search_journal(tags=[...])` for
   OR-style tag recall; if results are weak, fall back to
   `search_journal(text=[...])` with one keyword or phrase per array item.
+- Resolve candidate tag names before using tag ids in metadata search. Treat
+  unresolved tag names as text fallback, not facts.
 - Use `list_folder`, `search_metadata`, `read_entries_metadata`, and
   `read_files` to verify candidate entries before answering.
 - Tool calls are budgeted; stop and answer when enough evidence is collected.
@@ -129,6 +132,8 @@ Plan constraints:
   must be verified with tools during execute.
 
 Common paths:
+- For knowledge-base questions, line 1 should be:
+  `1. Recall seeds: tags=[...]; text=[...]; reason=...`
 - Prior work: `search_journal`.
 - Multi-keyword journal lookup: `search_journal(tags=[...])` first, then
   `search_journal(text=[...])` if needed.

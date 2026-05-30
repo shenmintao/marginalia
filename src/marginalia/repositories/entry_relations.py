@@ -52,22 +52,25 @@ def is_weaker_attribution(
 
 
 async def list_top_for_entry(
-    db: AsyncSession, entry_id: str, *, limit: int,
+    db: AsyncSession, entry_id: str, *, limit: int, vetted_only: bool = False,
 ) -> list[EntryRelation]:
     """Top-`limit` relations touching `entry_id` (either side), ordered by
     observation_count desc, then last_observed_at desc."""
+    stmt = (
+        select(EntryRelation)
+        .where(or_(
+            EntryRelation.entry_a_id == entry_id,
+            EntryRelation.entry_b_id == entry_id,
+        ))
+    )
+    if vetted_only:
+        stmt = stmt.where(EntryRelation.vetted.is_(True))
     rows = (
         await db.execute(
-            select(EntryRelation)
-            .where(or_(
-                EntryRelation.entry_a_id == entry_id,
-                EntryRelation.entry_b_id == entry_id,
-            ))
-            .order_by(
+            stmt.order_by(
                 EntryRelation.observation_count.desc(),
                 EntryRelation.last_observed_at.desc(),
-            )
-            .limit(limit)
+            ).limit(limit)
         )
     ).scalars().all()
     return list(rows)

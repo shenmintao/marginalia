@@ -96,7 +96,8 @@ Decision:
      that directly; an empty result is worth remembering.
    - entry_ids: include only entry IDs the agent actually cited or read and
      that support the result. Skip items that were inspected and rejected.
-   - tags: short topic tags useful for recall.
+   - tags: short topic tags useful for recall; include useful plan recall
+     seeds only if the turn's tools or answer confirmed them.
 
 Always write an entry for knowledge-base-related turns, including "not found"
 results. Only pure small talk should be empty.
@@ -182,6 +183,7 @@ async def handle_reflect_turn(payload: Mapping[str, Any]) -> None:
     reflect_tail = (
         f"Current turn summary:\n"
         f"- User question: {conversation.user_message}\n"
+        f"- Plan recall seeds: {_extract_plan_recall_seeds(conversation)}\n"
         f"- Tool calls: {tool_summary}\n"
         f"- Agent answer: {(conversation.agent_response or '(no answer)')[:500]}\n\n"
     )
@@ -264,6 +266,24 @@ def _parse_entry_block(block: str) -> dict[str, Any] | None:
         "entry_ids": entry_ids,
         "tags": tags,
     }
+
+
+def _extract_plan_recall_seeds(conversation: Conversation) -> str:
+    """Return the single Recall seeds line from stored plan_text, if present."""
+    for call in conversation.llm_calls or []:
+        if not isinstance(call, dict) or call.get("phase") != "plan":
+            continue
+        plan_text = call.get("plan_text") or (
+            call.get("extra") or {}
+        ).get("plan_text")
+        if not isinstance(plan_text, str):
+            continue
+        for line in plan_text.splitlines():
+            text = line.strip()
+            if "Recall seeds:" not in text:
+                continue
+            return text[:300]
+    return "(none)"
 
 
 def _collect_involved_entry_ids(conv: Conversation) -> list[str]:

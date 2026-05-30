@@ -1,7 +1,7 @@
 """read_entries_metadata — DESIGN.md §10.1.
 
 Batch-fetches full metadata for a set of entry_ids and automatically attaches
-`related_entries` derived from entry_relations (top by observation_count).
+vetted `related_entries` derived from entry_relations (top by observation_count).
 
 This is the canonical "agent has a list of candidates, now needs detail"
 endpoint. Pair with read_files when the agent decides to crack one open.
@@ -46,6 +46,12 @@ SCHEMA: dict[str, Any] = {
             "maximum": 30,
             "description": "How many related entries (per entry) to attach. Default 10.",
         },
+        "include_unvetted": {
+            "type": "boolean",
+            "description": (
+                "If true, include raw unvetted relation edges. Default false."
+            ),
+        },
     },
 }
 
@@ -55,10 +61,10 @@ SCHEMA: dict[str, Any] = {
     description=(
         "Batch-fetch full metadata for up to 50 entries in one call: file "
         "summary + description + extra + tags + catalog path + per-entry "
-        "extra, plus automatically-attached `related_entries` ranked by "
-        "observation_count from entry_relations. Use to triage candidates "
-        "before reading file bodies. If you have more than 50 candidates, "
-        "page through search_metadata first."
+        "extra, plus vetted `related_entries` ranked by observation_count "
+        "from entry_relations. Use to triage candidates before reading file "
+        "bodies. Pass include_unvetted=true only for exploratory debugging. "
+        "If you have more than 50 candidates, page through search_metadata first."
     ),
     schema=SCHEMA,
 )
@@ -69,6 +75,7 @@ async def read_entries_metadata(
 ) -> dict[str, Any]:
     entry_ids = list(args.get("entry_ids") or [])
     related_limit = min(int(args.get("related_limit") or 10), 30)
+    include_unvetted = bool(args.get("include_unvetted") or False)
     if not entry_ids:
         return {"entries": [], "count": 0}
 
@@ -123,6 +130,7 @@ async def read_entries_metadata(
         if related_limit:
             rel_rows = await relations_repo.list_top_for_entry(
                 db, entry.id, limit=related_limit,
+                vetted_only=not include_unvetted,
             )
             for r in rel_rows:
                 other_id = r.entry_b_id if r.entry_a_id == entry.id else r.entry_a_id
