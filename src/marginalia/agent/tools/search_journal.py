@@ -1,6 +1,6 @@
 """search_journal - DESIGN.md section 10.1.
 
-The investigator's first move: "did I work on something like this before?"
+Low-level journal lookup for focused follow-up and debugging.
 
 The journal is two tiers in one table (see [[journal-tiers]]):
   - `insight`: durable cross-session distillations.
@@ -114,12 +114,10 @@ SCHEMA: dict[str, Any] = {
 @tool(
     name="search_journal",
     description=(
-        "Skim your investigator's notebook for past insights. Always your "
-        "first move on a fresh user message - before reading any file. "
-        "Searches both durable cross-session insights and per-turn "
-        "reflect_turn notes by default. For multi-keyword recall, try tags "
-        "first; when falling back to text, pass `text` as an array so terms "
-        "are ORed."
+        "Low-level journal lookup for focused follow-up after "
+        "recall_knowledge, or for debugging prior notes. Searches durable "
+        "insights and reflect_turn notes by default. Text array terms are "
+        "ORed; other filters narrow the result."
     ),
     schema=SCHEMA,
 )

@@ -35,9 +35,9 @@ SCHEMA: dict[str, Any] = {
 @tool(
     name="resolve_tag",
     description=(
-        "Resolve a free-text tag name to a canonical tag id. Falls back to "
-        "tag_aliases if no direct hit, and follows alias_of one step. Returns "
-        "null when the tag does not exist (the agent should NOT coin new tags)."
+        "Low-level tag resolver for focused follow-up. recall_knowledge "
+        "already resolves tag seeds automatically. Returns null when the tag "
+        "does not exist; do not coin new tags."
     ),
     schema=SCHEMA,
 )

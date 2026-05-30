@@ -18,7 +18,7 @@ import { Send, Square, Sparkles } from "lucide-react";
 import { sessions } from "@/api/client";
 import { streamChat } from "@/api/chatStream";
 import type {
-  ChatEvent, ReplayedTurn, ReplayedToolCall,
+  ChatEvent, ReplayedTurn, ReplayedToolCall, ThinkingEventData,
 } from "@/types/api";
 import { TurnView, type Turn, type Step } from "@/components/TurnView";
 import { SessionList } from "@/components/SessionList";
@@ -346,7 +346,7 @@ function applyEventToTurnList(
         return appendStep(turn, "plan", t.chat.planReady, { plan: steps });
       }
       case "thinking":
-        return appendStep(turn, "thinking", t.chat.thinking);
+        return appendStep(turn, "thinking", thinkingLabel(ev.data, t));
       case "tool_call": {
         const d = (ev.data && typeof ev.data === "object")
           ? (ev.data as {
@@ -406,6 +406,18 @@ function applyEventToTurnList(
         return turn;
     }
   });
+}
+
+function thinkingLabel(data: unknown, t: I18nStrings): string {
+  if (!data || typeof data !== "object") return t.chat.thinking;
+  const d = data as ThinkingEventData;
+  const round = Number(d.round);
+  const limit = Number(d.limit);
+  if (!Number.isFinite(round) || round <= 0) return t.chat.thinking;
+  if (!Number.isFinite(limit) || limit <= 0) {
+    return `${t.chat.thinking} (${round})`;
+  }
+  return `${t.chat.thinking} (${round}/${limit})`;
 }
 
 // Map a server-replayed turn into the in-flight `Turn` shape so the

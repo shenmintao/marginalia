@@ -261,6 +261,12 @@ export interface PlanEventData {
   steps: string[];
 }
 
+export interface ThinkingEventData {
+  round?: number;
+  limit?: number;
+  final_continuation?: boolean;
+}
+
 export interface ToolCallEventData {
   name: string;
   arguments: Record<string, unknown>;

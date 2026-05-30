@@ -36,7 +36,7 @@ class AgentEvent:
       - "conversation" : data = conversation_id (sent right after conversation row opens)
       - "planning"     : transient marker; planner LLM call started, no data
       - "plan"         : data = plan_text (full plan after planner returns)
-      - "thinking"     : transient marker; execute LLM call started, no data
+      - "thinking"     : execute LLM call started; data = JSON{round, limit}
       - "tool_call"    : data = JSON{name, arguments, display}
       - "tool_result"  : data = JSON{name, ok, error?, preview?}
       - "user_artifact": data = JSON{tool, payload} - side-channel content

@@ -112,7 +112,7 @@ async def test_transcript_rewrites_entry_id() -> None:
             assert f"[raft.md](entry:{seeded['eid']})" in ar, ar
             assert "entry_id=" not in ar, ar
             plan = body["turns"][0]["plan_text"]
-            assert plan == "1. Read the Raft note.", plan
+            assert plan == "Read the Raft note.", plan
             print("[1] transcript rewrites raw entry_id to [name](entry:<uuid>)")
 
 

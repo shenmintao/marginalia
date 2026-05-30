@@ -248,6 +248,12 @@ async def main():
             assert "planning" in seq
             assert "plan" in seq
             assert seq.count("thinking") >= 2
+            thinking_rounds = [
+                json.loads(ev["data"])["round"]
+                for ev in events
+                if ev["event"] == "thinking"
+            ]
+            assert thinking_rounds[:2] == [1, 2], thinking_rounds
             assert seq.count("tool_call") == 1
             assert seq.count("tool_result") == 1
             assert seq.count("answer") == 1

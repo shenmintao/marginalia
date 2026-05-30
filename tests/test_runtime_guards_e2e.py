@@ -392,9 +392,27 @@ def test_canonical_args() -> None:
     print("[5] _canonical_args is order-stable")
 
 
+def test_public_plan_text_renders_recall_terms() -> None:
+    plan = (
+        "1. Recall seeds: tags=[\"劳动争议\"]; text=[\"23944庭审笔录\"]; reason=定位材料\n"
+        "2. Use recall_knowledge to retrieve candidates.\n"
+        "3. Verify candidates with read_entries_metadata.\n"
+    )
+    public = runtime._public_plan_text(plan)
+    assert "Recall seeds:" not in public, public
+    assert "tags=" not in public, public
+    assert public.splitlines() == [
+        "检索词: 劳动争议、23944庭审笔录",
+        "Use recall_knowledge to retrieve candidates.",
+        "Verify candidates with read_entries_metadata.",
+    ]
+    print("[6] public plan renders recall terms")
+
+
 async def main() -> None:
     await _create_schema()
     test_canonical_args()
+    test_public_plan_text_renders_recall_terms()
     await test_no_plan_fast_path()
     await test_tool_dedup()
     await test_doom_loop_nudge()
