@@ -117,6 +117,34 @@ class Settings(BaseSettings):
     # provider rate limits and local network bandwidth are the real cap.
     llm_ingest_concurrency: int = 10
 
+    # --- Embeddings / semantic recall --------------------------------------
+    # Uses Alibaba Cloud Model Studio (DashScope/Bailian) by default through
+    # its OpenAI-compatible /v1/embeddings endpoint. Keep this separate from
+    # LLM_* profiles so vision/chat credentials do not implicitly bleed into
+    # semantic recall.
+    embedding_provider: Literal["dashscope", "openai-compatible"] = "openai-compatible"
+    embedding_api_key: str | None = None
+    embedding_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    embedding_model: str = "text-embedding-v4"
+    embedding_dimensions: int = 1024
+    embedding_batch_size: int = 10
+    semantic_index_backend: Literal["auto", "file", "sqlite-vec"] = "auto"
+    semantic_recall_enabled: bool = False
+    semantic_recall_limit: int = 100
+
+    # --- Optional rerank ----------------------------------------------------
+    # Rerank is a second-stage retrieval refinement over already-recalled
+    # candidates. It has its own key so retrieval experiments do not silently
+    # consume chat/vision credentials.
+    rerank_enabled: bool = False
+    rerank_api_key: str | None = None
+    rerank_base_url: str = "https://dashscope.aliyuncs.com/compatible-api/v1"
+    rerank_model: str = "qwen3-rerank"
+    rerank_top_n: int = 80
+    rerank_max_doc_chars: int = 1800
+    rerank_concurrency: int = 10
+    evidence_selection: Literal["quota", "rerank"] = "quota"
+
     @property
     def database_url(self) -> str:
         if self.db_backend == "sqlite":

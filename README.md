@@ -93,6 +93,63 @@ The agent is instructed to start substantive questions with `search_journal`. Fo
 - `log`: logs and logrotate variants.
 - `archive`: zip, tar, 7z, rar, gz, bz2, xz, iso, cab and other py7zz-supported containers.
 
+## Retrieval Evaluation
+
+External retrieval datasets can be imported from a local BEIR-style directory:
+
+```text
+<dataset>/
+  corpus.jsonl
+  queries.jsonl
+  qrels/test.tsv
+```
+
+Import is synchronous. Each corpus document is written as a normal entry and
+immediately passed through the ingest pipeline, so the command returns only
+after the eval corpus is indexed.
+
+```bash
+MARGINALIA_HOME=./runtime/eval/scifact marginalia eval import-beir scifact ./datasets/scifact
+MARGINALIA_HOME=./runtime/eval/scifact EMBEDDING_API_KEY=... marginalia eval build-semantic-index scifact
+MARGINALIA_HOME=./runtime/eval/scifact marginalia eval run scifact --retriever search_metadata --k 10,50,100 --json report.json
+MARGINALIA_HOME=./runtime/eval/scifact marginalia eval run scifact --retriever semantic_recall --k 10,50,100
+MARGINALIA_HOME=./runtime/eval/scifact marginalia eval answer scifact --retriever recall_knowledge --query-id <qid> --timeout-seconds 300
+MARGINALIA_HOME=./runtime/eval/scifact marginalia eval answer-run scifact --retriever recall_knowledge --qrels-only --query-limit 20 --concurrency 10 --json answer-report.json
+MARGINALIA_HOME=./runtime/eval/scifact marginalia eval compare-report scifact --query-limit 30 --concurrency 3 --json compare-report.json
+```
+
+Use a dedicated `MARGINALIA_HOME` for external benchmarks unless you
+intentionally want benchmark documents inside your personal library.
+`eval build-semantic-index` uses the configured embedding provider. The
+default is Alibaba Cloud Model Studio / DashScope `text-embedding-v4`; set
+`EMBEDDING_API_KEY` before building. Embedding credentials are intentionally
+separate from `LLM_*` profiles. Semantic recall is optional and disabled by
+default; set `SEMANTIC_RECALL_ENABLED=true` to merge semantic candidates with
+the lexical metadata recall path. If the optional `sqlite-vec` dependency is
+installed, the semantic index also writes `vectors.sqlite` and search uses it
+before falling back to the file index. Install with `pip install -e ".[semantic]"`,
+or set `SEMANTIC_INDEX_BACKEND=file` to keep only the file backend.
+Optional reranking can refine the merged candidate pool before evidence
+selection. Enable it with `RERANK_ENABLED=true`, `RERANK_API_KEY=...`, and
+optionally `RERANK_MODEL=qwen3-rerank`. Rerank credentials are also separate
+from `LLM_*`; no chat or vision key is reused implicitly. Evidence selection
+defaults to `EVIDENCE_SELECTION=quota`; set `EVIDENCE_SELECTION=rerank` to take
+the reranked top evidence directly.
+The eval report treats `hit@k` and `candidate_recall@k` as the investigation
+candidate-pool metrics; MRR and nDCG are ranking-efficiency diagnostics.
+`eval answer` is a bounded final-answer probe: it retrieves candidates, reads
+limited source text, performs one answer-generation call, and reports whether
+the answer cited a qrels-relevant document. `eval answer-run` repeats the same
+bounded probe across imported queries and reports aggregate final-answer
+citation hit rate; use `--qrels-only` to apply `--query-limit` after filtering
+to imported qrels-backed queries and `--concurrency` to run independent answer
+probes in parallel. When BEIR query metadata includes SciFact-style
+SUPPORT/CONTRADICT labels, the answer report also includes label accuracy.
+`eval compare-report` runs a blind end-to-end comparison between a one-shot
+RAG report and the full ReAct investigation workflow on the same query set.
+When SciFact-style gold labels are available, the judge prioritizes verdict
+correctness before report completeness.
+
 ## CLI Surface
 
 Slash commands:

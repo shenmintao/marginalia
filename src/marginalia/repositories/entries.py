@@ -12,6 +12,7 @@ from typing import Any
 
 from sqlalchemy import (
     bindparam,
+    cast,
     column,
     delete,
     func,
@@ -21,6 +22,7 @@ from sqlalchemy import (
     select,
     table,
     update,
+    String,
     text as sa_text,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -32,6 +34,23 @@ from marginalia.db.models import EntryTag, File, FileEntry, TaskOutcome
 ACTIVE_LIFECYCLES = ("active", "manual_active")
 _MIN_TRIGRAM_FTS_TERM_LEN = 3
 _ENTRY_METADATA_FTS = table(ENTRY_METADATA_FTS_TABLE, column("entry_id"))
+_METADATA_FTS_STOPWORDS = {
+    "about",
+    "after",
+    "against",
+    "and",
+    "are",
+    "does",
+    "from",
+    "have",
+    "into",
+    "than",
+    "that",
+    "the",
+    "their",
+    "this",
+    "with",
+}
 
 
 def _folder_clause(folder_id: str | None):
@@ -82,10 +101,23 @@ def _text_terms(text: str | Sequence[str] | None) -> list[str]:
 def _metadata_fts_query_from_terms(terms: list[str]) -> str | None:
     if not terms:
         return None
-    cleaned = [term.replace("\x00", " ").strip() for term in terms]
-    if not all(len(term) >= _MIN_TRIGRAM_FTS_TERM_LEN for term in cleaned):
+    cleaned = []
+    for term in terms:
+        clean = _clean_metadata_fts_term(term)
+        if not clean:
+            continue
+        if clean.casefold() in _METADATA_FTS_STOPWORDS:
+            continue
+        if len(clean) < _MIN_TRIGRAM_FTS_TERM_LEN:
+            continue
+        cleaned.append(clean)
+    if not cleaned:
         return None
     return " OR ".join(_quote_fts_phrase(term) for term in cleaned if term)
+
+
+def _clean_metadata_fts_term(term: str) -> str:
+    return term.replace("\x00", " ").strip(" \t\r\n.,;:!?()[]{}\"'")
 
 
 def _quote_fts_phrase(term: str) -> str:
@@ -125,6 +157,21 @@ def _apply_metadata_fts_filter(stmt, fts_query: str):
         )
     )
     return stmt.where(FileEntry.id.in_(subquery))
+
+
+def _apply_metadata_fts_join(stmt, fts_query: str):
+    return (
+        stmt.join(_ENTRY_METADATA_FTS, _ENTRY_METADATA_FTS.c.entry_id == FileEntry.id)
+        .where(
+            literal_column(ENTRY_METADATA_FTS_TABLE).op("MATCH")(
+                bindparam("metadata_fts_query", fts_query)
+            )
+        )
+    )
+
+
+def _metadata_fts_rank():
+    return literal_column(f"bm25({ENTRY_METADATA_FTS_TABLE})")
 
 
 async def list_live_in_folder(
@@ -325,6 +372,7 @@ def _build_filtered_stmt(
             like = f"%{term}%"
             clauses.extend((
                 File.summary.ilike(like),
+                cast(File.description, String).ilike(like),
                 File.extra.ilike(like),
                 FileEntry.extra.ilike(like),
                 FileEntry.display_name.ilike(like),
@@ -386,8 +434,10 @@ async def search_filtered(
     if empty:
         return []
     if fts_query is not None:
-        stmt = _apply_metadata_fts_filter(stmt, fts_query)
-    stmt = stmt.order_by(FileEntry.updated_at.desc())
+        stmt = _apply_metadata_fts_join(stmt, fts_query)
+        stmt = stmt.order_by(_metadata_fts_rank(), FileEntry.updated_at.desc())
+    else:
+        stmt = stmt.order_by(FileEntry.updated_at.desc())
     if offset:
         stmt = stmt.offset(offset)
     if limit is not None:

@@ -168,6 +168,81 @@ Use `/upload` for files outside the vault. Use `/ingest` for files already insid
 
 Any non-slash input is sent to the agent.
 
+### Retrieval Evaluation
+
+`marginalia eval` is a non-interactive command group for external retrieval
+benchmarks. It currently imports local BEIR-style datasets:
+
+```text
+corpus.jsonl
+queries.jsonl
+qrels/test.tsv
+```
+
+Import runs ingest synchronously for every corpus document:
+
+```bash
+MARGINALIA_HOME=./runtime/eval/scifact marginalia eval import-beir scifact ./datasets/scifact
+```
+
+Build semantic recall with Bailian/DashScope `text-embedding-v4`:
+
+```bash
+MARGINALIA_HOME=./runtime/eval/scifact EMBEDDING_API_KEY=... marginalia eval build-semantic-index scifact
+```
+
+Run retrieval metrics after import:
+
+```bash
+MARGINALIA_HOME=./runtime/eval/scifact marginalia eval run scifact --retriever search_metadata --k 10,50,100
+MARGINALIA_HOME=./runtime/eval/scifact marginalia eval run scifact --retriever semantic_recall --k 10,50,100
+MARGINALIA_HOME=./runtime/eval/scifact marginalia eval run scifact --retriever recall_knowledge --json report.json
+```
+
+Probe one final answer with a hard wall-clock budget:
+
+```bash
+MARGINALIA_HOME=./runtime/eval/scifact marginalia eval answer scifact --retriever recall_knowledge --query-id <qid> --timeout-seconds 300 --json answer-report.json
+MARGINALIA_HOME=./runtime/eval/scifact marginalia eval answer-run scifact --retriever recall_knowledge --qrels-only --query-limit 20 --concurrency 10 --timeout-seconds 300 --json answer-run-report.json
+MARGINALIA_HOME=./runtime/eval/scifact marginalia eval compare-report scifact --query-limit 30 --concurrency 3 --timeout-seconds 300 --json compare-report.json
+```
+
+Reported metrics distinguish candidate-pool recall from ranking efficiency:
+hit@k answers whether at least one relevant document entered the candidate
+pool, candidate_recall@k answers how much labeled evidence entered it, and
+nDCG/MRR describe how early evidence appears. Use a dedicated
+`MARGINALIA_HOME` for external benchmarks to avoid mixing benchmark documents
+with your personal library. `eval answer` does not run the open-ended chat
+agent loop; it retrieves, reads bounded evidence, makes one final-answer LLM
+call, and reports whether the answer cited a qrels-relevant document. Use
+`eval answer-run` to repeat that bounded probe across dataset queries and get
+an aggregate final-answer citation hit rate. Add `--qrels-only` when
+`--query-limit` should count evaluated qrels-backed queries, and
+`--concurrency` to run independent answer probes in parallel. When query
+metadata includes SciFact-style SUPPORT/CONTRADICT labels, the report also
+includes label accuracy.
+Use `eval compare-report` when you want to compare the bounded one-shot RAG
+report path against the full ReAct investigation workflow. It runs both
+systems on the same queries and uses a blind pairwise judge; when gold verdict
+labels are present, correctness is judged before completeness.
+
+When a semantic index exists under `MARGINALIA_HOME/semantic-index/default`,
+`recall_knowledge` can merge semantic candidates with the existing FTS/BM25
+metadata path. Semantic recall is optional and disabled by default; enable it
+with `SEMANTIC_RECALL_ENABLED=true` after building an index. The embedding
+provider defaults to Bailian/DashScope `text-embedding-v4`; configure it with
+`EMBEDDING_API_KEY`. Embedding credentials are intentionally separate from
+`LLM_*` profiles. If `sqlite-vec` is installed through
+`pip install -e ".[semantic]"`, the index writes `vectors.sqlite` and semantic
+search uses it before falling back to the file index. Set
+`SEMANTIC_INDEX_BACKEND=file` to avoid sqlite-vec entirely.
+Optional second-stage reranking runs after hybrid recall and before evidence
+selection. Enable it with `RERANK_ENABLED=true` and `RERANK_API_KEY=...`;
+the default model is Bailian/DashScope `qwen3-rerank`. Rerank credentials are
+independent from `LLM_*` and embedding settings. `EVIDENCE_SELECTION=quota`
+keeps source quotas; `EVIDENCE_SELECTION=rerank` disables quotas and reads the
+reranked top evidence directly.
+
 ### Sessions and Export
 
 ```text

@@ -1,6 +1,6 @@
 [project]
 name = "marginalia"
-version = "0.1.4"
+version = "0.2.0"
 description = "A library-science-inspired personal knowledge management system with LLM agents."
 requires-python = ">=3.11"
 license = "AGPL-3.0-or-later"
@@ -53,6 +53,9 @@ marginalia = "marginalia.cli.repl:main"
 marginalia-worker = "marginalia.worker:main"
 
 [project.optional-dependencies]
+semantic = [
+    "sqlite-vec>=0.1.6",
+]
 dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
@@ -69,6 +72,18 @@ allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/marginalia"]
+
+[tool.hatch.build.targets.sdist]
+exclude = [
+    "/.venv",
+    "/.pytest_cache",
+    "/desktop/node_modules",
+    "/desktop/src-tauri/target",
+    "/dist",
+    "/runtime",
+    "/tests/_*_e2e_data",
+    "/tests/_e2e_data",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

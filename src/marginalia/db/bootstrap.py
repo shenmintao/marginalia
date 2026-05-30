@@ -236,14 +236,20 @@ def _ensure_entry_metadata_fts(bind) -> None:
 
     This intentionally indexes only existing DB metadata surfaces, not raw
     file contents: file_entries.display_name, file_entries.extra, files.summary,
-    files.extra, and files.original_ext. Triggers keep the virtual table in
-    sync after the initial backfill.
+    files.description, files.extra, and files.original_ext. Triggers keep the
+    virtual table in sync after the initial backfill.
     """
     if not _sqlite_supports_metadata_fts(bind):
         return
     inspector = sa.inspect(bind)
-    if not {"files", "file_entries"}.issubset(set(inspector.get_table_names())):
+    existing_tables = set(inspector.get_table_names())
+    if not {"files", "file_entries"}.issubset(existing_tables):
         return
+    if (
+        ENTRY_METADATA_FTS_TABLE in existing_tables
+        and "file_description" not in _entry_metadata_fts_columns(bind)
+    ):
+        _drop_entry_metadata_fts(bind)
 
     bind.execute(sa.text(f"""
         CREATE VIRTUAL TABLE IF NOT EXISTS {ENTRY_METADATA_FTS_TABLE}
@@ -251,6 +257,7 @@ def _ensure_entry_metadata_fts(bind) -> None:
             entry_id UNINDEXED,
             display_name,
             file_summary,
+            file_description,
             file_extra,
             file_original_ext,
             entry_extra,
@@ -262,13 +269,14 @@ def _ensure_entry_metadata_fts(bind) -> None:
         AFTER INSERT ON file_entries
         BEGIN
             INSERT INTO {ENTRY_METADATA_FTS_TABLE}
-                (rowid, entry_id, display_name, file_summary, file_extra,
-                 file_original_ext, entry_extra)
+                (rowid, entry_id, display_name, file_summary, file_description,
+                 file_extra, file_original_ext, entry_extra)
             SELECT
                 new.rowid,
                 new.id,
                 COALESCE(new.display_name, ''),
                 COALESCE(files.summary, ''),
+                COALESCE(files.description, ''),
                 COALESCE(files.extra, ''),
                 COALESCE(files.original_ext, ''),
                 COALESCE(new.extra, '')
@@ -283,13 +291,14 @@ def _ensure_entry_metadata_fts(bind) -> None:
             DELETE FROM {ENTRY_METADATA_FTS_TABLE}
             WHERE rowid = old.rowid;
             INSERT INTO {ENTRY_METADATA_FTS_TABLE}
-                (rowid, entry_id, display_name, file_summary, file_extra,
-                 file_original_ext, entry_extra)
+                (rowid, entry_id, display_name, file_summary, file_description,
+                 file_extra, file_original_ext, entry_extra)
             SELECT
                 new.rowid,
                 new.id,
                 COALESCE(new.display_name, ''),
                 COALESCE(files.summary, ''),
+                COALESCE(files.description, ''),
                 COALESCE(files.extra, ''),
                 COALESCE(files.original_ext, ''),
                 COALESCE(new.extra, '')
@@ -307,20 +316,21 @@ def _ensure_entry_metadata_fts(bind) -> None:
     """))
     bind.execute(sa.text(f"""
         CREATE TRIGGER IF NOT EXISTS entry_metadata_fts_files_au
-        AFTER UPDATE OF summary, extra, original_ext ON files
+        AFTER UPDATE OF summary, description, extra, original_ext ON files
         BEGIN
             DELETE FROM {ENTRY_METADATA_FTS_TABLE}
             WHERE rowid IN (
                 SELECT rowid FROM file_entries WHERE file_id = old.id
             );
             INSERT INTO {ENTRY_METADATA_FTS_TABLE}
-                (rowid, entry_id, display_name, file_summary, file_extra,
-                 file_original_ext, entry_extra)
+                (rowid, entry_id, display_name, file_summary, file_description,
+                 file_extra, file_original_ext, entry_extra)
             SELECT
                 file_entries.rowid,
                 file_entries.id,
                 COALESCE(file_entries.display_name, ''),
                 COALESCE(new.summary, ''),
+                COALESCE(new.description, ''),
                 COALESCE(new.extra, ''),
                 COALESCE(new.original_ext, ''),
                 COALESCE(file_entries.extra, '')
@@ -340,13 +350,14 @@ def _ensure_entry_metadata_fts(bind) -> None:
     """))
     bind.execute(sa.text(f"""
         INSERT INTO {ENTRY_METADATA_FTS_TABLE}
-            (rowid, entry_id, display_name, file_summary, file_extra,
-             file_original_ext, entry_extra)
+            (rowid, entry_id, display_name, file_summary, file_description,
+             file_extra, file_original_ext, entry_extra)
         SELECT
             file_entries.rowid,
             file_entries.id,
             COALESCE(file_entries.display_name, ''),
             COALESCE(files.summary, ''),
+            COALESCE(files.description, ''),
             COALESCE(files.extra, ''),
             COALESCE(files.original_ext, ''),
             COALESCE(file_entries.extra, '')
@@ -358,6 +369,30 @@ def _ensure_entry_metadata_fts(bind) -> None:
             WHERE existing.rowid = file_entries.rowid
         )
     """))
+
+
+def _entry_metadata_fts_columns(bind) -> set[str]:
+    if bind.dialect.name != "sqlite":
+        return set()
+    try:
+        rows = bind.execute(sa.text(
+            f"PRAGMA table_info({_quote_ident(ENTRY_METADATA_FTS_TABLE)})"
+        )).fetchall()
+    except Exception:
+        return set()
+    return {str(row[1]) for row in rows}
+
+
+def _ensure_entry_metadata_fts_description(bind) -> None:
+    """Rebuild older SQLite FTS tables so file.description is searchable."""
+    if bind.dialect.name != "sqlite":
+        return
+    inspector = sa.inspect(bind)
+    if ENTRY_METADATA_FTS_TABLE in inspector.get_table_names():
+        columns = _entry_metadata_fts_columns(bind)
+        if "file_description" not in columns:
+            _drop_entry_metadata_fts(bind)
+    _ensure_entry_metadata_fts(bind)
 
 
 def _drop_entry_metadata_fts(bind) -> None:
@@ -642,6 +677,7 @@ POST_BASELINE_SHIMS: tuple[tuple[str, Callable[[Any], None]], ...] = (
     ("0007_tasks_active_dedup_unique", _ensure_tasks_active_dedup_unique),
     ("0008_query_performance_indexes", _ensure_query_performance_indexes),
     ("0009_entry_metadata_fts", _ensure_entry_metadata_fts),
+    ("0010_entry_metadata_fts_description", _ensure_entry_metadata_fts_description),
 )
 
 ALEMBIC_HEAD_REVISION = POST_BASELINE_SHIMS[-1][0]
