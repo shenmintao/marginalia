@@ -301,6 +301,7 @@ jobs:
       - name: Publish release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
           if gh release view "$TAG" >/dev/null 2>&1; then
@@ -314,6 +315,7 @@ jobs:
       - name: Verify release assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
           expected=(
