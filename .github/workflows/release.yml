@@ -140,7 +140,7 @@ jobs:
             - macOS: Gatekeeper will refuse to open the .dmg. Run `xattr -dr com.apple.quarantine /Applications/Marginalia.app` after dragging it across.
           releaseDraft: true
           prerelease: false
-          releaseAssetNamePattern: "marginalia-v[version]-${{ matrix.target }}[setup][ext]"
+          assetNamePattern: "marginalia-v[version]-${{ matrix.target }}[setup][ext]"
           args: ${{ matrix.tauri_args || '' }}
 
       # Build the portable .zip after the NSIS installer is on disk so
