@@ -58,6 +58,12 @@ def test_known_shapes() -> None:
         "count": 1,
     }, "1 entry", "raft.pdf")
 
+    _check("recall_knowledge", {
+        "entries": [{"display_name": "raft.pdf"}, {"display_name": "paxos.pdf"}],
+        "notes": [{"note": "prior raft work"}],
+        "count": {"entries": 2, "notes": 1},
+    }, "2 entries", "raft.pdf", "1 note")
+
     _check("search_metadata", {
         "entries": [{"display_name": "raft.pdf"}, {"display_name": "paxos.pdf"}],
         "count": 2,
@@ -98,6 +104,10 @@ def test_list_catalogs_root_call_display() -> None:
 
 
 def test_search_text_array_call_display() -> None:
+    assert format_tool_call(
+        "recall_knowledge",
+        {"text": ["raft", "leader election"], "tags": ["consensus"]},
+    ) == 'recall_knowledge "raft" "leader election" tags \'consensus\''
     assert format_tool_call(
         "search_metadata", {"text": ["道路交通", "法规"], "limit": 10},
     ) == 'search_metadata "道路交通" "法规" (limit 10)'

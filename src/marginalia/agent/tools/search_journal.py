@@ -128,6 +128,21 @@ async def search_journal(
     ctx: ToolContext,
     args: Mapping[str, Any],
 ) -> dict[str, Any]:
+    return await run_search_journal(db, args, match="all")
+
+
+async def run_search_journal(
+    db: AsyncSession,
+    args: Mapping[str, Any],
+    *,
+    match: str = "all",
+) -> dict[str, Any]:
+    """Shared implementation for the public tool and recall wrappers.
+
+    Public `search_journal` keeps the historical "all filters must match"
+    contract. `recall_knowledge` uses `match="any"` so text/tag seeds widen
+    the journal pass without adding a public schema knob.
+    """
     text_q = normalize_text_queries(args.get("text")) or None
     entry_id = args.get("entry_id")
     tags = args.get("tags") or []
@@ -153,6 +168,8 @@ async def search_journal(
             }
 
     cutoff = datetime.now(timezone.utc) - timedelta(days=since_days)
+    python_text_filter = match == "any" and bool(text_q) and bool(tags)
+    repo_text_q = None if python_text_filter else text_q
 
     # The journal's JSON filters (entry_id + tags) cannot be expressed in
     # SQLite cleanly, so we post-filter in Python. To honor a true offset
@@ -170,7 +187,7 @@ async def search_journal(
             kinds=kinds,
             conversation_id=conversation_id,
             include_superseded=include_superseded,
-            text=text_q,
+            text=repo_text_q,
             order=order,
             limit=chunk,
             offset=cursor,
@@ -181,8 +198,13 @@ async def search_journal(
         for j in rows:
             if resolved_entry_id and resolved_entry_id not in (j.entry_ids or []):
                 continue
-            if tags:
-                note_tags = set(j.tags or [])
+            note_tags = set(j.tags or [])
+            if match == "any" and (text_q or tags):
+                text_ok = bool(text_q) and _note_matches_text(j.note, text_q)
+                tags_ok = bool(tags) and bool(note_tags.intersection(tags))
+                if not (text_ok or tags_ok):
+                    continue
+            elif tags:
                 if not note_tags.intersection(tags):
                     continue
             collected.append(j)
@@ -215,3 +237,8 @@ async def search_journal(
     if has_more:
         out["next_offset"] = offset + len(page)
     return out
+
+
+def _note_matches_text(note: str | None, terms: list[str]) -> bool:
+    haystack = (note or "").casefold()
+    return any(term.casefold() in haystack for term in terms)

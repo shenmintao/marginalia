@@ -12,8 +12,9 @@ Tools covered:
   3. resolve_tag (direct + alias_of + tag_aliases fallback + facet filter)
   4. materialize_view (catalog_subtree + tags_all + lifecycle)
   5. search_metadata (text OR array + tags_all + catalog_subtree + lifecycle + view_id)
-  6. read_entries_metadata (full hydration + related_entries)
-  7. read_files (section_id / heading / line_start-line_end / offset+max_chars / pattern)
+  6. recall_knowledge (tag resolution + journal + metadata recall)
+  7. read_entries_metadata (full hydration + related_entries)
+  8. read_files (section_id / heading / line_start-line_end / offset+max_chars / pattern)
 """
 from __future__ import annotations
 
@@ -38,8 +39,8 @@ get_settings.cache_clear()  # type: ignore[attr-defined]
 from marginalia.agent.tools import ToolContext, get_tool
 from marginalia.db.engine import get_engine, get_session_factory
 from marginalia.db.models import (
-    Base, Catalog, EntryRelation, EntryTag, File, FileEntry, Folder,
-    Tag, TagAlias, View,
+    Base, Catalog, Conversation, EntryRelation, EntryTag, File, FileEntry,
+    Folder, Journal, Session, Tag, TagAlias, View,
 )
 from marginalia.storage import get_storage
 from marginalia.utils.ids import new_id
@@ -204,6 +205,35 @@ async def _seed():
                  created_at=now, updated_at=now)
         s.add(v)
 
+        old_session = Session(
+            id=new_id(), started_at=now, ended_at=now, end_reason="normal",
+            initiating_user_message="(seed)",
+            turn_count=1, total_input_tokens=0, total_output_tokens=0,
+            total_cache_read=0, total_tool_calls=0, total_llm_calls=0,
+            total_duration_ms=0,
+        )
+        s.add(old_session)
+        await s.flush()
+        old_conv = Conversation(
+            id=new_id(), session_id=old_session.id, turn_index=0,
+            started_at=now, ended_at=now,
+            user_message="(seed)", agent_response="(seed)",
+            tool_calls=[], llm_calls=[],
+            total_input_tokens=0, total_output_tokens=0,
+            total_tool_calls=0, total_llm_calls=0, total_duration_ms=0,
+        )
+        s.add(old_conv)
+        await s.flush()
+        s.add(Journal(
+            id=new_id(),
+            conversation_id=old_conv.id,
+            note="Prior work links consensus leader election to the pipeline.",
+            entry_ids=[e_a.id],
+            tags=["consensus", "topic:consensus"],
+            source_kind="insight",
+            created_at=now,
+        ))
+
         await s.commit()
         return {
             "folder_root": f_root.id,
@@ -330,7 +360,44 @@ async def main():
     print("[5] search_metadata via view+tag:", sm_v_names)
     assert sm_v_names == {"paper-a.md"}, sm_v_names
 
-    # ---- 6. read_entries_metadata -----------------------------------------
+    # ---- 6. recall_knowledge ----------------------------------------------
+    rk = await _call("recall_knowledge", {
+        "tags": ["concensus", "no-such-tag"],
+        "text": ["paper-a"],
+    })
+    print("[6] recall_knowledge:",
+          rk["count"], rk["resolved_tags"], rk["unresolved_terms"])
+    assert rk["limit"] == 100
+    assert rk["resolved_tags"][0]["name"] == "consensus"
+    assert rk["resolved_tags"][0]["id"] == seeded["t_consensus"]
+    assert rk["unresolved_terms"] == ["no-such-tag"]
+    assert any("leader election" in n["note"] for n in rk["notes"])
+    assert seeded["e_a"] in rk["candidate_entry_ids"]
+    assert seeded["e_b"] in rk["candidate_entry_ids"]
+    assert rk["count"]["expansion_entry_ids"] == 0
+    assert set(rk["verify_entry_ids"]) >= {seeded["e_a"], seeded["e_b"]}
+    rk_entry_names = {e["display_name"] for e in rk["entries"]}
+    assert {"paper-a.md", "paper-b.md"}.issubset(rk_entry_names)
+    rk_anchor = await _call("recall_knowledge", {
+        "text": ["paper-a"],
+        "limit": 5,
+    })
+    assert seeded["e_a"] in rk_anchor["candidate_entry_ids"]
+    assert rk_anchor["verify_entry_ids"][0] == seeded["e_a"]
+    assert seeded["e_b"] in rk_anchor["verify_entry_ids"]
+    assert any(
+        row["entry_id"] == seeded["e_b"]
+        and row["matched_by"] == ["vetted_relation"]
+        for row in rk_anchor["expansion_entry_ids"]
+    ), rk_anchor["expansion_entry_ids"]
+    rk_facet = await _call("recall_knowledge", {
+        "tags": ["topic:consensus"],
+        "limit": 5,
+    })
+    assert rk_facet["resolved_tags"][0]["id"] == seeded["t_consensus"]
+    assert rk_facet["resolved_tags"][0]["facet"] == "topic"
+
+    # ---- 7. read_entries_metadata -----------------------------------------
     rem = await _call("read_entries_metadata", {
         "entry_ids": [seeded["e_a"], seeded["e_b"]],
         "related_limit": 10,
@@ -354,7 +421,7 @@ async def main():
         seeded["e_b"], seeded["e_archived"],
     }
 
-    # ---- 7. read_files -----------------------------------------------------
+    # ---- 8. read_files -----------------------------------------------------
     rf = await _call("read_files", {
         "requests": [
             {

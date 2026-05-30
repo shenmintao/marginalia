@@ -262,6 +262,16 @@ def format_tool_call(
             parts.append(", ".join(names))
         return " ".join(parts)
 
+    if name == "recall_knowledge":
+        for text in _query_labels(args.get("text")):
+            parts.append(f'"{text}"')
+        tags = args.get("tags") or []
+        if isinstance(tags, list) and tags:
+            parts.append("tags " + ", ".join(f"'{t}'" for t in tags if t))
+        if args.get("limit"):
+            parts.append(f"(limit {args['limit']})")
+        return " ".join(parts)
+
     if name == "search_metadata":
         for text in _query_labels(args.get("text")):
             parts.append(f'"{text}"')
@@ -492,6 +502,22 @@ def format_tool_result_preview(name: str, result: Any) -> str:
         more = "" if len(rows) <= 5 else f" +{len(rows) - 5} more"
         tail = f" · {len(errors)} invalid id{'s' if len(errors) != 1 else ''}" if errors else ""
         return f"{_ru(rows, 'entry', 'entries')}: {head}{more}{tail}"
+
+    if name == "recall_knowledge":
+        entries = result.get("entries") or []
+        notes = result.get("notes") or []
+        if not entries and not notes:
+            return "no candidates"
+        names = [
+            r.get("display_name") or ""
+            for r in entries[:5]
+            if isinstance(r, dict)
+        ]
+        head = ", ".join(n for n in names if n)
+        more = "" if len(entries) <= 5 else f" +{len(entries) - 5} more"
+        if head:
+            return f"{_ru(entries, 'entry', 'entries')}: {head}{more}; {_ru(notes, 'note')}"
+        return _ru(notes, "note")
 
     if name == "search_metadata":
         rows = result.get("entries") or []

@@ -90,15 +90,11 @@ Citations:
   the answer body and once in the footnote definitions.
 
 Tool strategy:
-- Start each substantive question with `search_journal`.
-- If the plan contains `Recall seeds`, use those tag/text seeds first.
-- For multi-keyword journal lookup, first try `search_journal(tags=[...])` for
-  OR-style tag recall; if results are weak, fall back to
-  `search_journal(text=[...])` with one keyword or phrase per array item.
-- Resolve candidate tag names before using tag ids in metadata search. Treat
-  unresolved tag names as text fallback, not facts.
-- Use `list_folder`, `search_metadata`, `read_entries_metadata`, and
-  `read_files` to verify candidate entries before answering.
+- For knowledge-base recall, start with `recall_knowledge` using plan seeds.
+- Batch-verify `verify_entry_ids` with `read_entries_metadata` before answering.
+- If recall is weak, verify one-hop candidates from `expansion_entry_ids`.
+- Use `read_files` only for the few candidates needed as evidence.
+- Use lower-level search tools only for focused follow-up or debugging.
 - Tool calls are budgeted; stop and answer when enough evidence is collected.
 
 Never modify user files, folders, or entries. Never describe raw tool-call
@@ -134,11 +130,8 @@ Plan constraints:
 Common paths:
 - For knowledge-base questions, line 1 should be:
   `1. Recall seeds: tags=[...]; text=[...]; reason=...`
-- Prior work: `search_journal`.
-- Multi-keyword journal lookup: `search_journal(tags=[...])` first, then
-  `search_journal(text=[...])` if needed.
-- Candidate files: `search_metadata(text=[...])` for keyword OR recall,
-  `list_folder`, `read_entries_metadata`, then `read_files`.
+- Knowledge-base recall: `recall_knowledge`, then `read_entries_metadata`,
+  then `read_files`.
 - Aggregation: `query_sql` / `query_log`.
 """
 

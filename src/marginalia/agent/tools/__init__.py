@@ -96,6 +96,7 @@ def _bootstrap() -> None:
     from marginalia.agent.tools import resolve_tag  # noqa: F401
     from marginalia.agent.tools import search_journal  # noqa: F401
     from marginalia.agent.tools import search_metadata  # noqa: F401
+    from marginalia.agent.tools import recall_knowledge  # noqa: F401
 
 
 _bootstrap()

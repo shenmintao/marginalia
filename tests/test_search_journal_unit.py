@@ -120,6 +120,35 @@ async def test_search_journal_text_array_is_or(
 
 
 @pytest.mark.asyncio
+async def test_run_search_journal_match_any_combines_text_and_tags(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mod = import_module("marginalia.agent.tools.search_journal")
+    rows = [
+        _row("alpha text", ["other"]),
+        _row("unrelated", ["beta"]),
+        _row("miss", ["other"]),
+    ]
+
+    async def fake_search(*args: Any, **kwargs: Any) -> list[Any]:
+        assert kwargs["text"] is None
+        return rows
+
+    monkeypatch.setattr(mod.journal_repo, "search", fake_search)
+
+    result = await mod.run_search_journal(
+        None,
+        {"text": ["alpha"], "tags": ["beta"], "limit": 10},
+        match="any",
+    )
+
+    assert [note["note"] for note in result["notes"]] == [
+        "alpha text",
+        "unrelated",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_search_journal_entry_id_uses_prefix_resolution(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
