@@ -38,6 +38,10 @@ jobs:
     name: Tauri (${{ matrix.target }})
     strategy:
       fail-fast: false
+      # tauri-action uploads to a draft release. Keep desktop uploads
+      # serialized so all matrix legs append to one draft instead of racing
+      # to create separate drafts for the same tag.
+      max-parallel: 1
       matrix:
         include:
           - target: windows-x64
@@ -249,3 +253,34 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: gh release edit "$TAG" --draft=false --latest
+
+      - name: Verify release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          expected=(
+            "marginalia-$TAG-windows-x64-setup.exe"
+            "marginalia-$TAG-windows-x64-portable.zip"
+            "marginalia-$TAG-windows-arm64-setup.exe"
+            "marginalia-$TAG-windows-arm64-portable.zip"
+            "marginalia-$TAG-macos-arm64.dmg"
+            "marginalia-$TAG-linux-x64.deb"
+            "marginalia-$TAG-linux-x64.rpm"
+            "marginalia-$TAG-linux-arm64.deb"
+            "marginalia-$TAG-linux-arm64.rpm"
+          )
+          assets="$(gh release view "$TAG" --json assets --jq '.assets[].name')"
+          missing=0
+          for asset in "${expected[@]}"; do
+            if ! grep -Fxq "$asset" <<< "$assets"; then
+              echo "::error::Missing release asset: $asset"
+              missing=1
+            fi
+          done
+          count="$(printf '%s\n' "$assets" | sed '/^$/d' | wc -l | tr -d ' ')"
+          if [ "$count" -ne "${#expected[@]}" ]; then
+            echo "::error::Expected ${#expected[@]} release assets, found $count"
+            missing=1
+          fi
+          exit "$missing"
