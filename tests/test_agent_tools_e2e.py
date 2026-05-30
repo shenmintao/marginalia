@@ -180,7 +180,16 @@ async def _seed():
             id=new_id(), entry_a_id=a, entry_b_id=b,
             note="Both papers compare consensus algorithms",
             source_kind="mine_session_cooccurrence", last_observed_at=now,
-            observation_count=3, created_at=now,
+            observation_count=3, vetted=True,
+            vetted_reason="seeded as vetted for metadata test",
+            vetted_at=now, vetted_observation_count=3, created_at=now,
+        ))
+        a2, b2 = sorted((e_a.id, e_archived.id))
+        s.add(EntryRelation(
+            id=new_id(), entry_a_id=a2, entry_b_id=b2,
+            note="Raw unvetted relation should be hidden by default",
+            source_kind="mine_tag_overlap", last_observed_at=now,
+            observation_count=9, created_at=now,
         ))
 
         # a view: filter_spec = entries under Research subtree with tag consensus
@@ -335,6 +344,15 @@ async def main():
     assert len(e_a_obj["related_entries"]) == 1
     assert e_a_obj["related_entries"][0]["entry_id"] == seeded["e_b"]
     assert e_a_obj["related_entries"][0]["observation_count"] == 3
+    rem_all = await _call("read_entries_metadata", {
+        "entry_ids": [seeded["e_a"]],
+        "related_limit": 10,
+        "include_unvetted": True,
+    })
+    all_related = rem_all["entries"][0]["related_entries"]
+    assert {r["entry_id"] for r in all_related} >= {
+        seeded["e_b"], seeded["e_archived"],
+    }
 
     # ---- 7. read_files -----------------------------------------------------
     rf = await _call("read_files", {
