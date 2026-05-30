@@ -1,23 +1,21 @@
 name: Release
 
-# Triggers on tags matching v*.*.* (e.g. v0.2.0). What it produces:
-#   - Tauri desktop bundles for Windows / macOS / Linux, attached to a
-#     GitHub Release. Each runner first prepares a self-contained
-#     python-build-standalone runtime under
+# Triggers on tags matching v*.*.* (for example v0.2.0).
+#
+# What it produces:
+#   - Tauri desktop bundles for Windows, macOS, and Linux. Each desktop
+#     runner prepares a self-contained python-build-standalone runtime under
 #     desktop/src-tauri/resources/backend/ via scripts/prepare-backend.mjs,
-#     so the shipped bundles do NOT depend on a system Python.
-#   - A portable .zip on Windows in addition to the NSIS installer.
+#     so shipped bundles do not depend on a system Python.
+#   - Windows portable zip packages in addition to NSIS installers.
 #   - Native desktop bundles for Windows x64/arm64, macOS arm64, and
 #     Linux x64/arm64.
-#   - A multi-arch Docker image pushed to ghcr.io/<owner>/marginalia
-#     tagged with the version and `latest`.
+#   - A multi-arch Docker image pushed to ghcr.io/<owner>/marginalia and
+#     tagged with the version and latest.
 #
-# Tag-driven releases keep the version in tauri.conf.json + pyproject.toml
-# in lockstep with the binary names. To cut a release:
-#   git tag v0.2.0 && git push origin v0.2.0
-#
-# A `workflow_dispatch` is also wired so we can re-run a release without
-# moving a tag if a runner had a transient failure.
+# Desktop matrix jobs build in parallel and upload workflow artifacts. The
+# publish job is the only job that mutates the GitHub Release, which avoids
+# draft-release races while keeping build parallelism.
 
 on:
   push:
@@ -29,19 +27,14 @@ on:
         required: true
 
 permissions:
-  contents: write   # create release, upload assets
-  packages: write   # push to ghcr.io
+  contents: write
+  packages: write
 
 jobs:
-  # ---- 1. Tauri desktop bundles ----------------------------------------------
   desktop:
     name: Tauri (${{ matrix.target }})
     strategy:
       fail-fast: false
-      # tauri-action uploads to a draft release. Keep desktop uploads
-      # serialized so all matrix legs append to one draft instead of racing
-      # to create separate drafts for the same tag.
-      max-parallel: 1
       matrix:
         include:
           - target: windows-x64
@@ -52,9 +45,6 @@ jobs:
             platform: windows
             runner: windows-11-arm
             tauri_args: "--bundles nsis"
-          # Apple Silicon only — we don't have an Apple Developer account,
-          # so x86_64 dmg signing is moot, and Apple Silicon Macs are the
-          # overwhelming share of new macOS hardware.
           - target: macos-arm64
             platform: macos
             runner: macos-15
@@ -62,16 +52,10 @@ jobs:
           - target: linux-x64
             platform: linux
             runner: ubuntu-latest
-            # AppImage is intentionally dropped: linuxdeploy chokes on the
-            # bundled python runtime's thousands of .so files. deb + rpm
-            # cover the supported distros without the fragility.
             tauri_args: "--bundles deb,rpm"
           - target: linux-arm64
             platform: linux
             runner: ubuntu-24.04-arm
-            # AppImage is intentionally dropped: linuxdeploy chokes on the
-            # bundled python runtime's thousands of .so files. deb + rpm
-            # cover the supported distros without the fragility.
             tauri_args: "--bundles deb,rpm"
     runs-on: ${{ matrix.runner }}
     steps:
@@ -85,9 +69,6 @@ jobs:
           cache: npm
           cache-dependency-path: desktop/package-lock.json
 
-      # The pip install . step inside prepare-backend.mjs needs a host
-      # Python to bootstrap; the standalone interpreter only takes over
-      # afterwards. Any 3.11+ works.
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -112,44 +93,15 @@ jobs:
         working-directory: desktop
         run: npm ci
 
-      # Download python-build-standalone, pip-install marginalia into it,
-      # and stage the result at desktop/src-tauri/resources/backend/.
-      # tauri.conf.json's bundle.resources picks that directory up.
       - name: Prepare backend sidecar
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: node scripts/prepare-backend.mjs
 
-      # tauri-action drives `tauri build`, picks the right bundle targets
-      # for the host OS, and uploads artifacts to a draft release. We let
-      # it create / amend the draft so all matrix legs converge on one
-      # Release page. tauri.conf.json's beforeBuildCommand runs the
-      # frontend build; the sidecar resource is already on disk by now.
-      - name: Build & upload bundles
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          projectPath: desktop
-          tagName: ${{ github.event.inputs.tag || github.ref_name }}
-          releaseName: "Marginalia ${{ github.event.inputs.tag || github.ref_name }}"
-          releaseBody: |
-            Desktop bundles built from `${{ github.event.inputs.tag || github.ref_name }}`.
-            Desktop targets: Windows x64/arm64, macOS arm64, Linux x64/arm64.
-            Each bundle ships a self-contained Python runtime — no system Python required.
-            Docker image: `ghcr.io/${{ github.repository_owner }}/marginalia:${{ github.event.inputs.tag || github.ref_name }}` (linux/amd64, linux/arm64)
+      - name: Build bundles
+        working-directory: desktop
+        run: npm run tauri:build -- ${{ matrix.tauri_args }}
 
-            **First-launch notes for unsigned binaries:**
-            - Windows: SmartScreen will say "Windows protected your PC". Click "More info" → "Run anyway".
-            - macOS: Gatekeeper will refuse to open the .dmg. Run `xattr -dr com.apple.quarantine /Applications/Marginalia.app` after dragging it across.
-          releaseDraft: true
-          prerelease: false
-          assetNamePattern: "marginalia-v[version]-${{ matrix.target }}[setup][ext]"
-          args: ${{ matrix.tauri_args || '' }}
-
-      # Build the portable .zip after the NSIS installer is on disk so
-      # we can reuse the same target/release/ tree NSIS was assembled
-      # from. The zip lands inside bundle/nsis/ and is normalized before upload.
       - name: Package Windows portable zip
         if: matrix.platform == 'windows'
         run: node scripts/package-windows-portable.mjs
@@ -173,16 +125,80 @@ jobs:
             Move-Item -LiteralPath $portables[0].FullName -Destination $expected -Force
           }
 
-      - name: Upload Windows portable zip
+      - name: Stage Windows release assets
         if: matrix.platform == 'windows'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
-          draft: true
-          fail_on_unmatched_files: true
-          files: desktop/src-tauri/target/release/bundle/nsis/*portable*.zip
+        shell: pwsh
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          $out = "release-assets"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          $nsisDir = "desktop/src-tauri/target/release/bundle/nsis"
+          $setups = @(Get-ChildItem -LiteralPath $nsisDir -Filter "*.exe" |
+            Where-Object { $_.Name -notmatch "portable" })
+          if ($setups.Count -ne 1) {
+            throw "Expected exactly one setup exe in $nsisDir, found $($setups.Count)."
+          }
+          Copy-Item -LiteralPath $setups[0].FullName `
+            -Destination (Join-Path $out "marginalia-$env:TAG-$env:TARGET-setup.exe") `
+            -Force
+          $portables = @(Get-ChildItem -LiteralPath $nsisDir -Filter "*portable*.zip")
+          if ($portables.Count -ne 1) {
+            throw "Expected exactly one portable zip in $nsisDir, found $($portables.Count)."
+          }
+          Copy-Item -LiteralPath $portables[0].FullName `
+            -Destination (Join-Path $out "marginalia-$env:TAG-$env:TARGET-portable.zip") `
+            -Force
 
-  # ---- 2. Docker image to ghcr.io --------------------------------------------
+      - name: Stage macOS release assets
+        if: matrix.platform == 'macos'
+        shell: bash
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          shopt -s nullglob
+          dmgs=(desktop/src-tauri/target/release/bundle/dmg/*.dmg)
+          if [ "${#dmgs[@]}" -ne 1 ]; then
+            echo "Expected exactly one dmg, found ${#dmgs[@]}" >&2
+            exit 1
+          fi
+          cp "${dmgs[0]}" "release-assets/marginalia-$TAG-$TARGET.dmg"
+
+      - name: Stage Linux release assets
+        if: matrix.platform == 'linux'
+        shell: bash
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          shopt -s nullglob
+          debs=(desktop/src-tauri/target/release/bundle/deb/*.deb)
+          rpms=(desktop/src-tauri/target/release/bundle/rpm/*.rpm)
+          if [ "${#debs[@]}" -ne 1 ]; then
+            echo "Expected exactly one deb, found ${#debs[@]}" >&2
+            exit 1
+          fi
+          if [ "${#rpms[@]}" -ne 1 ]; then
+            echo "Expected exactly one rpm, found ${#rpms[@]}" >&2
+            exit 1
+          fi
+          cp "${debs[0]}" "release-assets/marginalia-$TAG-$TARGET.deb"
+          cp "${rpms[0]}" "release-assets/marginalia-$TAG-$TARGET.rpm"
+
+      - name: Upload desktop artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.target }}
+          path: release-assets/*
+          if-no-files-found: error
+          retention-days: 7
+
   docker:
     name: Docker image (multi-arch)
     runs-on: ubuntu-latest
@@ -211,13 +227,6 @@ jobs:
             type=raw,value=${{ github.event.inputs.tag }},enable=${{ github.event_name == 'workflow_dispatch' }}
             type=raw,value=latest,enable=${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
 
-      # Override the in-Dockerfile mainland-China mirrors with upstream
-      # Debian / PyPI for public release builds. The Dockerfile keeps the
-      # Tsinghua defaults so local `docker build` from a CN dev machine
-      # stays fast.
-      # py7zz is pinned to fork-built platform wheels in pyproject.toml,
-      # including linux/aarch64, so the backend can now install under both
-      # Docker targets.
       - name: Build & push
         uses: docker/build-push-action@v6
         with:
@@ -232,27 +241,75 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  # ---- 3. Promote draft release to published ---------------------------------
   publish-release:
     name: Publish GitHub Release
     needs: [desktop, docker]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Download desktop artifacts
+        uses: actions/download-artifact@v4
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          pattern: desktop-*
+          path: release-assets
+          merge-multiple: true
 
-      # tauri-action created a draft; flip it to published once Docker is
-      # also available, so users never see a release whose Docker tag
-      # 404s. We can't use `gh api repos/.../releases/tags/<tag>` here:
-      # that endpoint 404s on drafts (drafts aren't bound to a tag yet),
-      # which is what tripped the v0.1.0 publish. `gh release edit`
-      # resolves drafts by name, so it works on both states.
-      - name: Publish draft
+      - name: Write release notes
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          cat > release-notes.md <<EOF
+          Desktop bundles built from \`$TAG\`.
+          Desktop targets: Windows x64/arm64, macOS arm64, Linux x64/arm64.
+          Each bundle ships a self-contained Python runtime; no system Python required.
+          Docker image: \`ghcr.io/${{ github.repository_owner }}/marginalia:$TAG\` (linux/amd64, linux/arm64)
+
+          **First-launch notes for unsigned binaries:**
+          - Windows: SmartScreen may say "Windows protected your PC". Click "More info" and then "Run anyway".
+          - macOS: Gatekeeper may refuse to open the .dmg. Run \`xattr -dr com.apple.quarantine /Applications/Marginalia.app\` after dragging it across.
+          EOF
+
+      - name: Verify built assets
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          expected=(
+            "marginalia-$TAG-windows-x64-setup.exe"
+            "marginalia-$TAG-windows-x64-portable.zip"
+            "marginalia-$TAG-windows-arm64-setup.exe"
+            "marginalia-$TAG-windows-arm64-portable.zip"
+            "marginalia-$TAG-macos-arm64.dmg"
+            "marginalia-$TAG-linux-x64.deb"
+            "marginalia-$TAG-linux-x64.rpm"
+            "marginalia-$TAG-linux-arm64.deb"
+            "marginalia-$TAG-linux-arm64.rpm"
+          )
+          assets="$(find release-assets -maxdepth 1 -type f -printf '%f\n' | sort)"
+          missing=0
+          for asset in "${expected[@]}"; do
+            if ! grep -Fxq "$asset" <<< "$assets"; then
+              echo "::error::Missing built asset: $asset"
+              missing=1
+            fi
+          done
+          count="$(printf '%s\n' "$assets" | sed '/^$/d' | wc -l | tr -d ' ')"
+          if [ "$count" -ne "${#expected[@]}" ]; then
+            echo "::error::Expected ${#expected[@]} built assets, found $count"
+            missing=1
+          fi
+          exit "$missing"
+
+      - name: Publish release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
-        run: gh release edit "$TAG" --draft=false --latest
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release delete "$TAG" --yes
+          fi
+          gh release create "$TAG" release-assets/* \
+            --title "Marginalia $TAG" \
+            --notes-file release-notes.md \
+            --latest
 
       - name: Verify release assets
         env:
