@@ -196,7 +196,7 @@ async def main():
     script = [
         # plan
         ChatResponse(
-            text="计划：先调 search_journal 找已有相关笔记，再综合给出回答。",
+            text="计划：先定位已有相关笔记，再综合给出回答。",
             tool_calls=[],
             stop_reason="end_turn",
             usage=TokenUsage(input_tokens=900, output_tokens=120, cache_read_tokens=600),

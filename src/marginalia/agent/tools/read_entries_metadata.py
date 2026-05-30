@@ -63,8 +63,7 @@ SCHEMA: dict[str, Any] = {
         "summary + description + extra + tags + catalog path + per-entry "
         "extra, plus vetted `related_entries` ranked by observation_count "
         "from entry_relations. Use to triage candidates before reading file "
-        "bodies; pass recall_knowledge.verify_entry_ids directly when "
-        "available. Pass include_unvetted=true only for exploratory debugging. "
+        "bodies. Pass include_unvetted=true only for exploratory debugging. "
         "If you have more than 50 candidates, page through search_metadata first."
     ),
     schema=SCHEMA,

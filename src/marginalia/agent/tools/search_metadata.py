@@ -82,8 +82,8 @@ SCHEMA: dict[str, Any] = {
 @tool(
     name="search_metadata",
     description=(
-        "Low-level metadata filter for focused follow-up after recall_knowledge. "
-        "Tag ids must be already "
+        "Low-level metadata filter for focused follow-up and narrow "
+        "file/folder/catalog targets. Tag ids must be already "
         "resolved (use resolve_tag). For multi-keyword text recall, pass "
         "`text` as an array; text terms are ORed, then combined with tags, "
         "catalog, folder, lifecycle, and kind filters by AND. Catalog "

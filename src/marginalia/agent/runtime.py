@@ -43,7 +43,6 @@ or risk duplicate-row IntegrityError on the second writer.
 from __future__ import annotations
 
 import asyncio
-import ast
 import copy
 import json
 import logging
@@ -498,7 +497,7 @@ _NUMBERED_LINE_RE = re.compile(r"^\s*\d+[.)]\s*")
 
 
 def _public_plan_text(plan_text: str) -> str:
-    """Render the user-visible plan without leaking internal seed syntax."""
+    """Return planner text with numbering stripped for the UI list."""
     if not plan_text:
         return plan_text
     if plan_text.lstrip().startswith(NO_PLAN_PREFIX):
@@ -508,64 +507,10 @@ def _public_plan_text(plan_text: str) -> str:
         line = raw.strip()
         if not line:
             continue
-        if "Recall seeds:" in line:
-            seed_line = _public_recall_seed_line(line)
-            if seed_line:
-                public_lines.append(seed_line)
-            continue
         line = _NUMBERED_LINE_RE.sub("", line).strip()
         if line:
             public_lines.append(line)
     return "\n".join(public_lines).strip()
-
-
-def _public_recall_seed_line(line: str) -> str | None:
-    cleaned = _NUMBERED_LINE_RE.sub("", line).strip()
-    terms = _parse_recall_seed_terms(cleaned)
-    if not terms:
-        return None
-    label = "检索词" if _has_cjk(" ".join(terms) + cleaned) else "Search terms"
-    max_terms = 18
-    shown = terms[:max_terms]
-    suffix = f" (+{len(terms) - max_terms})" if len(terms) > max_terms else ""
-    separator = "、" if label == "检索词" else ", "
-    return f"{label}: {separator.join(shown)}{suffix}"
-
-
-def _parse_recall_seed_terms(line: str) -> list[str]:
-    terms: list[str] = []
-    for key in ("tags", "text"):
-        match = re.search(rf"\b{key}\s*=\s*(\[[^\]]*\])", line)
-        if not match:
-            continue
-        for item in _parse_seed_list(match.group(1)):
-            _append_unique_text(terms, item)
-    return terms
-
-
-def _parse_seed_list(raw: str) -> list[str]:
-    try:
-        value = ast.literal_eval(raw)
-    except (SyntaxError, ValueError):
-        inner = raw.strip().strip("[]")
-        return [
-            item.strip().strip("\"'")
-            for item in inner.split(",")
-            if item.strip().strip("\"'")
-        ]
-    if not isinstance(value, list):
-        return []
-    return [str(item).strip() for item in value if str(item).strip()]
-
-
-def _append_unique_text(items: list[str], item: str) -> None:
-    key = item.casefold()
-    if key and key not in {existing.casefold() for existing in items}:
-        items.append(item)
-
-
-def _has_cjk(text: str) -> bool:
-    return any("\u4e00" <= ch <= "\u9fff" for ch in text)
 
 
 def _clean_session_name(raw: str) -> str:

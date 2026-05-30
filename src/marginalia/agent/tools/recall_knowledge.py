@@ -61,9 +61,10 @@ SCHEMA: dict[str, Any] = {
 @tool(
     name="recall_knowledge",
     description=(
-        "First-pass knowledge-base recall. Deterministically resolves plan "
-        "tag seeds, searches journal notes, searches entry metadata, and "
-        "returns compact candidates. Use before read_entries_metadata/read_files."
+        "Preferred high-level entrypoint for broad knowledge-base material "
+        "recall. Resolves tag hints, searches journal notes and entry "
+        "metadata, then returns compact candidate entries for verification "
+        "and file reading."
     ),
     schema=SCHEMA,
 )

@@ -35,7 +35,7 @@ class AgentEvent:
       - "session"      : data = session_id (sent on first event when session was implicitly created)
       - "conversation" : data = conversation_id (sent right after conversation row opens)
       - "planning"     : transient marker; planner LLM call started, no data
-      - "plan"         : data = plan_text (full plan after planner returns)
+      - "plan"         : data = cleaned plan text, or NO_PLAN text
       - "thinking"     : execute LLM call started; data = JSON{round, limit}
       - "tool_call"    : data = JSON{name, arguments, display}
       - "tool_result"  : data = JSON{name, ok, error?, preview?}

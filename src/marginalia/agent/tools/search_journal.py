@@ -114,8 +114,8 @@ SCHEMA: dict[str, Any] = {
 @tool(
     name="search_journal",
     description=(
-        "Low-level journal lookup for focused follow-up after "
-        "recall_knowledge, or for debugging prior notes. Searches durable "
+        "Low-level journal lookup for focused follow-up, prior-work checks, "
+        "or debugging prior notes. Searches durable "
         "insights and reflect_turn notes by default. Text array terms are "
         "ORed; other filters narrow the result."
     ),

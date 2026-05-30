@@ -90,9 +90,16 @@ Citations:
   the answer body and once in the footnote definitions.
 
 Tool strategy:
-- For knowledge-base recall, start with `recall_knowledge` using plan seeds.
-- Batch-verify `verify_entry_ids` with `read_entries_metadata` before answering.
-- If recall is weak, verify one-hop candidates from `expansion_entry_ids`.
+- Follow the plan, then choose the tool path that actually fits the step.
+- For broad knowledge-base material recall, prefer `recall_knowledge` using
+  terms derived from the user's request and the plan.
+- For niche or fuzzy questions, preserve the user's exact words, names,
+  numbers, dates, and file-like phrases as text recall terms; do not rely only
+  on popular snapshot tags.
+- When candidate entries are available, batch-verify them with
+  `read_entries_metadata` before answering.
+- If recall is weak, you may verify one-hop candidates from
+  `expansion_entry_ids`.
 - Use `read_files` only for the few candidates needed as evidence.
 - Use lower-level search tools only for focused follow-up or debugging.
 - Tool calls are budgeted; stop and answer when enough evidence is collected.
@@ -113,8 +120,8 @@ Output exactly one form, ending with a session title line:
    clearly external realtime data such as weather, prices, or breaking news.
    Do not include citations, footnotes, headings, tables, or `entry_id=`.
 
-2. A plain numbered plan, 3-5 lines, then:
-   `<number>. <short execute-phase tool step>`
+2. A plain numbered natural-language plan, 3-5 lines, then:
+   `<number>. <short investigation step in the user's language>`
    `Session name: <2-8 word title in the user's language>`
 
 Plan constraints:
@@ -124,15 +131,18 @@ Plan constraints:
   session's topic. Do not include quotes, Markdown, UUIDs, or `entry_id=`.
 - No preamble, XML, code block, Markdown heading/table/list, citation marker,
   footnote definition, UUID, `entry_id=`, or user-facing answer.
+- Do not mention tool names, function names, or tool arguments. The execute
+  phase chooses tools and parameters.
 - Do not answer from the snapshot. It is only an index overview; concrete facts
   must be verified with tools during execute.
 
 Common paths:
-- For knowledge-base questions, line 1 should be:
-  `1. Recall seeds: tags=[...]; text=[...]; reason=...`
-- Knowledge-base recall: `recall_knowledge`, then `read_entries_metadata`,
-  then `read_files`.
-- Aggregation: `query_sql` / `query_log`.
+- Knowledge-base questions: locate relevant materials, verify candidates,
+  read the key evidence, then synthesize the answer. Prefer starting with
+  broad material location when the user asks about files, evidence, notes, or
+  prior knowledge-base content.
+- Aggregation questions: identify the data needed, inspect the structured
+  records, then summarize the result.
 """
 
 

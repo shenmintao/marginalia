@@ -173,9 +173,9 @@ async def session_messages(
     The GUI uses this to rebuild the same `Turn[]` shape it builds from
     a live SSE stream — without re-executing anything.
 
-    `plan` is best-effort: planners record their plan_text in
-    `llm_calls[*]['extra']['plan_text']` when phase=='plan'. We surface
-    it if present.
+    `plan_text` is best-effort: planners record their internal plan text
+    in `llm_calls[*]['extra']['plan_text']` when phase=='plan'. We surface
+    cleaned display text if present.
     """
     s = await session_service.get_live(db, session_id)
     if s is None:

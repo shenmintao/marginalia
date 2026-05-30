@@ -157,7 +157,9 @@ export function ChatPage() {
         const cur = liveStreams.get(sid);
         if (cur && cur.generation === gen) {
           cur.turns = updateTurn(cur.turns, cur.turnIdx, (t) => ({
-            ...t, error: e instanceof Error ? e.message : String(e), done: true,
+            ...finishActiveThinking(t),
+            error: e instanceof Error ? e.message : String(e),
+            done: true,
           }));
           if (useChatSession.getState().sessionId === sid) setTurns(cur.turns);
         }
@@ -165,7 +167,10 @@ export function ChatPage() {
     } finally {
       const cur = liveStreams.get(sid);
       if (cur && cur.generation === gen) {
-        cur.turns = updateTurn(cur.turns, cur.turnIdx, (t) => ({ ...t, done: true }));
+        cur.turns = updateTurn(cur.turns, cur.turnIdx, (t) => ({
+          ...finishActiveThinking(t),
+          done: true,
+        }));
         liveStreams.delete(sid);
         if (useChatSession.getState().sessionId === sid) {
           setTurns(cur.turns);
@@ -182,7 +187,10 @@ export function ChatPage() {
       const live = liveStreams.get(sid);
       if (live) {
         live.abort.abort();
-        live.turns = updateTurn(live.turns, live.turnIdx, (t) => ({ ...t, done: true }));
+        live.turns = updateTurn(live.turns, live.turnIdx, (t) => ({
+          ...finishActiveThinking(t),
+          done: true,
+        }));
         liveStreams.delete(sid);
         setTurns(live.turns);
       }
@@ -341,13 +349,21 @@ function applyEventToTurnList(
       case "planning":
         return appendStep(turn, "planning", t.chat.planning);
       case "plan": {
-        const text = typeof ev.data === "string" ? ev.data : "";
-        const steps = text.trim().split("\n").filter(Boolean);
-        return appendStep(turn, "plan", t.chat.planReady, { plan: steps });
+        const noPlan = noPlanBody(ev.data);
+        if (noPlan !== null) {
+          return appendStep(turn, "plan", t.chat.noPlan, { plan: [noPlan] });
+        }
+        return appendStep(turn, "plan", t.chat.planReady, { plan: planLines(ev.data) });
       }
       case "thinking":
-        return appendStep(turn, "thinking", thinkingLabel(ev.data, t));
+        return appendStep(
+          finishActiveThinking(turn),
+          "thinking",
+          thinkingLabel(ev.data, t),
+          { startedAtMs: Date.now() },
+        );
       case "tool_call": {
+        const baseTurn = finishActiveThinking(turn);
         const d = (ev.data && typeof ev.data === "object")
           ? (ev.data as {
               name?: string;
@@ -363,7 +379,7 @@ function applyEventToTurnList(
           ? `${t.chat.calling} ${d.display}`
           : formatToolCall(d.name || t.chat.tool, args, t);
         return appendStep(
-          turn, "tool_call", label,
+          baseTurn, "tool_call", label,
           {
             args,
             toolName: d.name,
@@ -393,15 +409,22 @@ function applyEventToTurnList(
         );
       }
       case "answer":
-        return { ...turn, answer: typeof ev.data === "string" ? ev.data : ev.raw };
+        return {
+          ...finishActiveThinking(turn),
+          answer: typeof ev.data === "string" ? ev.data : ev.raw,
+        };
       case "done": {
         const d = (ev.data && typeof ev.data === "object")
           ? (ev.data as Turn["metrics"])
           : undefined;
-        return { ...turn, metrics: d, done: true };
+        return { ...finishActiveThinking(turn), metrics: d, done: true };
       }
       case "error":
-        return { ...turn, error: typeof ev.data === "string" ? ev.data : ev.raw, done: true };
+        return {
+          ...finishActiveThinking(turn),
+          error: typeof ev.data === "string" ? ev.data : ev.raw,
+          done: true,
+        };
       default:
         return turn;
     }
@@ -420,20 +443,32 @@ function thinkingLabel(data: unknown, t: I18nStrings): string {
   return `${t.chat.thinking} (${round}/${limit})`;
 }
 
+function noPlanBody(data: unknown): string | null {
+  if (typeof data !== "string") return null;
+  const text = data.trim();
+  if (!text.startsWith("NO_PLAN:")) return null;
+  return text.slice("NO_PLAN:".length).trim();
+}
+
+function planLines(data: unknown): string[] {
+  const text = typeof data === "string" ? data.trim() : "";
+  return text.split("\n").map((line) => line.trim()).filter(Boolean);
+}
+
 // Map a server-replayed turn into the in-flight `Turn` shape so the
 // existing TurnView renders historical sessions identically to live
 // ones. Plan_text becomes a synthetic plan step; tool_calls each
 // become tool_call steps with their result already marked.
 function replayedToTurn(rt: ReplayedTurn, t: I18nStrings): Turn {
   const steps: Step[] = [];
-  if (rt.plan_text && rt.plan_text.trim()) {
-    const text = rt.plan_text.trim();
-    if (text.startsWith("NO_PLAN:")) {
+  if (rt.plan_text) {
+    const noPlan = noPlanBody(rt.plan_text);
+    if (noPlan !== null) {
       steps.push({
-        kind: "plan", label: t.chat.noPlan, plan: [text.slice("NO_PLAN:".length).trim()],
+        kind: "plan", label: t.chat.noPlan, plan: [noPlan],
       });
     } else {
-      const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
+      const lines = planLines(rt.plan_text);
       steps.push({ kind: "plan", label: t.chat.planReady, plan: lines });
     }
   }
@@ -519,6 +554,7 @@ function appendStep(
     toolCallId?: string;
     entryNames?: Record<string, string>;
     tagNames?: Record<string, string>;
+    startedAtMs?: number;
   },
 ): Turn {
   return {
@@ -533,9 +569,23 @@ function appendStep(
       entryNames: extra?.entryNames,
       tagNames: extra?.tagNames,
       result: undefined,
+      startedAtMs: extra?.startedAtMs,
       durationMs: undefined,
     }],
   };
+}
+
+function finishActiveThinking(t: Turn): Turn {
+  let changed = false;
+  const nowMs = Date.now();
+  const steps = t.steps.map((step) => {
+    if (step.kind !== "thinking" || step.startedAtMs == null || step.durationMs != null) {
+      return step;
+    }
+    changed = true;
+    return { ...step, durationMs: Math.max(0, nowMs - step.startedAtMs) };
+  });
+  return changed ? { ...t, steps } : t;
 }
 
 function markResult(

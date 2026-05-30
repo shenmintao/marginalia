@@ -32,6 +32,7 @@ export interface Step {
   plan?: string[];
   result?: "ok" | "failed";
   resultPreview?: string;
+  startedAtMs?: number;
   durationMs?: number;
   error?: string;
 }
@@ -159,6 +160,7 @@ function StepRow({ step }: { step: Step }) {
   const Icon = ICONS[step.kind];
   const [open, setOpen] = useState(false);
   const { t } = useI18n();
+  const liveDurationMs = useLiveStepDurationMs(step);
   const argsAvailable = step.args && Object.keys(step.args).length > 0;
   // Once a tool result has streamed in, prefer showing it in the expander
   // — args are already encoded in the one-line label, so re-printing them
@@ -169,6 +171,7 @@ function StepRow({ step }: { step: Step }) {
     ? t.chat.expandResult
     : t.chat.expandArgs;
   const isPlan = step.kind === "plan" && step.plan && step.plan.length > 0;
+  const durationMs = step.durationMs ?? liveDurationMs;
   return (
     <li className="flex items-start gap-2 text-fg-muted">
       <Icon size={12} className={cn(
@@ -199,8 +202,8 @@ function StepRow({ step }: { step: Step }) {
           )}
           {step.result === "ok" && <CheckCircle2 size={11} className="text-accent" />}
           {step.result === "failed" && <XCircle size={11} className="text-danger" />}
-          {step.durationMs != null && (
-            <span className="text-fg-subtle">{shortDuration(step.durationMs / 1000)}</span>
+          {durationMs != null && (
+            <span className="text-fg-subtle">{shortDuration(durationMs / 1000)}</span>
           )}
         </div>
         {isPlan && (
@@ -235,6 +238,23 @@ function StepRow({ step }: { step: Step }) {
       </div>
     </li>
   );
+}
+
+function useLiveStepDurationMs(step: Step): number | undefined {
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    if (step.kind !== "thinking" || step.durationMs != null || step.startedAtMs == null) {
+      return;
+    }
+    setNowMs(Date.now());
+    const id = window.setInterval(() => setNowMs(Date.now()), 250);
+    return () => window.clearInterval(id);
+  }, [step.kind, step.durationMs, step.startedAtMs]);
+
+  if (step.kind !== "thinking" || step.durationMs != null || step.startedAtMs == null) {
+    return undefined;
+  }
+  return Math.max(0, nowMs - step.startedAtMs);
 }
 
 function MetricsLine({ m }: { m: TurnMetrics }) {
