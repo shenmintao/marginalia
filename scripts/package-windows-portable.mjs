@@ -86,8 +86,8 @@ const main = () => {
   }
 
   const version = readPackageVersion();
-  const arch = process.arch === 'arm64' ? 'arm64' : 'x86_64';
-  const zipBase = `${productName}_${version}_windows_${arch}_portable`;
+  const arch = process.arch === 'arm64' ? 'arm64' : 'x64';
+  const zipBase = `${productName.toLowerCase()}-v${version}-windows-${arch}-portable`;
   const stagingDir = path.join(releaseDir, '..', 'portable-staging');
   const stagingApp = path.join(stagingDir, zipBase);
 

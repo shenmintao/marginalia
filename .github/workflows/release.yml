@@ -43,23 +43,18 @@ jobs:
           - target: windows-x64
             platform: windows
             runner: windows-latest
-            artifact_glob: |
-              desktop/src-tauri/target/release/bundle/nsis/*.exe
-              desktop/src-tauri/target/release/bundle/nsis/*portable*.zip
+            tauri_args: "--bundles nsis"
           - target: windows-arm64
             platform: windows
             runner: windows-11-arm
-            artifact_glob: |
-              desktop/src-tauri/target/release/bundle/nsis/*.exe
-              desktop/src-tauri/target/release/bundle/nsis/*portable*.zip
+            tauri_args: "--bundles nsis"
           # Apple Silicon only — we don't have an Apple Developer account,
           # so x86_64 dmg signing is moot, and Apple Silicon Macs are the
           # overwhelming share of new macOS hardware.
           - target: macos-arm64
             platform: macos
             runner: macos-15
-            artifact_glob: |
-              desktop/src-tauri/target/release/bundle/dmg/*.dmg
+            tauri_args: "--bundles dmg"
           - target: linux-x64
             platform: linux
             runner: ubuntu-latest
@@ -67,9 +62,6 @@ jobs:
             # bundled python runtime's thousands of .so files. deb + rpm
             # cover the supported distros without the fragility.
             tauri_args: "--bundles deb,rpm"
-            artifact_glob: |
-              desktop/src-tauri/target/release/bundle/deb/*.deb
-              desktop/src-tauri/target/release/bundle/rpm/*.rpm
           - target: linux-arm64
             platform: linux
             runner: ubuntu-24.04-arm
@@ -77,9 +69,6 @@ jobs:
             # bundled python runtime's thousands of .so files. deb + rpm
             # cover the supported distros without the fragility.
             tauri_args: "--bundles deb,rpm"
-            artifact_glob: |
-              desktop/src-tauri/target/release/bundle/deb/*.deb
-              desktop/src-tauri/target/release/bundle/rpm/*.rpm
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -151,14 +140,34 @@ jobs:
             - macOS: Gatekeeper will refuse to open the .dmg. Run `xattr -dr com.apple.quarantine /Applications/Marginalia.app` after dragging it across.
           releaseDraft: true
           prerelease: false
+          releaseAssetNamePattern: "marginalia-v[version]-${{ matrix.target }}[setup][ext]"
           args: ${{ matrix.tauri_args || '' }}
 
       # Build the portable .zip after the NSIS installer is on disk so
       # we can reuse the same target/release/ tree NSIS was assembled
-      # from. The zip lands inside bundle/nsis/ to match the glob above.
+      # from. The zip lands inside bundle/nsis/ and is normalized before upload.
       - name: Package Windows portable zip
         if: matrix.platform == 'windows'
         run: node scripts/package-windows-portable.mjs
+
+      - name: Normalize Windows portable zip name
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          $nsisDir = "desktop/src-tauri/target/release/bundle/nsis"
+          $portables = @(Get-ChildItem -LiteralPath $nsisDir -Filter "*portable*.zip")
+          if ($portables.Count -ne 1) {
+            throw "Expected exactly one portable zip in $nsisDir, found $($portables.Count)."
+          }
+          $expected = [System.IO.Path]::GetFullPath(
+            (Join-Path $nsisDir "marginalia-$env:TAG-$env:TARGET-portable.zip")
+          )
+          if ($portables[0].FullName -ne $expected) {
+            Move-Item -LiteralPath $portables[0].FullName -Destination $expected -Force
+          }
 
       - name: Upload Windows portable zip
         if: matrix.platform == 'windows'
