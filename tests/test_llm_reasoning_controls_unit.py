@@ -8,7 +8,7 @@ from marginalia.config import LlmProfile
 from marginalia.llm.anthropic_adapter import AnthropicChatClient
 from marginalia.llm.factory import _UsageRecordingChatClient
 from marginalia.llm.openai_adapter import OpenAIChatClient
-from marginalia.llm.types import ChatMessage, ChatRequest, ChatResponse, TokenUsage
+from marginalia.llm.types import ChatMessage, ChatRequest, ChatResponse, TokenUsage, ToolDef
 
 
 async def _capture_openai_kwargs(
@@ -148,6 +148,65 @@ async def test_openai_adapter_passes_reasoning_controls_and_ignores_reasoning_co
     assert seen["extra_body"] == {"thinking": {"type": "enabled"}}
     assert resp.text == "final answer"
     assert "hidden" not in (resp.text or "")
+
+
+@pytest.mark.asyncio
+async def test_openai_adapter_parses_dsml_text_tool_calls() -> None:
+    async def fake_create(**kwargs):
+        return SimpleNamespace(
+            choices=[SimpleNamespace(
+                finish_reason="stop",
+                message=SimpleNamespace(
+                    content=(
+                        '<｜｜DSML｜｜tool_calls> '
+                        '<｜｜DSML｜｜invoke name="read_files"> '
+                        '<｜｜DSML｜｜parameter name="requests" string="false">'
+                        '[{"entry_id":"389594c8-defc-4fdb-ad4c-93b1f65a4534",'
+                        '"reads":[{"line_start":1,"line_end":100}]}]'
+                        '</｜｜DSML｜｜parameter> '
+                        '</｜｜DSML｜｜invoke> '
+                        '</｜｜DSML｜｜tool_calls>'
+                    ),
+                    tool_calls=[],
+                ),
+            )],
+            usage=SimpleNamespace(prompt_tokens=3, completion_tokens=2),
+        )
+
+    client = OpenAIChatClient(LlmProfile(
+        name="chat",
+        provider="openai-compatible",
+        api_key="sk-fake",
+        base_url="https://example.invalid",
+        model="fake-model",
+    ))
+    client._client = SimpleNamespace(  # type: ignore[assignment]
+        chat=SimpleNamespace(completions=SimpleNamespace(create=fake_create)),
+    )
+
+    resp = await client.complete(ChatRequest(
+        system=None,
+        messages=[ChatMessage(role="user", content="hello")],
+        max_tokens=32,
+        tools=[
+            ToolDef(
+                name="read_files",
+                description="read",
+                input_schema={"type": "object"},
+            ),
+        ],
+    ))
+
+    assert resp.text is None
+    assert resp.stop_reason == "tool_use"
+    assert len(resp.tool_calls) == 1
+    assert resp.tool_calls[0].name == "read_files"
+    assert resp.tool_calls[0].arguments == {
+        "requests": [{
+            "entry_id": "389594c8-defc-4fdb-ad4c-93b1f65a4534",
+            "reads": [{"line_start": 1, "line_end": 100}],
+        }],
+    }
 
 
 @pytest.mark.asyncio

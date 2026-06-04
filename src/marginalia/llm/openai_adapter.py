@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any, AsyncIterator
 
 from openai import AsyncOpenAI, BadRequestError
@@ -49,6 +50,23 @@ log = logging.getLogger(__name__)
 
 
 _OPENAI_PROVIDERS: tuple[str, ...] = ("openai", "openai-compatible")
+_DSML = r"[|｜]{2}\s*DSML\s*[|｜]{2}"
+_DSML_TOOL_CALLS_RE = re.compile(
+    rf"<\s*{_DSML}\s*tool_calls\s*>(?P<body>.*?)</\s*{_DSML}\s*tool_calls\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+_DSML_INVOKE_RE = re.compile(
+    rf"<\s*{_DSML}\s*invoke\b(?P<attrs>[^>]*)>(?P<body>.*?)</\s*{_DSML}\s*invoke\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+_DSML_PARAM_RE = re.compile(
+    rf"<\s*{_DSML}\s*parameter\b(?P<attrs>[^>]*)>(?P<body>.*?)"
+    rf"</\s*{_DSML}\s*parameter\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+_ATTR_RE = re.compile(
+    r"([A-Za-z_][A-Za-z0-9_:-]*)\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|([^\s>]+))"
+)
 
 
 class OpenAIChatClient(ChatClient):
@@ -237,6 +255,12 @@ class OpenAIChatClient(ChatClient):
             tool_calls.append(ToolCall(id=tc.id, name=tc.function.name, arguments=args))
 
         text = msg.content
+        if text:
+            text_tool_calls, stripped_text = _extract_dsml_tool_calls(text)
+            if text_tool_calls:
+                tool_calls.extend(text_tool_calls)
+                text = stripped_text or None
+                stop_reason = "tool_use"
         parsed_json = None
         if text and not tool_calls:
             try:
@@ -279,6 +303,73 @@ class OpenAIChatClient(ChatClient):
             parsed_json=parsed_json,
             raw_provider_response=resp,
         )
+
+
+def _extract_dsml_tool_calls(text: str) -> tuple[list[ToolCall], str]:
+    """Parse text-only DSML tool calls emitted by some compatible providers.
+
+    DeepSeek-style endpoints can occasionally return a tool call as assistant
+    content instead of the OpenAI `message.tool_calls` field, e.g.
+    `<｜｜DSML｜｜tool_calls> ... <｜｜DSML｜｜invoke name="read_files"> ...`.
+    Treat those blocks as real tool calls so runtime dispatch and tool-budget
+    guards still work, and remove the raw protocol markup from visible text.
+    """
+    calls: list[ToolCall] = []
+    for block in _DSML_TOOL_CALLS_RE.finditer(text):
+        for invoke_index, invoke in enumerate(_DSML_INVOKE_RE.finditer(block.group("body"))):
+            attrs = _parse_attrs(invoke.group("attrs"))
+            name = attrs.get("name")
+            if not name:
+                continue
+            arguments = _parse_dsml_arguments(invoke.group("body"))
+            calls.append(ToolCall(
+                id=f"dsml_{block.start()}_{invoke_index}",
+                name=name,
+                arguments=arguments,
+            ))
+    if not calls:
+        return [], text
+    stripped = _DSML_TOOL_CALLS_RE.sub("", text).strip()
+    return calls, stripped
+
+
+def _parse_dsml_arguments(body: str) -> dict[str, Any]:
+    arguments: dict[str, Any] = {}
+    for param in _DSML_PARAM_RE.finditer(body):
+        attrs = _parse_attrs(param.group("attrs"))
+        name = attrs.get("name")
+        if not name:
+            continue
+        raw_value = param.group("body").strip()
+        if attrs.get("string", "").lower() == "true":
+            arguments[name] = raw_value
+        else:
+            arguments[name] = _parse_jsonish_value(raw_value)
+    if arguments:
+        return arguments
+
+    raw_body = _DSML_PARAM_RE.sub("", body).strip()
+    parsed = _parse_jsonish_value(raw_body)
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _parse_attrs(text: str) -> dict[str, str]:
+    attrs: dict[str, str] = {}
+    for match in _ATTR_RE.finditer(text or ""):
+        attrs[match.group(1).lower()] = next(
+            value for value in match.groups()[1:] if value is not None
+        )
+    return attrs
+
+
+def _parse_jsonish_value(value: str) -> Any:
+    if not value:
+        return ""
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return value
+
 
 class OpenAIAudioClient(AudioClient):
     def __init__(self, profile: LlmProfile) -> None:

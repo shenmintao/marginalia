@@ -148,6 +148,19 @@ async def test_quick_mode_forces_third_execute_round_to_answer() -> None:
             parsed_json=None,
         ),
         ChatResponse(
+            text=None,
+            tool_calls=[
+                ToolCall(
+                    id="call_3",
+                    name=tool.name,
+                    arguments={"q": "zab"},
+                )
+            ],
+            stop_reason="tool_use",
+            usage=TokenUsage(input_tokens=190, output_tokens=25),
+            parsed_json=None,
+        ),
+        ChatResponse(
             text="Quick answer from collected evidence.",
             tool_calls=[],
             stop_reason="end_turn",
@@ -174,32 +187,34 @@ async def test_quick_mode_forces_third_execute_round_to_answer() -> None:
             )
 
     seq = [event["event"] for event in events]
-    assert seq.count("thinking") == 3, seq
-    assert seq.count("tool_call") == 2, seq
-    assert seq.count("tool_result") == 2, seq
+    assert seq.count("thinking") == 4, seq
+    assert seq.count("tool_call") == 3, seq
+    assert seq.count("tool_result") == 3, seq
     assert seq.count("answer") == 1, seq
-    assert tool.call_count == 2
+    assert tool.call_count == 3
 
     thinking = [
         json.loads(event["data"])
         for event in events
         if event["event"] == "thinking"
     ]
-    assert [item["limit"] for item in thinking] == [3, 3, 3]
-    assert [item["mode"] for item in thinking] == ["quick", "quick", "quick"]
-    assert [item["force_final_answer"] for item in thinking] == [False, False, True]
+    assert [item["limit"] for item in thinking] == [4, 4, 4, 4]
+    assert [item["mode"] for item in thinking] == ["quick", "quick", "quick", "quick"]
+    assert [item["force_final_answer"] for item in thinking] == [False, False, False, True]
 
-    assert len(chat.requests) == 4
+    assert len(chat.requests) == 5
     assert chat.requests[1].tools is not None
     assert chat.requests[1].tool_choice == "auto"
     assert chat.requests[2].tools is not None
     assert chat.requests[2].tool_choice == "auto"
-    assert chat.requests[3].tools is None
-    assert chat.requests[3].tool_choice == "none"
-    assert "Quick mode final execute round" in chat.requests[3].messages[-1].content
+    assert chat.requests[3].tools is not None
+    assert chat.requests[3].tool_choice == "auto"
+    assert chat.requests[4].tools is None
+    assert chat.requests[4].tool_choice == "none"
+    assert "Quick mode final execute round" in chat.requests[4].messages[-1].content
 
     done = json.loads(next(event["data"] for event in events if event["event"] == "done"))
-    assert done["llm_calls"] == 4
-    assert done["tool_calls"] == 2
+    assert done["llm_calls"] == 5
+    assert done["tool_calls"] == 3
     assert done["truncated"] is False
     assert done["mode"] == "quick"

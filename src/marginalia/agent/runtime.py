@@ -100,6 +100,7 @@ from marginalia.agent import tool_display
 log = logging.getLogger(__name__)
 
 MAX_TOOL_RESULT_LEN = 50_000
+QUICK_EXECUTE_MAX_TURNS = 4
 # Structured-truncation safety net: how many trim passes before falling
 # back to string slicing. Practically each pass halves one large list, so
 # 3 passes can absorb three different oversize lists in one payload.
@@ -576,6 +577,10 @@ def _strip_leaked_no_plan(answer: str) -> str:
     return answer
 
 
+def _prefers_zh(text: str) -> bool:
+    return any("\u4e00" <= ch <= "\u9fff" for ch in text or "")
+
+
 def _joined_final_answer(parts: list[str], fallback: str = "(no answer)") -> str:
     """Join final-answer fragments from max_tokens continuation calls."""
     text = "".join(p for p in parts if p)
@@ -902,7 +907,11 @@ async def _run_execute_phase(
     )
 
     settings = get_settings()
-    max_execute_turns = 3 if quick_mode else max(3, settings.agent_execute_max_turns)
+    max_execute_turns = (
+        QUICK_EXECUTE_MAX_TURNS
+        if quick_mode
+        else max(3, settings.agent_execute_max_turns)
+    )
     max_final_continuations = (
         0 if quick_mode else max(0, settings.agent_final_answer_continue_turns)
     )
@@ -999,6 +1008,21 @@ async def _run_execute_phase(
                     data=await _rewrite_footnotes_for_display(answer),
                 )
                 return
+            outcome.truncated = True
+            if options.mode == "quick" and _prefers_zh(user_message):
+                answer = (
+                    "快速模式已达到工具轮次上限，但模型仍尝试继续调用工具，"
+                    "因此这轮没有生成可靠答案。请切换到深度模式，或缩小问题范围后重试。"
+                )
+            else:
+                answer = (
+                    "The model attempted to call a tool after tool use was "
+                    "disabled, so no reliable final answer was produced. "
+                    "Try Deep mode or narrow the question."
+                )
+            outcome.answer = answer
+            yield AgentEvent(event_type="answer", data=answer)
+            return
 
         if resp.tool_calls and not tools_disabled:
             assistant_blocks: list = []
@@ -1159,6 +1183,8 @@ def _budget_tail(*, turn: int, limit: int, mode: str = "deep") -> str | None:
             return (
                 base
                 + " Quick mode final execute round: do not call tools. "
+                "Do not emit text tool-call markup such as DSML, XML, JSON, "
+                "or pseudo function calls. "
                 "Answer from the evidence already collected. If evidence is "
                 "insufficient, state the gap instead of expanding the search."
             )
