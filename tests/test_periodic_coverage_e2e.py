@@ -29,6 +29,7 @@ from marginalia.tasks.kinds import (
     KIND_PROPOSE_VIEWS,
     KIND_PRUNE,
     KIND_PURGE_DELETED_FILES,
+    KIND_REBUILD_SEMANTIC_INDEX,
     KIND_RECOVER_STUCK_TASKS,
     KIND_REFRESH_ENTRY_EXTRA,
     KIND_RESTRUCTURE_CATALOGS,
@@ -67,6 +68,9 @@ EXPECTED_NON_PERIODIC = {
     # dedup_key. It does NOT live in PERIODIC_INTERVALS (which only handles
     # global one-task-per-kind dispatch).
     "summarize_session",
+    # Rebuilding the semantic index is an explicit user/admin operation because
+    # it can re-embed the full corpus with the currently configured model.
+    KIND_REBUILD_SEMANTIC_INDEX,
     KIND_PERIODIC_TICK,
 }
 
