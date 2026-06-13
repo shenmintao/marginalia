@@ -18,7 +18,6 @@ from marginalia.repositories.task_outcomes import (
     record_outcome,
 )
 from marginalia.tasks.kinds import (
-    KIND_MINE_RELATIONS,
     KIND_PROPOSE_VIEWS,
     KIND_REFRESH_ENTRY_EXTRA,
     KIND_RESTRUCTURE_CATALOGS,
@@ -39,7 +38,6 @@ BUDGETED_MAINTENANCE_KINDS: frozenset[str] = frozenset({
     KIND_TAG_QUALITY,
     KIND_RESTRUCTURE_CATALOGS,
     KIND_SUGGEST_LIFECYCLE,
-    KIND_MINE_RELATIONS,
     KIND_VET_RELATIONS,
     KIND_PROPOSE_VIEWS,
     KIND_REFRESH_ENTRY_EXTRA,

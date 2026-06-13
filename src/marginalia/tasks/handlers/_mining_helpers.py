@@ -11,10 +11,6 @@ candidate edges with the same upsert shape:
 
 Centralising this avoids three copies drifting (e.g. one miner forgetting
 to preserve a stronger attribution while bumping observation_count).
-
-corpus_evidence does NOT use this helper: it only creates rows or upgrades
-strictly weaker rows after an LLM decision. That is different from the
-statistical miners, which can bump observation_count by aggregate counts.
 """
 from __future__ import annotations
 

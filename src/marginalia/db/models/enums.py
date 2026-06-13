@@ -41,8 +41,9 @@ ENTRY_RELATION_SOURCE_KINDS: tuple[str, ...] = (
 )
 # Historical note: the column once carried a server-side default of
 # "reflect" (relations written during the reflect phase). All such writes
-# have been delegated to the four offline miners above, so "reflect" is
-# no longer a legal value.
+# have been delegated to offline miners, so "reflect" is no longer a legal
+# value. "mine_corpus_evidence" is retained for historical rows from the
+# retired LLM-gated miner.
 
 
 def _in_clause(column: str, values: tuple[str, ...]) -> str:

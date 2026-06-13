@@ -148,7 +148,6 @@ def _install_fake_llm() -> None:
         "marginalia.tasks.handlers.refresh_entry_extra",
         "marginalia.tasks.handlers.vet_relations",
         "marginalia.tasks.handlers.summarize_session",
-        "marginalia.tasks.handlers.mine_corpus_evidence",
     ):
         try:
             mod = __import__(mod_name, fromlist=["get_chat_client"])
@@ -251,7 +250,7 @@ async def main() -> None:
                         entry_a_id=a_id,
                         entry_b_id=b_id,
                         note="old relation",
-                        source_kind="mine_corpus_evidence",
+                        source_kind="mine_citation_graph",
                         last_observed_at=now,
                         observation_count=3,
                         vetted=True,

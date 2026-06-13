@@ -39,6 +39,7 @@ from marginalia.repositories import tasks as tasks_repo
 from marginalia.tasks.enqueue import enqueue
 from marginalia.tasks.kinds import (
     KIND_INGEST_FILE,
+    KIND_MINE_RELATIONS,
     KIND_PERIODIC_TICK,
     KIND_PRUNE,
     KIND_RECOVER_STUCK_TASKS,
@@ -136,6 +137,7 @@ async def main() -> None:
     # Sanity: the LLM_DEPENDENT_KINDS set covers what we tested.
     assert KIND_INGEST_FILE in LLM_DEPENDENT_KINDS
     assert KIND_TAG_QUALITY in LLM_DEPENDENT_KINDS
+    assert KIND_MINE_RELATIONS not in LLM_DEPENDENT_KINDS
     assert KIND_RECOVER_STUCK_TASKS not in LLM_DEPENDENT_KINDS
     assert KIND_PRUNE not in LLM_DEPENDENT_KINDS
     print("PASS")

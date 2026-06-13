@@ -193,8 +193,7 @@ async def find_live_child_by_name(
 async def list_live_id_parent(
     db: AsyncSession,
 ) -> list[tuple[str, str | None]]:
-    """`(id, parent_id)` for every live catalog. Used by mine_corpus_evidence
-    to build per-entry catalog-ancestor sets without N round-trips."""
+    """`(id, parent_id)` for every live catalog."""
     rows = (
         await db.execute(
             select(Catalog.id, Catalog.parent_id)

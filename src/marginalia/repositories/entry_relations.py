@@ -17,6 +17,8 @@ SOURCE_STRENGTH: dict[str, int] = {
     "mine_tag_overlap": 10,
     "mine_session_cooccurrence": 20,
     "mine_citation_graph": 30,
+    # Historical compatibility: this miner is retired, but older databases may
+    # still carry the source_kind. Keep its stronger attribution stable.
     "mine_corpus_evidence": 40,
 }
 
@@ -34,21 +36,6 @@ def should_replace_attribution(
     existing_strength = SOURCE_STRENGTH.get(existing_source_kind or "", 0)
     new_strength = SOURCE_STRENGTH.get(new_source_kind, 0)
     return new_strength >= existing_strength
-
-
-def is_weaker_attribution(
-    existing_source_kind: str | None,
-    new_source_kind: str,
-) -> bool:
-    """Whether `existing_source_kind` is strictly weaker than `new_source_kind`.
-
-    Unlike `should_replace_attribution`, equal strength is not enough here.
-    Corpus evidence uses this to decide whether an existing row deserves an
-    LLM review for possible upgrade.
-    """
-    existing_strength = SOURCE_STRENGTH.get(existing_source_kind or "", 0)
-    new_strength = SOURCE_STRENGTH.get(new_source_kind, 0)
-    return new_strength > existing_strength
 
 
 async def list_top_for_entry(
@@ -342,8 +329,7 @@ async def list_direct_unvetted_candidates(
 
 
 async def list_pair_keys(db: AsyncSession) -> list[tuple[str, str]]:
-    """`(entry_a_id, entry_b_id)` for every relation row. Used by
-    mine_corpus_evidence to skip pairs already linked."""
+    """`(entry_a_id, entry_b_id)` for every relation row."""
     rows = (
         await db.execute(
             select(EntryRelation.entry_a_id, EntryRelation.entry_b_id)

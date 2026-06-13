@@ -916,7 +916,7 @@ async def list_live_active_with_file(
     db: AsyncSession,
 ) -> list[tuple[FileEntry, File]]:
     """Live entries with lifecycle in {active, manual_active} joined to their
-    live file rows. Used by mine_corpus_evidence's candidate-pool builder."""
+    live file rows."""
     rows = (
         await db.execute(
             select(FileEntry, File)

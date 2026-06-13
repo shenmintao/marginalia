@@ -483,7 +483,6 @@ Signals:
 - session co-occurrence from journal rows;
 - tag overlap;
 - citation co-citation inside agent answers;
-- corpus-evidence review for candidate pairs.
 
 Pipeline:
 

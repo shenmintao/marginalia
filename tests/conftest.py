@@ -55,7 +55,6 @@ _PATCH_TARGETS: dict[str, tuple[str, ...]] = {
     ),
     "marginalia.pipelines.text": ("get_chat_client",),
     "marginalia.tasks.handlers.enrich_tags": ("get_chat_client",),
-    "marginalia.tasks.handlers.mine_corpus_evidence": ("get_chat_client",),
     "marginalia.tasks.handlers.normalize_tags": ("get_chat_client",),
     "marginalia.tasks.handlers.periodic_tick": ("bootstrap_periodic_tick",),
     "marginalia.tasks.handlers.propose_views": ("get_chat_client",),

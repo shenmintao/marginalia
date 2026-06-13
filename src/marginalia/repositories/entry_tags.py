@@ -148,8 +148,7 @@ async def list_tag_ids_for_entries(
     db: AsyncSession, entry_ids: list[str],
 ) -> list[tuple[str, str]]:
     """`(entry_id, tag_id)` for every entry_tag row whose entry is in
-    `entry_ids` (no live filter). Used by mine_corpus_evidence to build
-    its tag-overlap signal."""
+    `entry_ids` (no live filter)."""
     if not entry_ids:
         return []
     rows = (

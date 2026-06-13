@@ -80,8 +80,7 @@ async def select_object_ids(
     object_kind: str,
 ) -> set[str]:
     """Every object_id this task ever recorded for this object_kind, ignoring
-    age. Used by mine_corpus_evidence to skip pairs that have ever been
-    LLM-judged."""
+    age. Used by maintenance tasks that need durable idempotence."""
     rows = (
         await session.execute(
             select(TaskOutcome.object_id.distinct()).where(

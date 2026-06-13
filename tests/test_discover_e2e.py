@@ -12,8 +12,8 @@ Verifies:
   3. Empty seed (entry with no relations) returns [].
   4. find_related agent tool wraps the service correctly.
   5. Different source_kinds (mine_session_cooccurrence + mine_tag_overlap
-     + mine_citation_graph + mine_corpus_evidence) all contribute to walk weight —
-     they share one observation_count column.
+     + mine_citation_graph) all contribute to walk weight — they share one
+     observation_count column.
 """
 from __future__ import annotations
 
@@ -126,7 +126,7 @@ async def _seed():
         mk_rel("A", "C", 5, "mine_tag_overlap")
         mk_rel("B", "D", 5, "mine_citation_graph")
         mk_rel("C", "D", 3, "mine_tag_overlap")
-        mk_rel("D", "E", 2, "mine_corpus_evidence")
+        mk_rel("D", "E", 2, "mine_citation_graph")
         # G is soft-deleted; relation should be filtered out at load.
         mk_rel("A", "G", 8, "mine_session_cooccurrence")
 
