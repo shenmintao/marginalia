@@ -43,31 +43,31 @@
     "linux": {
       "deb": {
         "files": {
-          "package/linux/marginalia": "/usr/bin/marginalia",
-          "package/linux/marginalia-mcp": "/usr/bin/marginalia-mcp",
-          "package/linux/marginalia-worker": "/usr/bin/marginalia-worker"
+          "/usr/bin/marginalia": "package/linux/marginalia",
+          "/usr/bin/marginalia-mcp": "package/linux/marginalia-mcp",
+          "/usr/bin/marginalia-worker": "package/linux/marginalia-worker"
         }
       },
       "rpm": {
         "files": {
-          "package/linux/marginalia": "/usr/bin/marginalia",
-          "package/linux/marginalia-mcp": "/usr/bin/marginalia-mcp",
-          "package/linux/marginalia-worker": "/usr/bin/marginalia-worker"
+          "/usr/bin/marginalia": "package/linux/marginalia",
+          "/usr/bin/marginalia-mcp": "package/linux/marginalia-mcp",
+          "/usr/bin/marginalia-worker": "package/linux/marginalia-worker"
         }
       },
       "appimage": {
         "files": {
-          "package/linux/marginalia": "usr/bin/marginalia",
-          "package/linux/marginalia-mcp": "usr/bin/marginalia-mcp",
-          "package/linux/marginalia-worker": "usr/bin/marginalia-worker"
+          "usr/bin/marginalia": "package/linux/marginalia",
+          "usr/bin/marginalia-mcp": "package/linux/marginalia-mcp",
+          "usr/bin/marginalia-worker": "package/linux/marginalia-worker"
         }
       }
     },
     "macOS": {
       "files": {
-        "package/macos/marginalia": "MacOS/marginalia",
-        "package/macos/marginalia-mcp": "MacOS/marginalia-mcp",
-        "package/macos/marginalia-worker": "MacOS/marginalia-worker"
+        "MacOS/marginalia": "package/macos/marginalia",
+        "MacOS/marginalia-mcp": "package/macos/marginalia-mcp",
+        "MacOS/marginalia-worker": "package/macos/marginalia-worker"
       }
     },
     "windows": {
