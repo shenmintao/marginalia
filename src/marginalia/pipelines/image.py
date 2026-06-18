@@ -133,7 +133,6 @@ IMAGE_PIPELINE_SCHEMA: dict[str, Any] = {}
 
 @register_pipeline(
     mimes=("image/png", "image/jpeg", "image/jpg", "image/gif", "image/webp"),
-    mime_prefixes=("image/",),
     exts=(".png", ".jpg", ".jpeg", ".gif", ".webp"),
 )
 class ImagePipeline(Pipeline):
