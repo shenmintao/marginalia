@@ -71,6 +71,8 @@ marginalia init
 编辑 `.env`:
 
 ```ini
+MARGINALIA_API_HOST=127.0.0.1
+MARGINALIA_API_PORT=8000
 LLM_DEFAULT_PROVIDER=openai
 LLM_DEFAULT_API_KEY=sk-...
 LLM_DEFAULT_MODEL=gpt-4o-mini
@@ -91,6 +93,18 @@ marginalia> 比较一下 raft 和 paxos
 
 `marginalia` 命令是单进程——server / worker / CLI 全在里面,不需要开
 第二个终端。第一次启动会自动初始化数据库 schema,不需要手动跑 migration。
+
+如果希望桌面端、CLI、MCP 或外部自动化共用同一个后端,启动可复用的 HTTP
+后端:
+
+```bash
+marginalia serve
+```
+
+`marginalia serve` 会读取 `.env` 里的 `MARGINALIA_API_HOST` 和
+`MARGINALIA_API_PORT`,并把当前实际 URL 写到
+`MARGINALIA_HOME/runtime/server.json`。桌面端和 CLI 会自动发现这个文件;
+显式传入 `--server URL` 或设置 `MARGINALIA_SERVER` 时仍然优先使用显式配置。
 
 默认你的文件以真实文件夹形式存在 `~/Marginalia/library/...` 下。可以
 在 Finder 里浏览、用 `rsync` / `git` 备份、用任何编辑器修改——库就是
@@ -405,7 +419,7 @@ HTTP 不经过 socket——`httpx.ASGITransport` 直接调 ASGI app。99% 场景
 ```
 
 ```bash
-uvicorn marginalia.main:app --host 0.0.0.0 --port 8000
+marginalia serve --host 0.0.0.0 --port 8000
 marginalia --server http://server.lan:8000
 # 如果 server 设置了 MARGINALIA_API_TOKEN:
 marginalia --server http://server.lan:8000 --api-token "$MARGINALIA_API_TOKEN"

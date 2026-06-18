@@ -30,6 +30,11 @@ MARGINALIA_HOME=./data
 
 DB_BACKEND=sqlite
 
+# HTTP backend bind settings. `marginalia serve`, the desktop app, and
+# auto-discovery all use these values when they are present.
+MARGINALIA_API_HOST=127.0.0.1
+MARGINALIA_API_PORT=8000
+
 # mirror = folder-tree on disk matching the user's intent (default)
 # local  = UUID-flat object pool; faster, dedup-on, less human-friendly
 # s3     = remote object storage; configure S3_* below

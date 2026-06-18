@@ -170,6 +170,8 @@ def test_init_project_creates_artifacts() -> None:
         assert entry in gi, f"missing entry {entry!r} in .gitignore"
     env = (tgt / ".env").read_text(encoding="utf-8")
     assert "DB_BACKEND" in env
+    assert "MARGINALIA_API_HOST" in env
+    assert "MARGINALIA_API_PORT" in env
     assert "STORAGE_BACKEND" in env
     assert "LLM_DEFAULT_API_KEY" in env
     assert "EMBEDDING_API_KEY" in env
@@ -451,7 +453,7 @@ def test_embedded_main_picks_remote_when_server_arg_given() -> None:
 
         _sys.argv = ["marginalia"]
         repl_mod.main()
-        assert captured["target"] == "_run_embedded", captured
+        assert captured["target"] == "_run_discovered_or_embedded", captured
 
         _sys.argv = ["marginalia", "--server", "http://example:9999"]
         repl_mod.main()
@@ -471,6 +473,110 @@ def test_embedded_main_picks_remote_when_server_arg_given() -> None:
     print("[A5] main() picks embedded vs remote correctly")
 
 
+def test_discovered_backend_precedes_embedded_mode() -> None:
+    """No-arg `marginalia` should reuse a live backend before embedding."""
+    import asyncio
+
+    from marginalia.cli import repl as repl_mod
+
+    calls: list[dict[str, object]] = []
+    embedded_called = False
+
+    async def _fake_discover() -> str:
+        return "http://127.0.0.1:8765"
+
+    async def _fake_run_repl(**kwargs) -> int:
+        calls.append(kwargs)
+        return 0
+
+    async def _fake_embedded() -> int:
+        nonlocal embedded_called
+        embedded_called = True
+        return 99
+
+    real_discover = repl_mod._discover_remote_url
+    real_run_repl = repl_mod.run_repl
+    real_embedded = repl_mod._run_embedded
+    try:
+        repl_mod._discover_remote_url = _fake_discover  # type: ignore[assignment]
+        repl_mod.run_repl = _fake_run_repl  # type: ignore[assignment]
+        repl_mod._run_embedded = _fake_embedded  # type: ignore[assignment]
+
+        rc = asyncio.run(repl_mod._run_discovered_or_embedded("token-123"))
+    finally:
+        repl_mod._discover_remote_url = real_discover  # type: ignore[assignment]
+        repl_mod.run_repl = real_run_repl  # type: ignore[assignment]
+        repl_mod._run_embedded = real_embedded  # type: ignore[assignment]
+
+    assert rc == 0
+    assert embedded_called is False
+    assert calls == [
+        {
+            "base_url": "http://127.0.0.1:8765",
+            "api_token": "token-123",
+            "mode": "remote",
+        }
+    ]
+    print("[A6] discovered backend is preferred over embedded mode")
+
+
+def test_discovery_falls_back_to_embedded_mode() -> None:
+    """No discovered backend should preserve the historical embedded REPL."""
+    import asyncio
+
+    from marginalia.cli import repl as repl_mod
+
+    async def _fake_discover() -> None:
+        return None
+
+    async def _fake_embedded() -> int:
+        return 7
+
+    real_discover = repl_mod._discover_remote_url
+    real_embedded = repl_mod._run_embedded
+    try:
+        repl_mod._discover_remote_url = _fake_discover  # type: ignore[assignment]
+        repl_mod._run_embedded = _fake_embedded  # type: ignore[assignment]
+
+        rc = asyncio.run(repl_mod._run_discovered_or_embedded(None))
+    finally:
+        repl_mod._discover_remote_url = real_discover  # type: ignore[assignment]
+        repl_mod._run_embedded = real_embedded  # type: ignore[assignment]
+
+    assert rc == 7
+    print("[A7] missing discovery falls back to embedded mode")
+
+
+def test_main_dispatches_serve_subcommand() -> None:
+    """`marginalia serve` should dispatch before REPL argparse."""
+    import sys as _sys
+
+    from marginalia import server_main
+    from marginalia.cli import repl as repl_mod
+
+    captured: dict[str, object] = {}
+
+    def _fake_serve(argv: list[str], *, prog: str) -> int:
+        captured["argv"] = argv
+        captured["prog"] = prog
+        return 42
+
+    real_argv = _sys.argv[:]
+    real_serve = server_main.main
+    try:
+        server_main.main = _fake_serve  # type: ignore[assignment]
+        _sys.argv = ["marginalia", "serve", "--port", "8765"]
+
+        rc = repl_mod.main()
+    finally:
+        server_main.main = real_serve  # type: ignore[assignment]
+        _sys.argv = real_argv
+
+    assert rc == 42
+    assert captured == {"argv": ["--port", "8765"], "prog": "marginalia serve"}
+    print("[A8] `marginalia serve` dispatches before REPL argparse")
+
+
 # ---- main runner -------------------------------------------------------------
 
 def main() -> None:
@@ -488,6 +594,9 @@ def main() -> None:
     test_repl_fallback_when_not_tty()
     test_embedded_mode_starts_lifespan_and_exits_cleanly()
     test_embedded_main_picks_remote_when_server_arg_given()
+    test_discovered_backend_precedes_embedded_mode()
+    test_discovery_falls_back_to_embedded_mode()
+    test_main_dispatches_serve_subcommand()
     print("\nALL CLI UPGRADE E2E CHECKS PASSED")
 
 

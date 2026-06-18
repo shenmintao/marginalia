@@ -36,7 +36,7 @@ export function BackendGate({ children }: Props) {
     const startedAt = Date.now();
 
     (async () => {
-      // Make sure we know which port the sidecar bound before we poll.
+      // Make sure we know which backend URL to poll.
       // In browser dev this is a no-op and returns instantly.
       await resolveTauriBaseUrl();
 

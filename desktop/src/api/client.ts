@@ -65,8 +65,8 @@ function initialBase(): string {
 let _base = initialBase();
 let _tauriResolved: Promise<string> | null = null;
 
-/** Ask the Tauri shell which port the bundled sidecar bound, then set
- *  the API base to http://127.0.0.1:<port>. Idempotent. Skips if a user
+/** Ask the Tauri shell which backend URL to use, then set it as
+ *  the API base. Idempotent. Skips if a user
  *  override (localStorage / VITE_API_BASE) is already in effect. */
 export async function resolveTauriBaseUrl(): Promise<string> {
   if (!isTauri()) return _base;
@@ -76,12 +76,17 @@ export async function resolveTauriBaseUrl(): Promise<string> {
   _tauriResolved = (async () => {
     try {
       const { invoke } = await import("@tauri-apps/api/core");
+      const baseUrl = await invoke<string | null>("backend_base_url");
+      if (typeof baseUrl === "string" && baseUrl.trim()) {
+        _base = baseUrl.trim().replace(/\/$/, "");
+        return _base;
+      }
       const port = await invoke<number | null>("backend_port");
       if (typeof port === "number" && port > 0) {
         _base = `http://127.0.0.1:${port}`;
       }
     } catch (e) {
-      console.error("failed to resolve Tauri backend port:", e);
+      console.error("failed to resolve Tauri backend URL:", e);
     }
     return _base;
   })();

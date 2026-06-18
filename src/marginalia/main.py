@@ -25,6 +25,7 @@ from marginalia.api.routes_user_files import router as user_files_router
 from marginalia.config import LlmConfigError, get_settings, validate_llm_config
 from marginalia.db.bootstrap import bootstrap_schema
 from marginalia.db.engine import dispose_engine
+from marginalia.server_discovery import clear_server_state, write_server_state
 from marginalia.tasks.runner import TaskRunner
 
 log = logging.getLogger(__name__)
@@ -33,6 +34,7 @@ log = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
+    state_written = False
     # Desktop launch: server must come up even when the user hasn't entered
     # an API key yet, so they can do it from the Settings page. Tasks that
     # actually need an LLM call still fail at call time. Headless / CLI
@@ -46,6 +48,15 @@ async def lifespan(app: FastAPI):
         validate_llm_config(settings)
     await bootstrap_schema()
     await _check_storage_consistency(settings)
+    if os.environ.get("MARGINALIA_HTTP_SERVER") == "1":
+        host = os.environ.get("MARGINALIA_API_HOST") or settings.marginalia_api_host
+        raw_port = os.environ.get("MARGINALIA_API_PORT") or str(settings.marginalia_api_port)
+        try:
+            port = int(raw_port)
+        except ValueError:
+            port = settings.marginalia_api_port
+        write_server_state(settings.marginalia_home, host=host, port=port, pid=os.getpid())
+        state_written = True
     runner: TaskRunner | None = None
     if settings.worker_enabled:
         # Keep the in-process runner on live settings so GUI changes to
@@ -58,6 +69,8 @@ async def lifespan(app: FastAPI):
     finally:
         if runner is not None:
             await runner.stop()
+        if state_written:
+            clear_server_state(settings.marginalia_home, pid=os.getpid())
         await dispose_engine()
 
 

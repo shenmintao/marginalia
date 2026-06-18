@@ -22,9 +22,11 @@
 //! that's also where the packaged app picks up `.env` — users get one
 //! directory to manage (db + library + .env).
 
+use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
+use std::time::Duration;
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -73,7 +75,13 @@ fn resolve_bundled_python(app: &AppHandle) -> Option<(PathBuf, PathBuf)> {
     let backend_dir = resource_dir.join("resources").join("backend");
     let manifest_path = backend_dir.join("runtime-manifest.json");
     let manifest_bytes = std::fs::read(&manifest_path)
-        .map_err(|e| log::error!("missing runtime-manifest.json at {}: {}", manifest_path.display(), e))
+        .map_err(|e| {
+            log::error!(
+                "missing runtime-manifest.json at {}: {}",
+                manifest_path.display(),
+                e
+            )
+        })
         .ok()?;
     let manifest: RuntimeManifest = serde_json::from_slice(&manifest_bytes)
         .map_err(|e| log::error!("invalid runtime-manifest.json: {}", e))
@@ -90,6 +98,7 @@ fn resolve_bundled_python(app: &AppHandle) -> Option<(PathBuf, PathBuf)> {
 struct BackendState {
     child: Mutex<Option<Child>>,
     port: Mutex<Option<u16>>,
+    base_url: Mutex<Option<String>>,
 }
 
 /// Pick an ephemeral port the OS marks as currently free. There's a small
@@ -102,21 +111,118 @@ fn pick_free_port() -> std::io::Result<u16> {
     Ok(port)
 }
 
+#[derive(Debug, Deserialize)]
+struct ServerDiscoveryState {
+    base_url: String,
+}
+
+fn normalize_base_url(url: &str) -> String {
+    url.trim().trim_end_matches('/').to_string()
+}
+
+fn configured_env_value(home: &Path, key: &str) -> Option<String> {
+    if let Ok(value) = std::env::var(key) {
+        let value = value.trim().to_string();
+        if !value.is_empty() {
+            return Some(value);
+        }
+    }
+
+    let text = std::fs::read_to_string(home.join(".env")).ok()?;
+    for raw_line in text.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((name, raw_value)) = line.split_once('=') else {
+            continue;
+        };
+        if !name.trim().eq_ignore_ascii_case(key) {
+            continue;
+        }
+        let mut value = raw_value.trim().to_string();
+        if value.len() >= 2 {
+            let bytes = value.as_bytes();
+            let quoted = (bytes[0] == b'"' && bytes[value.len() - 1] == b'"')
+                || (bytes[0] == b'\'' && bytes[value.len() - 1] == b'\'');
+            if quoted {
+                value = value[1..value.len() - 1].to_string();
+            } else if let Some(comment_at) = value.find(" #") {
+                value.truncate(comment_at);
+                value = value.trim_end().to_string();
+            }
+        }
+        if !value.is_empty() {
+            return Some(value);
+        }
+    }
+    None
+}
+
+fn configured_api_host(home: &Path) -> String {
+    configured_env_value(home, "MARGINALIA_API_HOST").unwrap_or_else(|| "127.0.0.1".to_string())
+}
+
+fn configured_api_port(home: &Path) -> Option<u16> {
+    configured_env_value(home, "MARGINALIA_API_PORT").and_then(|value| match value.parse::<u16>() {
+        Ok(port) => Some(port),
+        Err(e) => {
+            log::warn!("ignoring invalid MARGINALIA_API_PORT={}: {}", value, e);
+            None
+        }
+    })
+}
+
+fn client_base_url(host: &str, port: u16) -> String {
+    let mut client_host = host.trim();
+    if client_host.is_empty() || client_host == "0.0.0.0" || client_host == "::" {
+        client_host = "127.0.0.1";
+    }
+    if client_host.contains(':') && !client_host.starts_with('[') {
+        format!("http://[{}]:{}", client_host, port)
+    } else {
+        format!("http://{}:{}", client_host, port)
+    }
+}
+
+fn local_port_from_base_url(url: &str) -> Option<u16> {
+    let rest = url
+        .strip_prefix("http://127.0.0.1:")
+        .or_else(|| url.strip_prefix("http://localhost:"))?;
+    let port = rest.split('/').next().unwrap_or(rest);
+    port.parse::<u16>().ok()
+}
+
+fn local_port_is_open(port: u16) -> bool {
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    TcpStream::connect_timeout(&addr, Duration::from_millis(250)).is_ok()
+}
+
+fn discover_backend(home: &Path) -> Option<String> {
+    let state_path = home.join("runtime").join("server.json");
+    let bytes = std::fs::read(&state_path).ok()?;
+    let state: ServerDiscoveryState = serde_json::from_slice(&bytes).ok()?;
+    let base_url = normalize_base_url(&state.base_url);
+    let port = local_port_from_base_url(&base_url)?;
+    if local_port_is_open(port) {
+        Some(base_url)
+    } else {
+        None
+    }
+}
+
 #[tauri::command]
 fn backend_port(state: State<'_, BackendState>) -> Option<u16> {
     *state.port.lock().unwrap()
 }
 
+#[tauri::command]
+fn backend_base_url(state: State<'_, BackendState>) -> Option<String> {
+    state.base_url.lock().unwrap().clone()
+}
+
 impl BackendState {
     fn spawn(&self, app: &AppHandle) {
-        if std::env::var("MARGINALIA_AUTOSTART_BACKEND")
-            .map(|v| v == "0" || v.eq_ignore_ascii_case("false"))
-            .unwrap_or(false)
-        {
-            log::info!("MARGINALIA_AUTOSTART_BACKEND=0, skipping backend spawn");
-            return;
-        }
-
         let home = marginalia_home();
         if let Err(e) = std::fs::create_dir_all(&home) {
             log::warn!("could not create MARGINALIA_HOME {}: {}", home.display(), e);
@@ -127,11 +233,31 @@ impl BackendState {
         // server still comes up and Settings → LLM Profile becomes reachable.
         ensure_starter_env(&home);
 
-        // Pick a free port so we don't collide with any other service on
-        // 8000 (very common dev port). The port is then exposed to the
-        // webview via the `backend_port` Tauri command. Users can still
-        // pin a port with MARGINALIA_API_PORT if they really want to.
-        let port = match std::env::var("MARGINALIA_API_PORT").ok().and_then(|s| s.parse::<u16>().ok()) {
+        if let Ok(server) = std::env::var("MARGINALIA_SERVER") {
+            let server = normalize_base_url(&server);
+            if !server.is_empty() {
+                log::info!("using backend from MARGINALIA_SERVER: {}", server);
+                *self.base_url.lock().unwrap() = Some(server);
+                return;
+            }
+        }
+
+        if let Some(discovered) = discover_backend(&home) {
+            log::info!("using discovered backend: {}", discovered);
+            *self.base_url.lock().unwrap() = Some(discovered);
+            return;
+        }
+
+        if std::env::var("MARGINALIA_AUTOSTART_BACKEND")
+            .map(|v| v == "0" || v.eq_ignore_ascii_case("false"))
+            .unwrap_or(false)
+        {
+            log::info!("MARGINALIA_AUTOSTART_BACKEND=0, skipping backend spawn");
+            return;
+        }
+
+        let host = configured_api_host(&home);
+        let port = match configured_api_port(&home) {
             Some(p) => p,
             None => match pick_free_port() {
                 Ok(p) => p,
@@ -141,8 +267,10 @@ impl BackendState {
                 }
             },
         };
+        let base_url = client_base_url(&host, port);
         *self.port.lock().unwrap() = Some(port);
-        log::info!("backend port = {}", port);
+        *self.base_url.lock().unwrap() = Some(base_url.clone());
+        log::info!("backend url = {}", base_url);
 
         let mut cmd = if let Ok(cmd_str) = std::env::var("MARGINALIA_BACKEND_CMD") {
             let mut parts = cmd_str.split_whitespace();
@@ -187,7 +315,9 @@ impl BackendState {
 
         cmd.current_dir(&home)
             .env("MARGINALIA_HOME", &home)
+            .env("MARGINALIA_API_HOST", &host)
             .env("MARGINALIA_API_PORT", port.to_string())
+            .env("MARGINALIA_HTTP_SERVER", "1")
             .env("MARGINALIA_DESKTOP", "1")
             .env("PYTHONUNBUFFERED", "1")
             .stdout(stdout_target)
@@ -220,6 +350,8 @@ impl BackendState {
             }
             let _ = child.wait();
         }
+        *self.port.lock().unwrap() = None;
+        *self.base_url.lock().unwrap() = None;
     }
 }
 
@@ -258,10 +390,18 @@ fn ensure_starter_env(home: &Path) {
 LLM_DEFAULT_PROVIDER=openai
 LLM_DEFAULT_MODEL=gpt-4o-mini
 LLM_DEFAULT_API_KEY=
+
+# Backend bind settings. Change the port if another local service uses 8000.
+MARGINALIA_API_HOST=127.0.0.1
+MARGINALIA_API_PORT=8000
 ";
     match std::fs::write(&env_path, template) {
         Ok(_) => log::info!("wrote starter .env at {}", env_path.display()),
-        Err(e) => log::warn!("could not write starter .env at {}: {}", env_path.display(), e),
+        Err(e) => log::warn!(
+            "could not write starter .env at {}: {}",
+            env_path.display(),
+            e
+        ),
     }
 }
 
@@ -382,7 +522,7 @@ pub fn run() {
             show_main_window(app);
         }))
         .manage(BackendState::default())
-        .invoke_handler(tauri::generate_handler![backend_port])
+        .invoke_handler(tauri::generate_handler![backend_port, backend_base_url])
         .setup(|app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(

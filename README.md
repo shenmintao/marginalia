@@ -84,6 +84,8 @@ marginalia init
 Edit `.env`:
 
 ```ini
+MARGINALIA_API_HOST=127.0.0.1
+MARGINALIA_API_PORT=8000
 LLM_DEFAULT_PROVIDER=openai
 LLM_DEFAULT_API_KEY=sk-...
 LLM_DEFAULT_MODEL=gpt-4o-mini
@@ -105,6 +107,18 @@ marginalia> /export
 ```
 
 The first launch bootstraps the database schema automatically.
+
+To share one backend across the desktop app, CLI sessions, MCP, or external
+automation, start the reusable HTTP backend instead:
+
+```bash
+marginalia serve
+```
+
+`marginalia serve` reads `MARGINALIA_API_HOST` and `MARGINALIA_API_PORT` from
+`.env` and writes its live URL to `MARGINALIA_HOME/runtime/server.json`.
+Desktop and CLI clients auto-discover that file; explicit `--server URL` or
+`MARGINALIA_SERVER` still take precedence.
 
 ## Example Questions
 
@@ -398,7 +412,7 @@ marginalia
 Remote API mode:
 
 ```bash
-uvicorn marginalia.main:app --host 0.0.0.0 --port 8000
+marginalia serve --host 0.0.0.0 --port 8000
 marginalia --server http://server:8000
 # If the server sets MARGINALIA_API_TOKEN:
 marginalia --server http://server:8000 --api-token "$MARGINALIA_API_TOKEN"

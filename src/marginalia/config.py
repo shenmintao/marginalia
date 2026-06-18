@@ -26,6 +26,8 @@ class Settings(BaseSettings):
 
     app_env: str = "dev"
     marginalia_api_token: str | None = None
+    marginalia_api_host: str = "127.0.0.1"
+    marginalia_api_port: int = 8000
 
     # Single root for all on-disk state (db, library, caches). Default
     # is ~/Marginalia. Per-component overrides below take precedence

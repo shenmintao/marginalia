@@ -426,6 +426,28 @@ async def _run_embedded() -> int:
         )
 
 
+async def _discover_remote_url() -> str | None:
+    try:
+        from marginalia.config import get_settings
+        from marginalia.server_discovery import discover_server_url
+
+        settings = get_settings()
+        return await discover_server_url(settings.marginalia_home)
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+async def _run_discovered_or_embedded(api_token: str | None) -> int:
+    discovered = await _discover_remote_url()
+    if discovered:
+        return await run_repl(
+            base_url=discovered,
+            api_token=api_token,
+            mode="remote",
+        )
+    return await _run_embedded()
+
+
 def main() -> int:
     import argparse
 
@@ -440,6 +462,9 @@ def main() -> int:
     if argv and argv[0] == "eval":
         from marginalia.cli.eval_cmd import cmd_eval_main
         return cmd_eval_main(argv[1:])
+    if argv and argv[0] == "serve":
+        from marginalia.server_main import main as serve_main
+        return serve_main(argv[1:], prog="marginalia serve")
     if argv and argv[0] == "mcp":
         from marginalia.mcp_server import main as mcp_main
         return mcp_main(argv[1:])
@@ -448,6 +473,7 @@ def main() -> int:
         prog="marginalia",
         description=(
             "Marginalia CLI. Run with no args for the embedded REPL, "
+            "`serve` for a reusable HTTP backend, "
             "`--server URL` (or MARGINALIA_SERVER env) for remote mode, "
             "`marginalia mcp` for the stdio MCP server, or "
             "`marginalia init` to bootstrap a project."
@@ -455,8 +481,9 @@ def main() -> int:
     )
     parser.add_argument(
         "--server", default=None,
-        help="Server URL for remote mode. If omitted, runs in-process "
-             "(reads MARGINALIA_SERVER env as fallback).",
+        help="Server URL for remote mode. If omitted, discovers a local "
+             "marginalia serve/desktop backend, then falls back to in-process "
+             "mode (reads MARGINALIA_SERVER env first).",
     )
     parser.add_argument(
         "--api-token", default=None,
@@ -471,7 +498,7 @@ def main() -> int:
             return asyncio.run(
                 run_repl(base_url=server_url, api_token=api_token, mode="remote")
             )
-        return asyncio.run(_run_embedded())
+        return asyncio.run(_run_discovered_or_embedded(api_token))
     except KeyboardInterrupt:
         return 130
 
