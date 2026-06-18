@@ -82,6 +82,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: desktop/src-tauri
+          cache-targets: false
 
       - name: Install Linux Tauri deps
         if: matrix.platform == 'linux'
