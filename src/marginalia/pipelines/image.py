@@ -1,6 +1,7 @@
 """Image pipeline (DESIGN.md §11.3).
 
-Handles raster images: image/png / image/jpeg / image/gif / image/webp.
+Handles raster images (image/png / image/jpeg / image/gif / image/webp)
+and SVG vector diagrams (image/svg+xml).
 Uses the `vision` LLM profile (a multimodal model) and feeds the image
 bytes as a base64 ImageBlock — the abstraction layer translates to each
 provider's native shape (OpenAI: data: URL; Anthropic: base64 source).
@@ -132,8 +133,11 @@ IMAGE_PIPELINE_SCHEMA: dict[str, Any] = {}
 
 
 @register_pipeline(
-    mimes=("image/png", "image/jpeg", "image/jpg", "image/gif", "image/webp"),
-    exts=(".png", ".jpg", ".jpeg", ".gif", ".webp"),
+    mimes=(
+        "image/png", "image/jpeg", "image/jpg", "image/gif",
+        "image/webp", "image/svg+xml",
+    ),
+    exts=(".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"),
 )
 class ImagePipeline(Pipeline):
     name = "image"
@@ -154,6 +158,12 @@ class ImagePipeline(Pipeline):
                 "provider) and re-ingest."
             )
         body = await self._read_bytes(storage, ctx.storage_key)
+
+        # SVG: rasterise to PNG before the VLM call.
+        if (ctx.mime_type == "image/svg+xml"
+                or (ctx.original_ext or "").lower() == ".svg"):
+            body = _svg_to_png(body)
+
         scaled, media_type = downscale_for_vlm(body)
         b64 = base64.b64encode(scaled).decode("ascii")
 
@@ -280,6 +290,9 @@ class ImagePipeline(Pipeline):
             ), extras={"kind": "image"})
         try:
             body = await self._read_bytes(storage, file_row.storage_key)
+            # SVG: rasterise before VLM if needed.
+            if (getattr(file_row, "original_ext", "") or "").lower() == ".svg":
+                body = _svg_to_png(body)
         except Exception as exc:  # noqa: BLE001
             return SegmentResult(error=f"image read failed: {exc}",
                                  extras={"kind": "image"})
@@ -335,6 +348,8 @@ class ImagePipeline(Pipeline):
         which substitutes a structural placeholder for image members so
         archives don't blow up VLM cost.
         """
+        if (filename or "").lower().endswith(".svg"):
+            body = _svg_to_png(body)
         scaled, media_type = downscale_for_vlm(body)
         b64 = base64.b64encode(scaled).decode("ascii")
         client = get_chat_client("vision")
@@ -399,3 +414,17 @@ def _disable_thinking_for_vlm(client: Any) -> dict[str, Any] | None:
     if getattr(client, "provider", None) == "openai-compatible":
         return DISABLE_THINKING_EXTRA_BODY
     return None
+
+
+SVG_RENDER_WIDTH = 1600
+
+
+def _svg_to_png(svg_bytes: bytes, *, width: int = SVG_RENDER_WIDTH) -> bytes:
+    """Convert SVG to PNG bytes via cairosvg."""
+    try:
+        import cairosvg  # type: ignore
+    except ImportError as exc:
+        raise RuntimeError(
+            "SVG indexing requires cairosvg; `pip install cairosvg`"
+        ) from exc
+    return cairosvg.svg2png(bytestring=svg_bytes, output_width=width)

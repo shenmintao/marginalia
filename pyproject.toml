@@ -33,6 +33,7 @@ dependencies = [
     "pypdf>=5.0",
     "pypdfium2>=4.30",
     "Pillow>=10.0",
+    "cairosvg>=2.7",
     "duckdb>=1.0",
     "prompt_toolkit>=3.0",
     "httpx>=0.27",
