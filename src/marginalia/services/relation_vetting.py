@@ -43,6 +43,13 @@ async def vet_direct_relations_for_entry(
     caches the LLM verdict on `entry_relations` so the next request is free.
     Failures are logged and leave edges unvetted for a future attempt.
     """
+    if not await relations_repo.has_direct_unvetted_candidate(
+        db,
+        entry_id=entry_id,
+        min_obs=min_observation,
+    ):
+        return OnDemandVetResult()
+
     candidates = await relations_repo.list_direct_unvetted_candidates(
         db,
         entry_id=entry_id,

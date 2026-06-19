@@ -328,6 +328,35 @@ async def list_direct_unvetted_candidates(
     ]
 
 
+async def has_direct_unvetted_candidate(
+    db: AsyncSession,
+    *,
+    entry_id: str,
+    min_obs: int,
+) -> bool:
+    """Cheap preflight for lazy discovery vetting.
+
+    The full candidate loader joins both endpoints and backing files so the
+    LLM prompt can include names/summaries. Avoid that query when the seed
+    has no raw unvetted relation rows at all.
+    """
+    row = (
+        await db.execute(
+            select(EntryRelation.id)
+            .where(
+                or_(
+                    EntryRelation.entry_a_id == entry_id,
+                    EntryRelation.entry_b_id == entry_id,
+                ),
+                EntryRelation.vetted.is_(None),
+                EntryRelation.observation_count >= min_obs,
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    return row is not None
+
+
 async def list_pair_keys(db: AsyncSession) -> list[tuple[str, str]]:
     """`(entry_a_id, entry_b_id)` for every relation row."""
     rows = (

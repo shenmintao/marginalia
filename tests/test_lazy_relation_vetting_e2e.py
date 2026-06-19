@@ -209,6 +209,37 @@ async def test_discover_lazily_vets_uncached_edges_and_reuses_cache(
 
 
 @pytest.mark.asyncio
+async def test_on_demand_vetting_skips_detail_query_when_seed_has_no_raw_edges(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    await _prepare_home(monkeypatch, tmp_path)
+    from marginalia.repositories import entry_relations as relations_repo
+    from marginalia.services.relation_vetting import vet_direct_relations_for_entry
+
+    async def _fail_detail_query(*_args, **_kwargs):
+        raise AssertionError("candidate detail query should be skipped")
+
+    monkeypatch.setattr(
+        relations_repo,
+        "list_direct_unvetted_candidates",
+        _fail_detail_query,
+    )
+
+    async with session_scope() as db:
+        result = await vet_direct_relations_for_entry(
+            db,
+            entry_id="entry-with-no-relations",
+            limit=5,
+        )
+
+    assert result.candidates == 0
+    assert result.accepted == 0
+    assert result.rejected == 0
+    assert result.failed == 0
+
+
+@pytest.mark.asyncio
 async def test_periodic_does_not_enqueue_background_relation_vetting_by_default(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
