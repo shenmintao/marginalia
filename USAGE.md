@@ -511,6 +511,30 @@ LLM_VISION_MODEL=gpt-4o
 
 Without vision, scanned PDFs are marked as needing OCR instead of producing misleading empty text.
 
+### PDF ingest limits
+
+Hard limits applied at ingest time — data beyond these is discarded:
+
+| Limit | Value | Effect |
+|-------|-------|--------|
+| Max indexed pages (text layer) | 400 | Pages beyond 400 are not indexed |
+| Single-prompt text cap | 80 KB | Truncated, marked `[...truncated...]` |
+| Chunked index trigger | >60 pp or >80 KB text | Switches to per-chunk LLM indexing |
+| Max extracted images | 30 / doc | Additional images discarded |
+| Max images per page | 5 | Further images on same page discarded |
+| Min image size | 100 px / 512 B | Smaller images silently filtered |
+| Scanned-PDF OCR trigger | <50 chars/page avg | Falls back to VLM OCR if configured |
+
+Soft limits at read time — agent can paginate past these:
+
+| Limit | Value | Effect |
+|-------|-------|--------|
+| Default read pages | 20 | When agent requests no page range |
+| Max pages per read call | 50 | Per `read_files` invocation |
+| Unscoped pattern search | 200 pp | Pattern search without page range |
+
+Coverage details are stored in `description.coverage` and surfaced in `--json` output (`indexed_partial`, `max_index_pages`, `partial_reasons`).
+
 ### Storage backend mismatch
 
 If startup reports that existing `storage_key` values do not match the configured backend, either restore the previous backend or migrate:
