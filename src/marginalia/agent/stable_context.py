@@ -363,7 +363,7 @@ async def build_resumed_messages(
                     tool_call_id=tu_id, content=body, is_error=is_error,
                 ))
             history.append(ChatMessage(role="assistant", content=assistant_blocks))
-            history.append(ChatMessage(role="user", content=tool_blocks))
+            history.append(ChatMessage(role="tool", content=tool_blocks))
 
         if conv.agent_response:
             history.append(ChatMessage(

@@ -176,10 +176,11 @@ async def test_resume_replays_history() -> None:
     )
     assert found_t1, f"resumed history missing turn-1 user message; roles={roles}"
 
-    # Tool-call replay: an assistant ToolUseBlock pairs with a user
+    # Tool-call replay: an assistant ToolUseBlock pairs with a tool-role
     # ToolResultBlock and ids match.
     tool_use_ids: list[str] = []
     tool_result_ids: list[str] = []
+    tool_result_roles: list[str] = []
     for m in exec_req.messages:
         if isinstance(m.content, list):
             for blk in m.content:
@@ -187,9 +188,13 @@ async def test_resume_replays_history() -> None:
                     tool_use_ids.append(blk.id)
                 elif isinstance(blk, ToolResultBlock):
                     tool_result_ids.append(blk.tool_call_id)
+                    tool_result_roles.append(m.role)
     assert tool_use_ids, "expected at least one ToolUseBlock from resumed history"
     assert tool_use_ids == tool_result_ids, (
         f"tool_use vs tool_result ids drifted: {tool_use_ids} vs {tool_result_ids}"
+    )
+    assert tool_result_roles and all(role == "tool" for role in tool_result_roles), (
+        f"resumed tool results must use role='tool', got {tool_result_roles}"
     )
 
     # Boundary note appears as a user-role message between the resumed

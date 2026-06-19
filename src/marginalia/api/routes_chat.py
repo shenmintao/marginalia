@@ -37,6 +37,7 @@ producing duplicate rows.
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any, AsyncIterator
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -50,6 +51,7 @@ from marginalia.db.models import Session as SessionRow
 from marginalia.db.session import get_session
 
 router = APIRouter(tags=["chat"])
+log = logging.getLogger(__name__)
 
 
 _SESSION_LOCKS: dict[str, asyncio.Lock] = {}
@@ -102,6 +104,9 @@ async def post_chat(
                 ):
                     yield {"event": ev.event_type, "data": ev.data}
             except AgentTurnError as exc:
+                yield {"event": "error", "data": str(exc)}
+            except Exception as exc:
+                log.exception("chat turn failed for session %s", session_id)
                 yield {"event": "error", "data": str(exc)}
 
     return EventSourceResponse(event_stream())
