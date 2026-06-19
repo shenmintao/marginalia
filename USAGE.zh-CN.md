@@ -400,10 +400,11 @@ marginalia> /tend
      suggest_demotion 等),实时打印每个任务的产出
 ```
 
-关系挖掘默认是 lazy:后台 miner 先写廉价关系信号,`/discover` 命中未判断边
-时再调用 LLM vet 并缓存结果。需要后台提前批量判断时,设置
-`RELATION_BACKGROUND_VETTING_ENABLED=true`;`MAINTENANCE_DAILY_TOKEN_BUDGET`
-可限制低优先后台 LLM 维护用量。
+关系发现默认纯读:后台 miner 先写廉价关系信号,`/discover` 只读已经 vetted
+的图,不会在请求里调用 LLM。需要判断某个 seed 的直连 raw signal 时,运行
+`/discover <entry_id> --vet`,它会排后台任务并在完成后写回缓存。需要后台
+提前批量判断时,设置 `RELATION_BACKGROUND_VETTING_ENABLED=true`;
+`MAINTENANCE_DAILY_TOKEN_BUDGET` 可限制低优先后台 LLM 维护用量。
 
 被 demoted / archived 的 entry 默认不参与新查询的检索范围。想看哪些
 被自动降级了:

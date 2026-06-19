@@ -259,9 +259,9 @@ async def list_direct_unvetted_candidates(
 ) -> list[dict[str, Any]]:
     """Unvetted relation candidates directly touching `entry_id`.
 
-    Used by lazy discovery: when a user asks for neighbours of a seed entry,
-    vet the seed's strongest fresh edges on demand instead of waiting for the
-    batch background task to judge the whole graph.
+    Used by explicit discovery vetting: `/discover?vet=true` queues a
+    background task that judges the seed's strongest fresh edges without
+    blocking the read request.
     """
     from sqlalchemy.orm import aliased
     FA = aliased(FileEntry, name="fa")
@@ -334,7 +334,7 @@ async def has_direct_unvetted_candidate(
     entry_id: str,
     min_obs: int,
 ) -> bool:
-    """Cheap preflight for lazy discovery vetting.
+    """Cheap preflight for explicit discovery vetting.
 
     The full candidate loader joins both endpoints and backing files so the
     LLM prompt can include names/summaries. Avoid that query when the seed

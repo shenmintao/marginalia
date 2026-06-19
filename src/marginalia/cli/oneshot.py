@@ -388,16 +388,18 @@ async def _run_json_command(
         return payload
     if command_name == "discover":
         include_unvetted = "--all" in args
-        args = [arg for arg in args if arg != "--all"]
+        vet = "--vet" in args
+        args = [arg for arg in args if arg not in {"--all", "--vet"}]
         args, top_k = _pop_int_option(args, "--top-k", "-n", default=8)
         if not args:
-            raise OneShotUsageError("usage: marginalia discover <entry_id> [--top-k N] [--all]")
+            raise OneShotUsageError("usage: marginalia discover <entry_id> [--top-k N] [--all] [--vet]")
         if len(args) > 1 and args[1].isdigit():
             top_k = int(args[1])
         payload = await ctx.client.discover(
             args[0],
             top_k=top_k,
             include_unvetted=include_unvetted,
+            vet=vet,
         )
         payload["ok"] = True
         return payload

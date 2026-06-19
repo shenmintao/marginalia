@@ -74,29 +74,16 @@ async def find_related(
     restart_alpha: float = DEFAULT_RESTART_ALPHA,
     rng_seed: int | None = None,
     include_unvetted: bool = False,
-    lazy_vet: bool = True,
 ) -> list[RelatedEntry]:
     """Run RWR from `seed_entry_id`. Returns at most `top_k` non-seed
     entries ordered by visit frequency.
 
-    By default, direct unvetted seed edges are LLM-vetted on demand, then
-    only edges with vetted=True participate. Set `include_unvetted=True`
-    to walk over the raw mined graph without vetting; useful for debugging
-    or for the `/discover --all` CLI flag. Set `lazy_vet=False` for
-    pure-read prefill surfaces that should never trigger an LLM call.
+    By default this is a pure-read path: only edges with vetted=True
+    participate and no relation-vetting task or LLM call is triggered.
+    Set `include_unvetted=True` to walk over the raw mined graph without
+    vetting; useful for debugging or for the `/discover --all` CLI flag.
 
     `rng_seed` is for tests; production uses system RNG."""
-    if lazy_vet and not include_unvetted:
-        from marginalia.services.relation_vetting import vet_direct_relations_for_entry
-
-        vet_result = await vet_direct_relations_for_entry(
-            db,
-            entry_id=seed_entry_id,
-            limit=max(top_k, 1),
-        )
-        if vet_result.changed:
-            await db.commit()
-
     edges = await _load_edges(db, include_unvetted=include_unvetted)
     if seed_entry_id not in edges or not edges[seed_entry_id]:
         return []

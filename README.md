@@ -315,6 +315,8 @@ Slash commands:
 /search <query>               metadata recall
 /info <entry_id>              entry metadata and preview
 /discover <entry_id> [N]      related entries from the evidence graph
+/discover <entry_id> --all    include unvetted relation signals
+/discover <entry_id> --vet    queue background vetting for direct signals
 /tree                         folder tree
 /download <id> [dest]         download file or folder zip
 /export [conversation_id]     export answer and citations
@@ -427,10 +429,11 @@ maintenance LLM usage. When it is exhausted, low-priority speculative tasks
 (`restructure_catalogs`, `vet_relations`, `propose_views`) defer to a later
 tick; foreground ingest and chat reflection are not limited.
 
-Relation discovery is lazy by default. Miners write cheap raw signals, and
-`/discover` vets directly hit unjudged edges on demand before returning them.
-Set `RELATION_BACKGROUND_VETTING_ENABLED=true` only if you want the periodic
-worker to batch-vet relation edges ahead of time.
+Relation discovery is pure-read by default. Miners write cheap raw signals,
+and `/discover` reads the already-vetted graph without calling an LLM. Use
+`/discover <entry_id> --vet` (API: `vet=true`) to queue background vetting for
+that seed's direct raw edges, or set `RELATION_BACKGROUND_VETTING_ENABLED=true`
+if you want the periodic worker to batch-vet relation edges ahead of time.
 
 When a long final answer hits the model token limit, Marginalia can continue it server-side and emit one merged answer event to the GUI. Tune `AGENT_FINAL_ANSWER_CONTINUE_TURNS` and `AGENT_FINAL_ANSWER_MAX_CHARS` for research-heavy deployments.
 

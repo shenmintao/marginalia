@@ -215,6 +215,7 @@ Use `/upload` for files outside the vault. Use `/ingest` for files already insid
 /info <entry_id>               metadata and preview
 /discover <entry_id> [N]       vetted related entries
 /discover <entry_id> --all     include unvetted relation signals
+/discover <entry_id> --vet     queue background vetting for direct signals
 ```
 
 Any non-slash input is sent to the agent.
@@ -320,10 +321,12 @@ reranked top evidence directly.
 ```
 
 Maintenance includes tag quality, catalog restructuring, lifecycle suggestions,
-relation mining, view proposals, entry-extra refresh, and pruning. Batch
-relation vetting is optional; `/discover` vets directly hit unjudged edges on
-demand, while `RELATION_BACKGROUND_VETTING_ENABLED=true` lets the periodic
-worker pre-vet relation edges ahead of time.
+relation mining, view proposals, entry-extra refresh, and pruning. Relation
+discovery is pure-read by default: `/discover` reads the already-vetted graph
+without calling an LLM. Use `/discover <entry_id> --vet` to queue background
+vetting for that seed's direct raw edges, or set
+`RELATION_BACKGROUND_VETTING_ENABLED=true` to let the periodic worker pre-vet
+relation edges ahead of time.
 
 ### MCP Server
 

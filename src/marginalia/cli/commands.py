@@ -431,19 +431,33 @@ async def cmd_discover(ctx: CliContext, args: str) -> None:
     vetted it)."""
     parts = _split_args(args)
     if not parts:
-        print("usage: /discover <entry_id> [top_k=8] [--all]")
+        print("usage: /discover <entry_id> [top_k=8] [--all] [--vet]")
         return
     entry_id = parts[0]
     include_unvetted = "--all" in parts
+    vet = "--vet" in parts
     numeric = [p for p in parts[1:] if p.isdigit()]
     top_k = int(numeric[0]) if numeric else 8
     try:
         out = await ctx.client.discover(
-            entry_id, top_k=top_k, include_unvetted=include_unvetted,
+            entry_id,
+            top_k=top_k,
+            include_unvetted=include_unvetted,
+            vet=vet,
         )
     except CliHttpError as e:
         print(f"discover failed: HTTP {e.status} {e.payload}")
         return
+    vetting = out.get("vetting") if isinstance(out.get("vetting"), dict) else None
+    if vetting:
+        if vetting.get("queued"):
+            task_id = str(vetting.get("task_id") or "?")
+            print(
+                f"queued relation vetting task {task_id[:8]}; "
+                "re-run /discover after it finishes."
+            )
+        elif not vetting.get("candidates_available"):
+            print("no unvetted direct relations need background vetting.")
     results = out.get("results") or []
     if not results:
         if include_unvetted:
