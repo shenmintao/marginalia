@@ -1,9 +1,10 @@
 # Marginalia skills
 
 Three workflow-oriented skills for any LLM that drives the Marginalia
-CLI (Claude Code, Cursor, etc.). Skills are progressive-disclosure
+CLI (Claude Code, Cursor, pi, etc.). Skills are progressive-disclosure
 instructions — the agent loads the relevant one when the user's intent
-matches the description.
+matches the description. Each skill declares `allowed-tools` and
+`compatibility` in its frontmatter, per the Agent Skills standard.
 
 ## Layout
 
@@ -14,19 +15,22 @@ skills/
 └── discover-and-curate/SKILL.md    # explore relations, build lists
 ```
 
-## Installing into Claude Code
+## Installing into Claude Code / pi
 
-Either copy or symlink each directory into your Claude skills root:
+Either copy or symlink each directory into your agent's skills root:
 
 ```bash
-# Linux/macOS
+# Linux/macOS — Claude Code
 ln -s "$(pwd)/skills/ingest-vault" ~/.claude/skills/ingest-vault
+
+# pi
+ln -s "$(pwd)/skills/ingest-vault" ~/.pi/agent/skills/ingest-vault
 
 # Windows (run as administrator for symlinks, or just copy the folder)
 mklink /D "%USERPROFILE%\.claude\skills\ingest-vault" "%CD%\skills\ingest-vault"
 ```
 
-Then re-launch Claude Code so it picks up the new skill descriptions.
+Then re-launch the agent so it picks up the new skill descriptions.
 
 ## Skills and MCP
 
@@ -53,3 +57,9 @@ Do not hard-code the desktop port in a skill. Packaged desktop builds may use
 
 The MCP server follows the same order. If no running backend is discovered, it
 starts an embedded backend in the MCP process, matching the CLI fallback.
+
+## One-shot commands
+
+Each skill includes a **One-shot commands** section listing the equivalent
+`marginalia ...` invocations that an external agent can run via `bash`
+without entering the REPL. Use `--json` for machine-parseable output.

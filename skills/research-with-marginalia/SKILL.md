@@ -1,6 +1,8 @@
 ---
 name: research-with-marginalia
 description: Ask Marginalia a research question, follow the citations it returns, and export the result as a single markdown file or a self-contained zip. Use when the user wants to think with their corpus rather than just look up a file.
+compatibility: Requires the `marginalia` CLI (Python 3.11+), a configured LLM chat profile, and pre-ingested files.
+allowed-tools: bash read write
 ---
 
 # Research with Marginalia
@@ -109,3 +111,48 @@ flag it to the user if their question depends on something just added.
   conversation only counts as "ended" once the agent has finished a
   turn. If the user just asked a question and immediately ran /export,
   wait for the answer to fully stream.
+
+## Removing entries
+
+There is no `/delete` command. This is intentional — AI does not mutate
+user files directly. To remove an entry:
+
+1. Delete the file from the mirror vault.
+2. Run `/ingest --all`. Marginalia detects the missing file and
+   soft-deletes the entry (sets `deleted_at`).
+
+The `lifecycle` field (active / demoted / archived) can demote entries
+out of default search results without deleting them. Set
+`AUTO_LIFECYCLE_ENABLED=true` for automatic lifecycle suggestions.
+
+## One-shot commands
+
+All of the above can be driven non-interactively by an external agent:
+
+```bash
+marginalia ask "compare this Raft paper with my Paxos notes"
+marginalia ask "..." --mode quick
+marginalia search "consensus protocols" --json
+marginalia info <full_entry_id> --json
+marginalia discover <full_entry_id> --json
+marginalia download <entry_id> [dest]
+marginalia export <full_conv_id> [dest.md|dest.zip]
+marginalia check --json
+marginalia background --json
+```
+
+Add `--json` for machine-parseable output. Omit it for human-readable text.
+`--server URL` (or `MARGINALIA_SERVER`) connects to a remote backend;
+otherwise the CLI auto-discovers a running `marginalia serve` / desktop
+sidecar, or starts an embedded backend.
+
+One-shot CLI requires **full UUIDs** (e.g. `marginalia info b123a833-...`).
+The 8-char prefix shorthand described in the REPL workflow above does not
+work outside the REPL.
+
+`marginalia export` requires a persistent backend (`marginalia serve` or
+desktop). Two separate embedded-mode invocations (e.g. `marginalia ask` then
+`marginalia export`) do not share state — the first process exits and its
+conversations are gone. Export works inside the REPL because the embedded
+backend stays alive across turns. When passing a conversation id, use the
+**full UUID** — prefix shorthand does not work in one-shot mode.

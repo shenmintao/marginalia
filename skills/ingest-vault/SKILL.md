@@ -1,6 +1,8 @@
 ---
 name: ingest-vault
 description: Bulk-admit files from a Marginalia mirror vault into the database, then let the LLM pipeline catch up in the background. Use when the user has dropped a stack of PDFs / markdown / notes into their vault directory and wants them indexed and searchable.
+compatibility: Requires the `marginalia` CLI (Python 3.11+), a configured LLM ingest profile, and STORAGE_BACKEND=mirror for bulk ingest. For STORAGE_BACKEND=local, use `marginalia upload` per file instead.
+allowed-tools: bash read
 ---
 
 # Ingest a vault into Marginalia
@@ -101,3 +103,20 @@ Once `N busy` settles back near zero, the corpus is ready for:
 
 - **search-by-question** → see `research-with-marginalia` skill
 - **discovery / related-entries** → see `discover-and-curate` skill
+
+## One-shot commands
+
+All of the above can be driven non-interactively by an external agent:
+
+```bash
+marginalia check --json
+marginalia ingest --all --yes --json
+marginalia ingest path/to/folder --yes --json
+marginalia background --json
+marginalia reprocess failed --json
+marginalia reprocess folder <full_folder_id> failed --json
+marginalia upload ./somewhere/paper.pdf /papers/
+```
+
+Add `--json` for machine-parseable output. `--yes` skips confirmation prompts.
+The CLI auto-discovers the backend like the REPL. IDs must be **full UUIDs**.

@@ -1,6 +1,8 @@
 ---
 name: discover-and-curate
 description: Find related entries to a seed file, build reading lists, and surface neighbour clusters Marginalia has discovered automatically. Use when the user is browsing rather than asking a specific question.
+compatibility: Requires the `marginalia` CLI (Python 3.11+), a configured LLM profile for relation vetting, and pre-ingested files. Relation mining needs at least one maintenance pass to produce results; new corpora have sparse relations initially.
+allowed-tools: bash read write
 ---
 
 # Discover and curate
@@ -120,3 +122,21 @@ Reports the status of that specific run.
 
 - **Repeated noise in unvetted results.** That's why vetting exists.
   Drop `--all` and let the LLM filter.
+
+## One-shot commands
+
+All of the above can be driven non-interactively by an external agent:
+
+```bash
+marginalia search "consensus protocols" --json
+marginalia info <full_entry_id> --json
+marginalia discover <full_entry_id> --json
+marginalia discover <full_entry_id> --top-k 12 --json
+marginalia download <entry_id> [dest]
+marginalia tend
+marginalia background --json
+```
+
+Add `--json` for machine-parseable output. The CLI auto-discovers the backend
+like the REPL. One-shot CLI requires **full UUIDs** — the 8-char prefix
+shorthand from REPL mode does not work.
