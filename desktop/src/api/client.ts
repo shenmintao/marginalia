@@ -25,6 +25,7 @@ import type {
   Folder,
   FolderDetail,
   FolderListing,
+  IngestStatus,
   LlmSettings,
   OnConflict,
   RecentTasks,
@@ -238,17 +239,19 @@ export interface ReprocessResult {
 }
 
 export type BulkReprocessFilter =
-  | { file_ids: string[] }
-  | { catalog_id: string }
-  | { folder_id: string }
-  | { tag_id: string }
-  | { all: true };
+  | ({ file_ids: string[] } & { status?: IngestStatus })
+  | ({ catalog_id: string } & { status?: IngestStatus })
+  | ({ folder_id: string } & { status?: IngestStatus })
+  | ({ tag_id: string } & { status?: IngestStatus })
+  | ({ all: true } & { status?: IngestStatus })
+  | { status: IngestStatus };
 
 export interface BulkReprocessResult {
   file_count: number;
   task_ids: string[];
   reused_count: number;
   skipped_count: number;
+  status_filter?: IngestStatus | null;
 }
 
 export const files = {

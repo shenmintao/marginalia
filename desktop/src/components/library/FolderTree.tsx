@@ -8,7 +8,7 @@
  *  Background activity (ingest tasks) lights up an `<Loader2>` next to
  *  any file row whose file_id matches an entry in the active-tasks set.
  */
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import {
   ChevronDown, ChevronRight, Folder as FolderIcon, FolderOpen,
   FileText, Loader2, Plus, Upload as UploadIcon, Download, RefreshCw, Trash2,
@@ -38,6 +38,7 @@ interface Props {
   selectedEntryId: string | null;
   selectedFolderId: string | null;
   selectedFolderName: string | null;
+  selectedFolderFailedCount: number | null;
   onSelectFile: (entry: FileEntrySummary) => void;
   onSelectFolder: (folder: Folder | null) => void;
   ingestingFileIds: Set<string>;
@@ -64,6 +65,7 @@ export function FolderTree(props: Props) {
   const [rootEntries, setRootEntries] = useState<FileEntrySummary[]>([]);
   const [err, setErr] = useState<string | null>(null);
   const [reprocessingAll, setReprocessingAll] = useState(false);
+  const [reprocessingFailed, setReprocessingFailed] = useState(false);
   const { t } = useI18n();
 
   const load = useCallback(() => {
@@ -96,6 +98,23 @@ export function FolderTree(props: Props) {
   const reprocessLabel = props.selectedFolderId
     ? t.library.reprocessFolderConfirm(props.selectedFolderName ?? headerTarget)
     : t.library.reprocessAllConfirm;
+  const rootFailedCount = useMemo(() => {
+    const folderFailures = (roots ?? []).reduce(
+      (sum, folder) => sum + (folder.ingest_summary?.failed ?? 0),
+      0,
+    );
+    const rootEntryFailures = rootEntries.filter((e) => e.ingest_status === "failed").length;
+    return folderFailures + rootEntryFailures;
+  }, [roots, rootEntries]);
+  const scopeFailedCount = props.selectedFolderId
+    ? props.selectedFolderFailedCount ?? 0
+    : rootFailedCount;
+  const failedScope = props.selectedFolderId
+    ? { folder_id: props.selectedFolderId, status: "failed" } as const
+    : { status: "failed" } as const;
+  const failedLabel = props.selectedFolderId
+    ? t.library.reprocessFailedFolderConfirm(headerTarget, scopeFailedCount)
+    : t.library.reprocessFailedAllConfirm(scopeFailedCount);
 
   const onReprocessScope = async () => {
     if (reprocessingAll) return;
@@ -114,11 +133,43 @@ export function FolderTree(props: Props) {
     }
   };
 
+  const onReprocessFailedScope = async () => {
+    if (reprocessingFailed) return;
+    if (!confirm(failedLabel)) return;
+    setReprocessingFailed(true);
+    try {
+      const r = await files.reprocessBulk(failedScope);
+      alert(
+        t.library.queuedReprocess(r.task_ids.length, r.reused_count, r.skipped_count),
+      );
+      load();
+    } catch (e) {
+      const msg = e instanceof ApiError ? e.message : String(e);
+      alert(t.library.bulkReprocessFailed(msg));
+    } finally {
+      setReprocessingFailed(false);
+    }
+  };
+
   return (
     <div className="flex h-full flex-col">
       <div className="flex shrink-0 items-center justify-between border-b border-border bg-bg-subtle px-3 py-2">
         <span className="text-xs font-medium text-fg-muted">{t.library.title}</span>
         <div className="flex items-center gap-1">
+          {scopeFailedCount > 0 && (
+            <button
+              onClick={onReprocessFailedScope}
+              disabled={reprocessingFailed}
+              title={props.selectedFolderId
+                ? t.library.reprocessFailedFolderTitle(headerTarget, scopeFailedCount)
+                : t.library.reprocessFailedAllTitle(scopeFailedCount)}
+              className="rounded p-1 text-danger hover:bg-bg-muted hover:text-danger disabled:opacity-50"
+            >
+              {reprocessingFailed
+                ? <Loader2 size={13} className="animate-spin" />
+                : <AlertTriangle size={13} />}
+            </button>
+          )}
           <button
             onClick={onReprocessScope}
             disabled={reprocessingAll}
@@ -190,7 +241,7 @@ export function FolderTree(props: Props) {
 
 function FolderRow({
   folder, depth,
-  selectedEntryId, selectedFolderId, selectedFolderName,
+  selectedEntryId, selectedFolderId, selectedFolderName, selectedFolderFailedCount,
   onSelectFile, onSelectFolder,
   ingestingFileIds,
   refreshKey,
@@ -205,6 +256,7 @@ function FolderRow({
   const [entries, setEntries] = useState<FileEntrySummary[] | null>(null);
   const [loading, setLoading] = useState(false);
   const [reprocessingFolder, setReprocessingFolder] = useState(false);
+  const [reprocessingFailedFolder, setReprocessingFailedFolder] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const loadedRef = useRef(false);
   const { t } = useI18n();
@@ -295,6 +347,26 @@ function FolderRow({
     }
   };
 
+  const onReprocessFailedFolder = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (reprocessingFailedFolder) return;
+    const failedCount = folder.ingest_summary?.failed ?? 0;
+    if (!confirm(t.library.reprocessFailedFolderConfirm(folder.name, failedCount))) return;
+    setReprocessingFailedFolder(true);
+    try {
+      const r = await files.reprocessBulk({ folder_id: folder.id, status: "failed" });
+      alert(
+        t.library.queuedReprocess(r.task_ids.length, r.reused_count, r.skipped_count),
+      );
+      refreshAfterSubtreeReprocess();
+    } catch (err) {
+      const msg = err instanceof ApiError ? err.message : String(err);
+      alert(t.library.bulkReprocessFailed(msg));
+    } finally {
+      setReprocessingFailedFolder(false);
+    }
+  };
+
   return (
     <div>
       <div
@@ -323,19 +395,31 @@ function FolderRow({
         <div
           className={cn(
             "items-center gap-0.5",
-            folderFailed || reprocessingFolder ? "flex" : "hidden group-hover:flex",
+            folderFailed || reprocessingFolder || reprocessingFailedFolder
+              ? "flex"
+              : "hidden group-hover:flex",
           )}
         >
+          {folderFailed && (
+            <button
+              onClick={onReprocessFailedFolder}
+              disabled={reprocessingFailedFolder}
+              title={t.library.reprocessFailedFolderTitle(
+                folder.name,
+                folder.ingest_summary?.failed ?? 0,
+              )}
+              className="rounded p-0.5 text-danger hover:bg-bg-base hover:text-danger disabled:opacity-50"
+            >
+              {reprocessingFailedFolder
+                ? <Loader2 size={11} className="animate-spin" />
+                : <AlertTriangle size={11} />}
+            </button>
+          )}
           <button
             onClick={onReprocessFolder}
             disabled={reprocessingFolder}
             title={t.library.reprocessFolderTitle(folder.name)}
-            className={cn(
-              "rounded p-0.5 hover:bg-bg-base disabled:opacity-50",
-              folderFailed
-                ? "text-danger hover:text-danger"
-                : "text-fg-subtle hover:text-fg-base",
-            )}
+            className="rounded p-0.5 text-fg-subtle hover:bg-bg-base hover:text-fg-base disabled:opacity-50"
           >
             {reprocessingFolder
               ? <Loader2 size={11} className="animate-spin" />
@@ -387,6 +471,7 @@ function FolderRow({
               selectedEntryId={selectedEntryId}
               selectedFolderId={selectedFolderId}
               selectedFolderName={selectedFolderName}
+              selectedFolderFailedCount={selectedFolderFailedCount}
               onSelectFile={onSelectFile}
               onSelectFolder={onSelectFolder}
               ingestingFileIds={ingestingFileIds}

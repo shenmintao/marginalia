@@ -169,6 +169,7 @@ export function LibraryPage() {
           selectedEntryId={selectedEntry?.id || null}
           selectedFolderId={selectedFolder?.id || null}
           selectedFolderName={selectedFolder?.name || null}
+          selectedFolderFailedCount={selectedFolder?.ingest_summary?.failed ?? null}
           onSelectFile={onSelectFile}
           onSelectFolder={onSelectFolder}
           ingestingFileIds={ingestingFileIds}
