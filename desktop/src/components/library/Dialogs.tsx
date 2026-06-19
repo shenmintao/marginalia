@@ -7,12 +7,12 @@
  *                       and recreates the subfolder structure under the
  *                       target via /v1/folders before uploading each file.
  */
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { X, Upload, FolderPlus, Loader2 } from "lucide-react";
 
 import { folders as foldersApi, uploads, ApiError, settings as settingsApi } from "@/api/client";
 import type { OnConflict } from "@/types/api";
-import { cn } from "@/lib/utils";
+import { cn, formatBytes } from "@/lib/utils";
 import { useI18n } from "@/lib/i18n";
 
 export function NewFolderDialog({ parentId, parentName, onClose, onCreated }: {
@@ -87,6 +87,35 @@ interface UploadItem {
   renamedTo?: string;
 }
 
+type UploadCategory =
+  | "documents"
+  | "pdfs"
+  | "images"
+  | "archives"
+  | "audio"
+  | "videos"
+  | "unknown";
+
+interface UploadGroup {
+  category: UploadCategory;
+  files: number;
+  bytes: number;
+  selectedFiles: number;
+  selectedBytes: number;
+  extensions: { ext: string; files: number; bytes: number }[];
+}
+
+const CATEGORY_ORDER: UploadCategory[] = [
+  "documents",
+  "pdfs",
+  "images",
+  "archives",
+  "audio",
+  "videos",
+  "unknown",
+];
+const DEFAULT_INCLUDED_CATEGORIES = CATEGORY_ORDER.filter((c) => c !== "videos");
+
 export function UploadDialog({ folderId, folderName, onClose, onUploaded }: {
   folderId: string | null;
   folderName: string;
@@ -99,6 +128,12 @@ export function UploadDialog({ folderId, folderName, onClose, onUploaded }: {
   const [running, setRunning] = useState(false);
   const [scanning, setScanning] = useState(false);
   const [dragOver, setDragOver] = useState(false);
+  const [includedCategories, setIncludedCategories] = useState<Set<UploadCategory>>(
+    () => new Set(DEFAULT_INCLUDED_CATEGORIES),
+  );
+  const [excludedExtensions, setExcludedExtensions] = useState<Set<string>>(
+    () => new Set(),
+  );
   const fileInput = useRef<HTMLInputElement>(null);
 
   // Seed conflict policy from the server's current default so what the
@@ -122,6 +157,36 @@ export function UploadDialog({ folderId, folderName, onClose, onUploaded }: {
 
   const addItems = (next: UploadItem[]) => {
     setItems((prev) => [...prev, ...next]);
+  };
+
+  const uploadPlan = useMemo(
+    () => summarizeUploadPlan(items, includedCategories, excludedExtensions),
+    [items, includedCategories, excludedExtensions],
+  );
+
+  const hasQueuedSelected = items.some(
+    (it) => it.status === "queued"
+      && shouldUploadItem(it, includedCategories, excludedExtensions),
+  );
+
+  const toggleCategory = (category: UploadCategory) => {
+    if (running) return;
+    setIncludedCategories((prev) => {
+      const next = new Set(prev);
+      if (next.has(category)) next.delete(category);
+      else next.add(category);
+      return next;
+    });
+  };
+
+  const toggleExtension = (ext: string) => {
+    if (running) return;
+    setExcludedExtensions((prev) => {
+      const next = new Set(prev);
+      if (next.has(ext)) next.delete(ext);
+      else next.add(ext);
+      return next;
+    });
   };
 
   const onPickFiles = (fs: FileList | File[]) => {
@@ -170,6 +235,7 @@ export function UploadDialog({ folderId, folderName, onClose, onUploaded }: {
     folderCache.set("", folderId);
     for (let i = 0; i < items.length; i++) {
       if (items[i].status !== "queued") continue;
+      if (!shouldUploadItem(items[i], includedCategories, excludedExtensions)) continue;
       setItems((p) => updateAt(p, i, { status: "uploading" }));
       try {
         const targetFolderId = await mkdirP(folderCache, items[i].relDirs);
@@ -243,8 +309,49 @@ export function UploadDialog({ folderId, folderName, onClose, onUploaded }: {
       </p>
 
       {items.length > 0 && (
+        <div className="mt-3 rounded-md border border-border bg-bg-subtle p-3 text-xs">
+          <div className="flex items-center justify-between gap-3">
+            <span className="font-medium text-fg-base">{t.dialogs.uploadFilterTitle}</span>
+            <span className="shrink-0 text-fg-muted">
+              {t.dialogs.uploadPlan(uploadPlan.selectedFiles, uploadPlan.skippedFiles)}
+            </span>
+          </div>
+          {uploadPlan.skippedFiles > 0 && (
+            <p className="mt-1 text-fg-muted">
+              {t.dialogs.uploadSkippedSummary(
+                uploadPlan.skippedFiles,
+                formatBytes(uploadPlan.skippedBytes),
+              )}
+            </p>
+          )}
+          <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
+            {uploadPlan.groups.map((group) => (
+              <FilterGroupCard
+                key={group.category}
+                group={group}
+                checked={includedCategories.has(group.category)}
+                excludedExtensions={excludedExtensions}
+                disabled={running}
+                onToggleCategory={toggleCategory}
+                onToggleExtension={toggleExtension}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {items.length > 0 && (
         <ul className="mt-3 max-h-64 space-y-1 overflow-y-auto rounded-md border border-border bg-bg-subtle p-2 text-xs">
-          {items.map((it, i) => <UploadRow key={i} item={it} />)}
+          {items.map((it, i) => (
+            <UploadRow
+              key={i}
+              item={it}
+              skipped={
+                it.status === "queued"
+                && !shouldUploadItem(it, includedCategories, excludedExtensions)
+              }
+            />
+          ))}
         </ul>
       )}
 
@@ -255,10 +362,10 @@ export function UploadDialog({ folderId, folderName, onClose, onUploaded }: {
         </button>
         <button
           onClick={start}
-          disabled={running || items.every((it) => it.status !== "queued")}
+          disabled={running || !hasQueuedSelected}
           className={cn(
             "flex items-center gap-1 rounded-md px-3 py-1.5 text-sm font-medium",
-            running || items.every((it) => it.status !== "queued")
+            running || !hasQueuedSelected
               ? "cursor-not-allowed bg-bg-muted text-fg-subtle"
               : "bg-accent text-accent-fg hover:opacity-90",
           )}
@@ -271,7 +378,74 @@ export function UploadDialog({ folderId, folderName, onClose, onUploaded }: {
   );
 }
 
-function UploadRow({ item }: { item: UploadItem }) {
+function FilterGroupCard({
+  group,
+  checked,
+  excludedExtensions,
+  disabled,
+  onToggleCategory,
+  onToggleExtension,
+}: {
+  group: UploadGroup;
+  checked: boolean;
+  excludedExtensions: Set<string>;
+  disabled: boolean;
+  onToggleCategory: (category: UploadCategory) => void;
+  onToggleExtension: (ext: string) => void;
+}) {
+  const { t } = useI18n();
+  return (
+    <div className="rounded-md border border-border bg-bg-base p-2">
+      <label className="flex cursor-pointer items-start gap-2">
+        <input
+          type="checkbox"
+          checked={checked}
+          disabled={disabled}
+          onChange={() => onToggleCategory(group.category)}
+          className="mt-0.5 accent-accent"
+        />
+        <span className="min-w-0 flex-1">
+          <span className="block font-medium text-fg-base">
+            {t.dialogs.uploadCategories[group.category]}
+          </span>
+          <span className="block text-fg-muted">
+            {t.dialogs.uploadCategorySummary(group.files, formatBytes(group.bytes))}
+          </span>
+        </span>
+      </label>
+      {group.extensions.length > 0 && (
+        <div className="mt-2 flex flex-wrap gap-1">
+          {group.extensions.map((ext) => {
+            const excluded = excludedExtensions.has(ext.ext);
+            return (
+              <button
+                key={ext.ext}
+                type="button"
+                disabled={disabled}
+                onClick={() => onToggleExtension(ext.ext)}
+                title={
+                  excluded
+                    ? t.dialogs.uploadIncludeExtension(ext.ext)
+                    : t.dialogs.uploadExcludeExtension(ext.ext)
+                }
+                className={cn(
+                  "rounded border px-1.5 py-0.5 text-[11px]",
+                  excluded
+                    ? "border-danger/50 bg-danger/10 text-danger"
+                    : "border-border text-fg-muted hover:border-accent hover:text-accent",
+                )}
+              >
+                {ext.ext} {ext.files}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function UploadRow({ item, skipped }: { item: UploadItem; skipped: boolean }) {
   const { t } = useI18n();
   const pct = item.file.size > 0 ? Math.round((item.loaded / item.file.size) * 100) : 0;
   const prefix = item.relDirs.length ? item.relDirs.join("/") + "/" : "";
@@ -283,9 +457,10 @@ function UploadRow({ item }: { item: UploadItem }) {
       </span>
       <span className="w-12 text-right text-fg-subtle">
         {item.status === "uploading" ? `${pct}%`
-         : item.status === "done" ? "✓"
+         : item.status === "done" ? "done"
          : item.status === "error" ? "!"
-         : "—"}
+         : skipped ? t.dialogs.skipped
+         : "-"}
       </span>
       {item.renamedTo && (
         <span className="truncate text-fg-subtle" title={t.dialogs.renamedTo(item.renamedTo)}>
@@ -304,6 +479,147 @@ function updateAt<T>(arr: T[], i: number, patch: Partial<T>): T[] {
   next[i] = { ...next[i], ...patch };
   return next;
 }
+
+function summarizeUploadPlan(
+  items: UploadItem[],
+  includedCategories: Set<UploadCategory>,
+  excludedExtensions: Set<string>,
+) {
+  const groups = new Map<UploadCategory, UploadGroup>();
+  let selectedFiles = 0;
+  let selectedBytes = 0;
+  let skippedFiles = 0;
+  let skippedBytes = 0;
+
+  for (const category of CATEGORY_ORDER) {
+    groups.set(category, {
+      category,
+      files: 0,
+      bytes: 0,
+      selectedFiles: 0,
+      selectedBytes: 0,
+      extensions: [],
+    });
+  }
+
+  const extMaps = new Map<UploadCategory, Map<string, { files: number; bytes: number }>>();
+  for (const item of items) {
+    const category = categoryForFile(item.file);
+    const ext = extensionForFile(item.file);
+    const group = groups.get(category)!;
+    group.files += 1;
+    group.bytes += item.file.size;
+    if (!extMaps.has(category)) extMaps.set(category, new Map());
+    const extMap = extMaps.get(category)!;
+    const extStat = extMap.get(ext) ?? { files: 0, bytes: 0 };
+    extStat.files += 1;
+    extStat.bytes += item.file.size;
+    extMap.set(ext, extStat);
+
+    if (shouldUploadItem(item, includedCategories, excludedExtensions)) {
+      selectedFiles += 1;
+      selectedBytes += item.file.size;
+      group.selectedFiles += 1;
+      group.selectedBytes += item.file.size;
+    } else {
+      skippedFiles += 1;
+      skippedBytes += item.file.size;
+    }
+  }
+
+  for (const [category, extMap] of extMaps) {
+    const group = groups.get(category)!;
+    group.extensions = [...extMap.entries()]
+      .map(([ext, stat]) => ({ ext, ...stat }))
+      .sort((a, b) => b.files - a.files || a.ext.localeCompare(b.ext));
+  }
+
+  return {
+    groups: CATEGORY_ORDER.map((category) => groups.get(category)!)
+      .filter((group) => group.files > 0),
+    selectedFiles,
+    selectedBytes,
+    skippedFiles,
+    skippedBytes,
+  };
+}
+
+function shouldUploadItem(
+  item: UploadItem,
+  includedCategories: Set<UploadCategory>,
+  excludedExtensions: Set<string>,
+): boolean {
+  const category = categoryForFile(item.file);
+  const ext = extensionForFile(item.file);
+  return includedCategories.has(category) && !excludedExtensions.has(ext);
+}
+
+function categoryForFile(file: File): UploadCategory {
+  const mime = (file.type || "").toLowerCase();
+  const ext = extensionForFile(file);
+  if (mime === "application/pdf" || ext === ".pdf") return "pdfs";
+  if (mime.startsWith("video/") || VIDEO_EXTENSIONS.has(ext)) return "videos";
+  if (mime.startsWith("audio/") || AUDIO_EXTENSIONS.has(ext)) return "audio";
+  if (mime.startsWith("image/") || IMAGE_EXTENSIONS.has(ext)) return "images";
+  if (ARCHIVE_EXTENSIONS.has(ext) || ARCHIVE_MIMES.has(mime)) return "archives";
+  if (
+    mime.startsWith("text/")
+    || DOCUMENT_EXTENSIONS.has(ext)
+    || DOCUMENT_MIMES.has(mime)
+  ) {
+    return "documents";
+  }
+  return "unknown";
+}
+
+function extensionForFile(file: File): string {
+  const idx = file.name.lastIndexOf(".");
+  if (idx <= 0 || idx === file.name.length - 1) return "(none)";
+  return file.name.slice(idx).toLowerCase();
+}
+
+const VIDEO_EXTENSIONS = new Set([
+  ".3gp", ".avi", ".flv", ".m4v", ".mkv", ".mov", ".mp4", ".mpeg",
+  ".mpg", ".webm", ".wmv",
+]);
+const AUDIO_EXTENSIONS = new Set([
+  ".aac", ".aiff", ".flac", ".m4a", ".mp3", ".oga", ".ogg", ".opus",
+  ".wav", ".wma",
+]);
+const IMAGE_EXTENSIONS = new Set([
+  ".avif", ".bmp", ".gif", ".heic", ".heif", ".jpeg", ".jpg", ".png",
+  ".svg", ".tif", ".tiff", ".webp",
+]);
+const ARCHIVE_EXTENSIONS = new Set([
+  ".7z", ".bz2", ".gz", ".rar", ".tar", ".tgz", ".xz", ".zip",
+]);
+const DOCUMENT_EXTENSIONS = new Set([
+  ".bat", ".c", ".cpp", ".csv", ".doc", ".docx", ".go", ".h", ".hpp",
+  ".htm", ".html", ".java", ".js", ".json", ".jsx", ".kt", ".log",
+  ".md", ".odf", ".ods", ".odt", ".php", ".ppt", ".pptx", ".ps1",
+  ".py", ".rb", ".rs", ".rst", ".rtf", ".scala", ".sh", ".sql",
+  ".swift", ".tex", ".toml", ".ts", ".tsx", ".txt", ".xls", ".xlsx",
+  ".xml", ".yaml", ".yml",
+]);
+const ARCHIVE_MIMES = new Set([
+  "application/gzip",
+  "application/vnd.rar",
+  "application/x-7z-compressed",
+  "application/x-bzip2",
+  "application/x-tar",
+  "application/zip",
+]);
+const DOCUMENT_MIMES = new Set([
+  "application/json",
+  "application/msword",
+  "application/rtf",
+  "application/vnd.ms-excel",
+  "application/vnd.ms-powerpoint",
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/xml",
+]);
 
 function ModalShell({ title, onClose, children, wide }: {
   title: React.ReactNode;

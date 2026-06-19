@@ -170,6 +170,7 @@ const en = {
       "Select a file from the tree to preview it. Click here to deselect.",
     emptyHint:
       "Select or create a folder to start. Files appear under their folder.",
+    resizeSidebar: "Drag to resize the library sidebar",
     reprocessFolderConfirm: (name: string) =>
       `Re-run AI analysis on every file in "${name}" and its subfolders?`,
     reprocessAllConfirm:
@@ -255,6 +256,25 @@ const en = {
     },
     uploadAnalysisHint:
       "After upload, watch the bottom Activity button or Library status badges until AI analysis finishes. Failed files can be retried.",
+    uploadFilterTitle: "Import filter",
+    uploadPlan: (selected: number, skipped: number) =>
+      `${selected} to upload · ${skipped} skipped`,
+    uploadSkippedSummary: (files: number, size: string) =>
+      `Skipping ${files} file(s), ${size}.`,
+    uploadCategories: {
+      documents: "Documents",
+      pdfs: "PDFs",
+      images: "Images",
+      archives: "Archives",
+      audio: "Audio",
+      videos: "Videos",
+      unknown: "Unknown",
+    },
+    uploadCategorySummary: (files: number, size: string) =>
+      `${files} file(s) · ${size}`,
+    uploadExcludeExtension: (ext: string) => `Skip ${ext}`,
+    uploadIncludeExtension: (ext: string) => `Include ${ext}`,
+    skipped: "skip",
     start: "Start",
     uploading: "Uploading...",
     renamedTo: (name: string) => `renamed to ${name}`,
@@ -756,6 +776,7 @@ const zh: I18nStrings = {
     selectFileTitle: (folderName: string | null) => folderName || "资料库",
     selectFileHint: "从左侧树中选择文件以预览。点击这里取消选择。",
     emptyHint: "选择或创建一个文件夹开始。文件会显示在所属文件夹下。",
+    resizeSidebar: "拖拽调整资料库侧栏宽度",
     reprocessFolderConfirm: (name: string) =>
       `重新对 "${name}" 及其子文件夹中的所有文件运行 AI 分析？`,
     reprocessAllConfirm:
@@ -841,6 +862,25 @@ const zh: I18nStrings = {
     },
     uploadAnalysisHint:
       "上传完成后，请关注底部后台任务按钮或资料库状态标记，等待 AI 分析完成；失败文件可以重试。",
+    uploadFilterTitle: "导入过滤",
+    uploadPlan: (selected: number, skipped: number) =>
+      `将上传 ${selected} 个 · 跳过 ${skipped} 个`,
+    uploadSkippedSummary: (files: number, size: string) =>
+      `已跳过 ${files} 个文件，${size}。`,
+    uploadCategories: {
+      documents: "文档",
+      pdfs: "PDF",
+      images: "图片",
+      archives: "压缩包",
+      audio: "音频",
+      videos: "视频",
+      unknown: "未知",
+    },
+    uploadCategorySummary: (files: number, size: string) =>
+      `${files} 个文件 · ${size}`,
+    uploadExcludeExtension: (ext: string) => `跳过 ${ext}`,
+    uploadIncludeExtension: (ext: string) => `包含 ${ext}`,
+    skipped: "跳过",
     start: "开始",
     uploading: "上传中...",
     renamedTo: (name: string) => `已重命名为 ${name}`,

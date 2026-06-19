@@ -9,7 +9,14 @@
  *  - Background ingest tasks are reflected by spinners on the matching file rows
  *    via a single 4 s poll of /v1/tasks/active
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import { useSearchParams } from "react-router-dom";
 import { Inbox } from "lucide-react";
 
@@ -20,6 +27,11 @@ import { FileViewer } from "@/components/library/FileViewer";
 import { MetaPanel } from "@/components/library/MetaPanel";
 import { NewFolderDialog, UploadDialog } from "@/components/library/Dialogs";
 import { useI18n, type I18nStrings } from "@/lib/i18n";
+
+const SIDEBAR_WIDTH_KEY = "marginalia.library.sidebarWidth";
+const SIDEBAR_DEFAULT_WIDTH = 288;
+const SIDEBAR_MIN_WIDTH = 240;
+const SIDEBAR_MAX_WIDTH = 560;
 
 export function LibraryPage() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -51,6 +63,8 @@ export function LibraryPage() {
   const [uploadInto, setUploadInto] = useState<{ id: string | null; name: string } | null>(null);
 
   const [active, setActive] = useState<ActiveTasks | null>(null);
+  const sidebarRef = useRef<HTMLDivElement>(null);
+  const [sidebarWidth, setSidebarWidth] = useState(readSidebarWidth);
   const ingestingFileIds = useMemo<Set<string>>(() => {
     const set = new Set<string>();
     if (!active) return set;
@@ -162,9 +176,39 @@ export function LibraryPage() {
   const headerTargetFolderId = selectedFolder?.id ?? null;
   const headerTargetName = selectedFolder?.name ?? t.library.root;
 
+  const startSidebarResize = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    const left = sidebarRef.current?.parentElement?.getBoundingClientRect().left ?? 0;
+    const prevCursor = document.body.style.cursor;
+    const prevUserSelect = document.body.style.userSelect;
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+
+    const onMove = (event: PointerEvent) => {
+      const next = clampSidebarWidth(event.clientX - left);
+      setSidebarWidth(next);
+      window.localStorage.setItem(SIDEBAR_WIDTH_KEY, String(next));
+    };
+    const onUp = () => {
+      document.body.style.cursor = prevCursor;
+      document.body.style.userSelect = prevUserSelect;
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+    };
+
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+  }, []);
+
   return (
     <div className="flex h-full">
-      <div className="w-72 shrink-0 border-r border-border bg-bg-base">
+      <div
+        ref={sidebarRef}
+        className="shrink-0 border-r border-border bg-bg-base"
+        style={{ width: sidebarWidth }}
+      >
         <FolderTree
           selectedEntryId={selectedEntry?.id || null}
           selectedFolderId={selectedFolder?.id || null}
@@ -199,6 +243,16 @@ export function LibraryPage() {
           }}
           onClearSelection={clearSelection}
         />
+      </div>
+      <div
+        role="separator"
+        aria-orientation="vertical"
+        aria-label={t.library.resizeSidebar}
+        title={t.library.resizeSidebar}
+        onPointerDown={startSidebarResize}
+        className="group relative z-10 w-1 shrink-0 cursor-col-resize bg-bg-base hover:bg-accent/10"
+      >
+        <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-border group-hover:bg-accent" />
       </div>
 
       <main className="flex flex-1 overflow-hidden bg-bg-base">
@@ -245,6 +299,17 @@ function activeTaskFileIds(active: ActiveTasks): Set<string> {
   for (const task of active.running) if (task.file_id) ids.add(task.file_id);
   for (const task of active.pending) if (task.file_id) ids.add(task.file_id);
   return ids;
+}
+
+function readSidebarWidth(): number {
+  if (typeof window === "undefined") return SIDEBAR_DEFAULT_WIDTH;
+  const raw = window.localStorage.getItem(SIDEBAR_WIDTH_KEY);
+  const parsed = raw ? Number(raw) : NaN;
+  return clampSidebarWidth(Number.isFinite(parsed) ? parsed : SIDEBAR_DEFAULT_WIDTH);
+}
+
+function clampSidebarWidth(width: number): number {
+  return Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, Math.round(width)));
 }
 
 function EmptyViewer({
