@@ -24,6 +24,7 @@ from typing import Any, Mapping
 from marginalia.repositories import audit_events as audit_events_repo
 from marginalia.db.session import session_scope
 from marginalia.repositories import tasks as tasks_repo
+from marginalia.services.ingest_status import mark_file_failed_for_dead_ingest_task
 from marginalia.tasks.kinds import KIND_RECOVER_STUCK_TASKS, task_handler
 
 log = logging.getLogger(__name__)
@@ -52,6 +53,13 @@ async def handle_recover_stuck_tasks(payload: Mapping[str, Any]) -> None:
                     task_id=t.id,
                     now=now,
                     error="recover_stuck_tasks: lease expired beyond max_attempts",
+                )
+                await mark_file_failed_for_dead_ingest_task(
+                    session,
+                    task_id=t.id,
+                    kind=t.kind,
+                    payload=t.payload or {},
+                    reason="recover_stuck_tasks: lease expired beyond max_attempts",
                 )
                 await audit_events_repo.append(
                     session,

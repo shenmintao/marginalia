@@ -4,6 +4,8 @@ Caller owns the transaction.
 """
 from __future__ import annotations
 
+from datetime import datetime
+
 from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -69,6 +71,27 @@ async def update_storage_key(
         .where(File.id == file_id)
         .values(storage_key=storage_key)
     )
+
+
+async def mark_ingest_failed(
+    db: AsyncSession, *, file_id: str, now: datetime,
+) -> bool:
+    """Mark a live file as failed if ingest has not completed.
+
+    Used when an ingest_file task reaches the terminal dead state outside the
+    handler's normal exception path, e.g. stale-task recovery or a runner-level
+    configuration failure.
+    """
+    result = await db.execute(
+        update(File)
+        .where(
+            File.id == file_id,
+            File.deleted_at.is_(None),
+            File.ingest_status.in_(("pending", "processing")),
+        )
+        .values(ingest_status="failed", updated_at=now)
+    )
+    return bool(result.rowcount or 0)
 
 
 async def list_live_ids(

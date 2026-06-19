@@ -275,6 +275,45 @@ def _ensure_journal_invalidation(bind) -> None:
     _ensure_query_performance_indexes(bind)
 
 
+def _reconcile_dead_ingest_files(bind) -> None:
+    """Repair files left pending/processing after terminal ingest task death."""
+    inspector = sa.inspect(bind)
+    existing_tables = set(inspector.get_table_names())
+    if not {"files", "tasks"}.issubset(existing_tables):
+        return
+
+    now = datetime.now(timezone.utc)
+    if bind.dialect.name == "postgresql":
+        file_id_expr = "payload ->> 'file_id'"
+    else:
+        file_id_expr = "json_extract(payload, '$.file_id')"
+
+    bind.execute(
+        sa.text(f"""
+            UPDATE files
+            SET ingest_status = 'failed',
+                updated_at = :now
+            WHERE deleted_at IS NULL
+              AND ingest_status IN ('pending', 'processing')
+              AND EXISTS (
+                  SELECT 1
+                  FROM tasks dead
+                  WHERE dead.kind = 'ingest_file'
+                    AND dead.status = 'dead'
+                    AND {file_id_expr.replace('payload', 'dead.payload')} = files.id
+              )
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM tasks active
+                  WHERE active.kind = 'ingest_file'
+                    AND active.status IN ('pending', 'running')
+                    AND {file_id_expr.replace('payload', 'active.payload')} = files.id
+              )
+        """),
+        {"now": now},
+    )
+
+
 def _sqlite_supports_metadata_fts(bind) -> bool:
     if bind.dialect.name != "sqlite":
         return False
@@ -738,6 +777,7 @@ POST_BASELINE_SHIMS: tuple[tuple[str, Callable[[Any], None]], ...] = (
     ("0010_entry_metadata_fts_description", _ensure_entry_metadata_fts_description),
     ("0011_postgres_metadata_fts", _ensure_postgres_metadata_fts_indexes),
     ("0012_journal_invalidation", _ensure_journal_invalidation),
+    ("0013_reconcile_dead_ingest_files", _reconcile_dead_ingest_files),
 )
 
 ALEMBIC_HEAD_REVISION = POST_BASELINE_SHIMS[-1][0]

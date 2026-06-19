@@ -261,6 +261,12 @@ const en = {
       `${selected} to upload · ${skipped} skipped`,
     uploadSkippedSummary: (files: number, size: string) =>
       `Skipping ${files} file(s), ${size}.`,
+    uploadSelectAll: "All",
+    uploadSelectNone: "None",
+    uploadFile: "File",
+    uploadType: "Type",
+    uploadSize: "Size",
+    uploadStatus: "Status",
     uploadCategories: {
       documents: "Documents",
       pdfs: "PDFs",
@@ -867,6 +873,12 @@ const zh: I18nStrings = {
       `将上传 ${selected} 个 · 跳过 ${skipped} 个`,
     uploadSkippedSummary: (files: number, size: string) =>
       `已跳过 ${files} 个文件，${size}。`,
+    uploadSelectAll: "全选",
+    uploadSelectNone: "全不选",
+    uploadFile: "文件",
+    uploadType: "类型",
+    uploadSize: "大小",
+    uploadStatus: "状态",
     uploadCategories: {
       documents: "文档",
       pdfs: "PDF",

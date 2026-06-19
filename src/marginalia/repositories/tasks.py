@@ -139,6 +139,22 @@ async def mark_pending_dead_by_kinds(
     return int(result.rowcount or 0)
 
 
+async def list_pending_by_kinds(
+    db: AsyncSession, *, kinds: Sequence[str],
+) -> list[Task]:
+    """Pending task rows for the given kinds before a bulk terminal update."""
+    if not kinds:
+        return []
+    rows = (
+        await db.execute(
+            select(Task)
+            .where(Task.status == "pending", Task.kind.in_(list(kinds)))
+            .order_by(Task.created_at.asc())
+        )
+    ).scalars().all()
+    return list(rows)
+
+
 async def reschedule_for_retry(
     db: AsyncSession,
     *,

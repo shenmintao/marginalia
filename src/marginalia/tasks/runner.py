@@ -11,6 +11,7 @@ from marginalia.config import LlmConfigError, Settings, get_settings, validate_l
 from marginalia.db.session import session_scope
 from marginalia.repositories import tasks as tasks_repo
 from marginalia.repositories import task_outcomes as outcomes_repo
+from marginalia.services.ingest_status import mark_file_failed_for_dead_ingest_task
 from marginalia.tasks import handlers as _handlers_pkg  # noqa: F401  (register)
 from marginalia.tasks.kinds import LLM_DEPENDENT_KINDS, get_handler
 from marginalia.tasks.usage import (
@@ -73,12 +74,24 @@ class TaskRunner:
         if self._has_llm_key():
             return
         async with session_scope() as session:
+            pending = await tasks_repo.list_pending_by_kinds(
+                session,
+                kinds=sorted(LLM_DEPENDENT_KINDS),
+            )
             n = await tasks_repo.mark_pending_dead_by_kinds(
                 session,
                 kinds=sorted(LLM_DEPENDENT_KINDS),
                 now=_now(),
                 error=_NO_LLM_KEY_ERROR,
             )
+            for task in pending:
+                await mark_file_failed_for_dead_ingest_task(
+                    session,
+                    task_id=task.id,
+                    kind=task.kind,
+                    payload=task.payload or {},
+                    reason=_NO_LLM_KEY_ERROR,
+                )
             await session.commit()
         if n:
             log.warning(
@@ -263,6 +276,7 @@ class TaskRunner:
         self, task_id: str, attempts: int, max_attempts: int, error: str
     ) -> bool:
         async with session_scope() as session:
+            task = await tasks_repo.get(session, task_id)
             if attempts >= max_attempts:
                 changed = await tasks_repo.mark_dead(
                     session,
@@ -271,6 +285,14 @@ class TaskRunner:
                     error=error,
                     worker_id=self.worker_id,
                 )
+                if changed and task is not None:
+                    await mark_file_failed_for_dead_ingest_task(
+                        session,
+                        task_id=task.id,
+                        kind=task.kind,
+                        payload=task.payload or {},
+                        reason=error,
+                    )
             else:
                 changed = await tasks_repo.reschedule_for_retry(
                     session,
