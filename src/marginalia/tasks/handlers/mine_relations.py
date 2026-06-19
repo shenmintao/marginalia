@@ -1,8 +1,8 @@
 """mine_relations - unified cheap-signal miner dispatcher.
 
 Three non-LLM miners share a daily slot. They write raw observations into
-entry_relations rows that lazy `/discover` vetting or optional batch
-vet_relations later judges:
+entry_relations rows that explicit `/discover --vet` requests or optional
+batch vet_relations later judge:
 
   miner                      legacy interval
   ------------------------------------------

@@ -113,13 +113,19 @@ async def handle_vet_relations(payload: Mapping[str, Any]) -> None:
     cap = int(payload.get("cap") or MAX_VETS_PER_RUN)
     batch = int(payload.get("batch") or BATCH_SIZE)
     min_obs = int(payload.get("min_observation") or MIN_OBSERVATION_TO_VET)
+    entry_id = str(payload.get("entry_id") or "").strip() or None
+    scheduled_by = str(payload.get("scheduled_by") or "vet_relations")
     now = _utcnow()
     ttl_cutoff = now - timedelta(days=int(payload.get("ttl_days") or VET_TTL_DAYS))
 
-    candidates = await _fetch_candidates(
-        cap=cap,
-        min_obs=min_obs,
-        ttl_cutoff=ttl_cutoff,
+    candidates = (
+        await _fetch_direct_candidates(entry_id=entry_id, cap=cap, min_obs=min_obs)
+        if entry_id is not None
+        else await _fetch_candidates(
+            cap=cap,
+            min_obs=min_obs,
+            ttl_cutoff=ttl_cutoff,
+        )
     )
     if not candidates:
         async with session_scope() as session:
@@ -128,7 +134,11 @@ async def handle_vet_relations(payload: Mapping[str, Any]) -> None:
                 task_kind=KIND_VET_RELATIONS,
                 object_kind=GLOBAL_OBJECT_KIND, object_id=GLOBAL_OBJECT_ID,
                 outcome="noop",
-                detail={"candidates": 0},
+                detail={
+                    "candidates": 0,
+                    "entry_id": entry_id,
+                    "scheduled_by": scheduled_by,
+                },
             )
             await session.commit()
         return
@@ -175,6 +185,7 @@ async def handle_vet_relations(payload: Mapping[str, Any]) -> None:
                         "verdict": v["verdict"],
                         "reason": reason,
                         "observation_count": cand["observation_count"],
+                        "scheduled_by": scheduled_by,
                     },
                 )
                 if yes:
@@ -203,6 +214,8 @@ async def handle_vet_relations(payload: Mapping[str, Any]) -> None:
                     "candidates": len(candidates),
                     "failed": failed_count,
                     "last_error": last_error,
+                    "entry_id": entry_id,
+                    "scheduled_by": scheduled_by,
                 },
             )
             await session.commit()
@@ -232,6 +245,8 @@ async def handle_vet_relations(payload: Mapping[str, Any]) -> None:
                 "last_error": last_error,
                 "cap": cap,
                 "batch": batch,
+                "entry_id": entry_id,
+                "scheduled_by": scheduled_by,
             },
         )
         await session.commit()
@@ -294,6 +309,19 @@ async def _fetch_candidates(
             if len(out) >= cap:
                 break
         return out
+
+
+async def _fetch_direct_candidates(
+    *, entry_id: str, cap: int, min_obs: int,
+) -> list[dict[str, Any]]:
+    """Pull direct unvetted neighbours for an explicit discover-triggered vet."""
+    async with session_scope() as session:
+        return await relations_repo.list_direct_unvetted_candidates(
+            session,
+            entry_id=entry_id,
+            min_obs=min_obs,
+            limit=max(1, cap),
+        )
 
 async def _ask_llm(
     client, chunk: list[dict[str, Any]]

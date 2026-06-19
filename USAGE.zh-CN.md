@@ -250,6 +250,46 @@ FTS5 trigram 表;Postgres 使用 `to_tsvector` / `websearch_to_tsquery`
 表达式 GIN 索引。中文双字词这类短 CJK 查询不会再被 trigram 路径静默丢弃,
 混合查询里会用有界 LIKE fallback 补回。
 
+### PDF 和图片索引限制
+
+PDF ingest 会保留原文件,但 ingest 时生成的 LLM 索引有预算:
+
+| 行为 | 数值 | 影响 |
+|------|------|------|
+| 文本层 ingest 上限 | 400 页 | 对有文本层的 PDF,后续页不会进入 ingest-time summary/index;原 PDF 仍可通过显式 page range 读取。 |
+| 分块索引触发条件 | >60 个索引页,或渲染上下文 >80 KB | 长 PDF 会从单 prompt 切到按 chunk 索引;这本身不是数据丢失。 |
+| chunk 大小 | 40 页,必要时继续缩小 | 每个 chunk 会尽量缩小到 80 KB 以下。 |
+| 单 chunk/单页仍超限 | 80 KB 渲染上下文 | 如果 chunk 已经无法继续缩小,只截断这个 prompt chunk,并在 coverage 记录 `prompt_text_cap` / `truncated_chunks`。 |
+| 扫描件检测 | 平均每页 <50 个文本字符 | 有 vision profile 时走 OCR;没有 vision 时标记为需要 OCR,不会当成空文本成功索引。 |
+| OCR ingest 上限 | 配置了 `OCR_MAX_PAGES` 时生效 | 默认 OCR 处理所有页;如果配置了正数上限,后续 OCR 页会被省略,coverage 记录 `ocr_page_cap`。 |
+
+PDF 内嵌图片 caption 是可选增强,只在配置了 vision profile 且 PDF 没有走
+OCR 模式时运行:
+
+| 行为 | 数值 | 影响 |
+|------|------|------|
+| 每页内嵌图片 | 5 | 同一页更多图片会跳过 caption。 |
+| 每个 PDF 的内嵌图片 | 30 | 后续内嵌图片会跳过 caption。 |
+| 最小内嵌图片 | 512 bytes;已知尺寸时每边至少 100 px | 更小的图片在 caption 前过滤。 |
+| 每张内嵌图片发送给 VLM 的字节数 | 4 MB | 更大的提取图片会在 caption 调用前截断。 |
+
+独立 raster image ingest 走另一条路径:必须有 vision profile,最多从图片文件读取
+10 MB,再重新编码为 JPEG 并压到 1568 px 长边,最后索引 VLM 描述。
+
+PDF 读取窗口是分页限制,不是 ingest 丢失:
+
+| 行为 | 数值 | 影响 |
+|------|------|------|
+| 默认 PDF 读取 | 20 页 | 没有指定页范围时使用。 |
+| 单次 PDF read 调用上限 | 50 页 | 显式 page window 每次 `read_files` 调用最多读取这些页。 |
+| 无范围 PDF pattern search | 200 页 | 没有显式 page range 的 pattern search 只搜索前缀。 |
+
+Coverage metadata 存在 `description.coverage` 下,并会在可用时出现在
+metadata/search JSON 里。常用字段包括 `indexed_partial`,
+`partial_reasons`, `indexed_pages`, `total_pages`, `max_index_pages`,
+`chunked`, `chunk_count`, `text_truncated`, `ocr_used` 和
+`truncated_chunks`。
+
 journal 召回会在读取时校验引用 entry:如果旧笔记指向已删除 entry,或源文件
 在笔记写入后重新 ingest,笔记仍保留用于审计,但会标记为 stale 并排在当前
 有效笔记之后。后续 reflect 如果发现同一 entry 的旧 journal 结论被直接矛盾,
@@ -400,10 +440,11 @@ marginalia> /tend
      suggest_demotion 等),实时打印每个任务的产出
 ```
 
-关系挖掘默认是 lazy:后台 miner 先写廉价关系信号,`/discover` 命中未判断边
-时再调用 LLM vet 并缓存结果。需要后台提前批量判断时,设置
-`RELATION_BACKGROUND_VETTING_ENABLED=true`;`MAINTENANCE_DAILY_TOKEN_BUDGET`
-可限制低优先后台 LLM 维护用量。
+关系发现默认纯读:后台 miner 先写廉价关系信号,`/discover` 只读已经 vetted
+的图,不会在请求里调用 LLM。需要判断某个 seed 的直连 raw signal 时,运行
+`/discover <entry_id> --vet`,它会排后台任务并在完成后写回缓存。需要后台
+提前批量判断时,设置 `RELATION_BACKGROUND_VETTING_ENABLED=true`;
+`MAINTENANCE_DAILY_TOKEN_BUDGET` 可限制低优先后台 LLM 维护用量。
 
 被 demoted / archived 的 entry 默认不参与新查询的检索范围。想看哪些
 被自动降级了:

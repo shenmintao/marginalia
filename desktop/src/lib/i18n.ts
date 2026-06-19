@@ -174,8 +174,16 @@ const en = {
       `Re-run AI analysis on every file in "${name}" and its subfolders?`,
     reprocessAllConfirm:
       "Re-run AI analysis on EVERY file in the library?\n\nThis clears existing summaries and tags, then re-ingests with the current LLM. Could take a while.",
+    reprocessFailedFolderConfirm: (name: string, count: number) =>
+      `Retry AI analysis for ${count} failed file(s) in "${name}" and its subfolders?`,
+    reprocessFailedAllConfirm: (count: number) =>
+      `Retry AI analysis for ${count} failed file(s) in the library?`,
     reprocessFolderTitle: (name: string) => `Reprocess "${name}" subtree`,
     reprocessAllTitle: "Reprocess entire library",
+    reprocessFailedFolderTitle: (name: string, count: number) =>
+      `Retry ${count} failed file(s) in "${name}"`,
+    reprocessFailedAllTitle: (count: number) =>
+      `Retry ${count} failed file(s) in the library`,
     newFolderIn: (name: string) => `New folder in ${name}`,
     uploadTo: (name: string) => `Upload to ${name}`,
     emptyTree: "Empty. Use the buttons above to create a folder or upload.",
@@ -752,8 +760,16 @@ const zh: I18nStrings = {
       `重新对 "${name}" 及其子文件夹中的所有文件运行 AI 分析？`,
     reprocessAllConfirm:
       "重新对资料库中的所有文件运行 AI 分析？\n\n这会清除已有摘要和标签，并用当前 LLM 重新 ingest，可能需要一段时间。",
+    reprocessFailedFolderConfirm: (name: string, count: number) =>
+      `重试 "${name}" 及其子文件夹中的 ${count} 个失败文件？`,
+    reprocessFailedAllConfirm: (count: number) =>
+      `重试资料库中的 ${count} 个失败文件？`,
     reprocessFolderTitle: (name: string) => `重新处理 "${name}" 子树`,
     reprocessAllTitle: "重新处理整个资料库",
+    reprocessFailedFolderTitle: (name: string, count: number) =>
+      `重试 "${name}" 中的 ${count} 个失败文件`,
+    reprocessFailedAllTitle: (count: number) =>
+      `重试资料库中的 ${count} 个失败文件`,
     newFolderIn: (name: string) => `在 ${name} 中新建文件夹`,
     uploadTo: (name: string) => `上传到 ${name}`,
     emptyTree: "暂无内容。使用上方按钮创建文件夹或上传文件。",

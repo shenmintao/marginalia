@@ -215,6 +215,7 @@ Use `/upload` for files outside the vault. Use `/ingest` for files already insid
 /info <entry_id>               metadata and preview
 /discover <entry_id> [N]       vetted related entries
 /discover <entry_id> --all     include unvetted relation signals
+/discover <entry_id> --vet     queue background vetting for direct signals
 ```
 
 Any non-slash input is sent to the agent.
@@ -320,10 +321,12 @@ reranked top evidence directly.
 ```
 
 Maintenance includes tag quality, catalog restructuring, lifecycle suggestions,
-relation mining, view proposals, entry-extra refresh, and pruning. Batch
-relation vetting is optional; `/discover` vets directly hit unjudged edges on
-demand, while `RELATION_BACKGROUND_VETTING_ENABLED=true` lets the periodic
-worker pre-vet relation edges ahead of time.
+relation mining, view proposals, entry-extra refresh, and pruning. Relation
+discovery is pure-read by default: `/discover` reads the already-vetted graph
+without calling an LLM. Use `/discover <entry_id> --vet` to queue background
+vetting for that seed's direct raw edges, or set
+`RELATION_BACKGROUND_VETTING_ENABLED=true` to let the periodic worker pre-vet
+relation edges ahead of time.
 
 ### MCP Server
 
@@ -510,6 +513,47 @@ LLM_VISION_MODEL=gpt-4o
 ```
 
 Without vision, scanned PDFs are marked as needing OCR instead of producing misleading empty text.
+
+### PDF and image indexing limits
+
+PDF ingest keeps the original file, but the ingest-time LLM index is bounded:
+
+| Behavior | Value | Effect |
+|----------|-------|--------|
+| Text-layer ingest cap | 400 pages | For text-layer PDFs, later pages are omitted from the ingest-time summary/index; the stored PDF can still be read by explicit page range. |
+| Chunked indexing trigger | >60 indexed pages or >80 KB rendered context | Long PDFs switch from one prompt to per-chunk indexing; this is not data loss by itself. |
+| Chunk size | 40 pages, then smaller if needed | Each chunk is shrunk until its rendered prompt is under 80 KB when possible. |
+| Oversize single chunk/page | 80 KB rendered context | If a chunk cannot be reduced further, only that prompt chunk is truncated and coverage records `prompt_text_cap` / `truncated_chunks`. |
+| Scanned-PDF detection | <50 text chars/page on average | With a vision profile, ingest falls back to OCR. Without vision, the file is marked as needing OCR rather than indexed as empty text. |
+| OCR ingest cap | `OCR_MAX_PAGES` when configured | By default OCR processes all pages; if a positive cap is configured, later OCR pages are omitted and coverage records `ocr_page_cap`. |
+
+Embedded PDF image captions are optional enrichment and only run when a vision
+profile is configured and the PDF is not in OCR mode:
+
+| Behavior | Value | Effect |
+|----------|-------|--------|
+| Images per PDF page | 5 | More embedded images on the same page are skipped. |
+| Images per PDF document | 30 | Later embedded images are skipped. |
+| Minimum embedded image | 512 bytes and, when dimensions are known, 100 px on each side | Smaller images are filtered before captioning. |
+| Bytes sent per embedded image | 4 MB | Larger extracted images are clipped before the VLM caption call. |
+
+Standalone raster image ingest has a different path: it requires a vision
+profile, reads at most 10 MB from the image file, downscales/re-encodes to JPEG
+with a 1568 px long edge, and indexes the VLM description.
+
+PDF read-time windows are pagination limits, not ingest loss:
+
+| Behavior | Value | Effect |
+|----------|-------|--------|
+| Default PDF read | 20 pages | Used when no page range is requested. |
+| Max PDF pages per read call | 50 pages | Explicit page windows are capped per `read_files` call. |
+| Unscoped PDF pattern search | 200 pages | Pattern search without an explicit page range searches only the prefix. |
+
+Coverage metadata is stored under `description.coverage` and surfaced in
+metadata/search JSON where available. Important fields include
+`indexed_partial`, `partial_reasons`, `indexed_pages`, `total_pages`,
+`max_index_pages`, `chunked`, `chunk_count`, `text_truncated`, `ocr_used`,
+and `truncated_chunks`.
 
 ### Storage backend mismatch
 

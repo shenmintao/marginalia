@@ -116,7 +116,6 @@ async def _related_entries_for(
         session,
         seed_entry_id=entry_id,
         top_k=top_k,
-        lazy_vet=False,
     )
     return [
         {

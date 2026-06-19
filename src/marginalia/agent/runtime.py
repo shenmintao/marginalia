@@ -330,6 +330,7 @@ class _ExecuteOutcome:
     sentinel event in the public stream."""
     answer: str = ""
     truncated: bool = False
+    error: str | None = None
 
 
 @dataclass(slots=True)
@@ -471,6 +472,14 @@ async def run_turn(
             budget_state=budget_state,
         ):
             yield ev
+        if not outcome.answer.strip() and outcome.error is None:
+            outcome.error = _empty_execute_error()
+            outcome.answer = outcome.error
+            log.error(
+                "conversation %s finished execute without answer or error",
+                conversation_id,
+            )
+            yield AgentEvent(event_type="error", data=outcome.error)
 
     async with session_scope() as db:
         await session_service.finalize_conversation(
@@ -483,23 +492,29 @@ async def run_turn(
         # calls). Reflecting them produces noisy journal entries that
         # crowd out real investigations and burn one reflect-LLM call per
         # turn for no signal. Skip the enqueue and mark the outcome.
-        if no_plan_answer is None:
+        if no_plan_answer is None and outcome.error is None:
             await enqueue(
                 db,
                 kind=KIND_REFLECT_TURN,
                 payload={"conversation_id": conversation_id},
                 dedup_key=f"reflect_turn:{conversation_id}",
             )
+        outcome_name = (
+            "error" if outcome.error is not None
+            else "deferred" if outcome.truncated
+            else "applied"
+        )
         await record_outcome(
             db,
             task_kind="run_turn",
             object_kind="conversation",
             object_id=conversation_id,
-            outcome="deferred" if outcome.truncated else "applied",
+            outcome=outcome_name,
             detail={
                 "turn_index": turn_index,
                 "session_id": session_id,
                 "truncated": outcome.truncated,
+                "error": outcome.error,
                 "no_plan": no_plan_answer is not None,
                 "mode": options.mode,
                 "budget": budget_state.payload(),
@@ -529,6 +544,7 @@ async def run_turn(
             "llm_calls": usage.llm_calls,
             "duration_ms": usage.duration_ms,
             "truncated": outcome.truncated,
+            "error": outcome.error,
             "session_name": session_name,
             "mode": options.mode,
             "budget": budget_state.payload(),
@@ -767,6 +783,14 @@ def _prefers_zh(text: str) -> bool:
 
 def _empty_answer_fallback(user_message: str) -> str:
     return "（没有生成答案）" if _prefers_zh(user_message) else "(no answer)"
+
+
+def _empty_execute_error() -> str:
+    return (
+        "Agent execution failed after planning: the model returned no answer "
+        "and no tool calls. Please retry; if it repeats, inspect the provider "
+        "response and session resume context."
+    )
 
 
 def _tool_disabled_fallback(user_message: str) -> str:
@@ -1395,9 +1419,19 @@ async def _run_execute_phase(
             return
 
         if resp.stop_reason in ("end_turn", "stop_sequence"):
-            answer = _strip_leaked_no_plan(
-                resp.text or last_text or _empty_answer_fallback(user_message)
-            )
+            raw_answer = resp.text or last_text or ""
+            if not raw_answer.strip():
+                outcome.error = _empty_execute_error()
+                outcome.answer = outcome.error
+                log.error(
+                    "conversation %s execute returned empty final response "
+                    "(stop_reason=%s)",
+                    conversation_id,
+                    resp.stop_reason,
+                )
+                yield AgentEvent(event_type="error", data=outcome.error)
+                return
+            answer = _strip_leaked_no_plan(raw_answer)
             outcome.answer = answer
             yield AgentEvent(
                 event_type="answer",

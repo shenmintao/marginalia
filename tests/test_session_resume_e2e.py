@@ -21,6 +21,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from sqlalchemy import select
+
 _TEST_PARENT = Path(os.environ.get("MARGINALIA_TEST_TMP", Path(__file__).resolve().parent))
 _TEST_ROOT = _TEST_PARENT / f"_session_resume_e2e_data_{os.getpid()}_{uuid4().hex[:8]}"
 _TEST_ROOT.mkdir(parents=True)
@@ -34,7 +36,8 @@ from marginalia.config import get_settings
 get_settings.cache_clear()  # type: ignore[attr-defined]
 
 from marginalia.db.engine import get_engine, get_session_factory
-from marginalia.db.models import Base, Conversation, Session
+from marginalia.db.models import Base, Conversation, Session, Task
+from marginalia.db.models.task_outcomes import TaskOutcome
 from marginalia.llm.types import (
     ChatRequest, ChatResponse, TokenUsage, ToolUseBlock, ToolResultBlock,
 )
@@ -176,10 +179,11 @@ async def test_resume_replays_history() -> None:
     )
     assert found_t1, f"resumed history missing turn-1 user message; roles={roles}"
 
-    # Tool-call replay: an assistant ToolUseBlock pairs with a user
+    # Tool-call replay: an assistant ToolUseBlock pairs with a tool-role
     # ToolResultBlock and ids match.
     tool_use_ids: list[str] = []
     tool_result_ids: list[str] = []
+    tool_result_roles: list[str] = []
     for m in exec_req.messages:
         if isinstance(m.content, list):
             for blk in m.content:
@@ -187,9 +191,13 @@ async def test_resume_replays_history() -> None:
                     tool_use_ids.append(blk.id)
                 elif isinstance(blk, ToolResultBlock):
                     tool_result_ids.append(blk.tool_call_id)
+                    tool_result_roles.append(m.role)
     assert tool_use_ids, "expected at least one ToolUseBlock from resumed history"
     assert tool_use_ids == tool_result_ids, (
         f"tool_use vs tool_result ids drifted: {tool_use_ids} vs {tool_result_ids}"
+    )
+    assert tool_result_roles and all(role == "tool" for role in tool_result_roles), (
+        f"resumed tool results must use role='tool', got {tool_result_roles}"
     )
 
     # Boundary note appears as a user-role message between the resumed
@@ -261,10 +269,73 @@ async def test_fresh_session_no_resume_prefix() -> None:
     print("[2] fresh session: no resume prefix injected")
 
 
+async def test_empty_execute_response_surfaces_error() -> None:
+    sid = await _seed_session_with_history()
+    chat = _ScriptedChat([
+        ChatResponse(
+            text="1. Search the knowledge base for the missing connection.",
+            tool_calls=[],
+            stop_reason="end_turn",
+            usage=TokenUsage(input_tokens=400, output_tokens=20),
+            parsed_json=None,
+        ),
+        ChatResponse(
+            text="",
+            tool_calls=[],
+            stop_reason="end_turn",
+            usage=TokenUsage(input_tokens=900, output_tokens=0),
+            parsed_json=None,
+        ),
+    ])
+    _install_chat(chat)
+
+    events = await _drive(sid, "third turn that triggers an empty execute")
+    errors = [data for event_type, data in events if event_type == "error"]
+    answers = [data for event_type, data in events if event_type == "answer"]
+    assert errors, events
+    assert "returned no answer and no tool calls" in errors[-1]
+    assert answers == []
+
+    factory = get_session_factory()
+    async with factory() as s:
+        conv = (
+            await s.execute(
+                select(Conversation)
+                .where(Conversation.session_id == sid)
+                .order_by(Conversation.turn_index.desc())
+            )
+        ).scalars().first()
+        assert conv is not None
+        assert conv.agent_response == errors[-1]
+
+        reflect_tasks = (
+            await s.execute(select(Task).where(Task.kind == "reflect_turn"))
+        ).scalars().all()
+        assert all(
+            (task.payload or {}).get("conversation_id") != conv.id
+            for task in reflect_tasks
+        )
+
+        outcome = (
+            await s.execute(
+                select(TaskOutcome)
+                .where(
+                    TaskOutcome.task_kind == "run_turn",
+                    TaskOutcome.object_id == conv.id,
+                )
+            )
+        ).scalar_one()
+        assert outcome.outcome == "error"
+        assert outcome.detail["error"] == errors[-1]
+
+    print("[3] empty execute response surfaces an error and skips reflect")
+
+
 async def main() -> None:
     await _create_schema()
     await test_resume_replays_history()
     await test_fresh_session_no_resume_prefix()
+    await test_empty_execute_response_surfaces_error()
     print("\nALL SESSION-RESUME TESTS PASSED")
 
 

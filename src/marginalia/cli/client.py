@@ -202,10 +202,13 @@ class MarginaliaClient:
     async def discover(
         self, entry_id: str, top_k: int = 8,
         include_unvetted: bool = False,
+        vet: bool = False,
     ) -> dict[str, Any]:
         params: dict[str, Any] = {"top_k": top_k}
         if include_unvetted:
             params["include_unvetted"] = "true"
+        if vet:
+            params["vet"] = "true"
         r = await self._http.get(
             f"/v1/discover/{entry_id}", params=params,
         )

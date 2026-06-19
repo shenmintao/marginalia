@@ -53,7 +53,7 @@ AUTO_LIFECYCLE_ENABLED=false
 # Rolling 24h token cap for low-priority background maintenance. 0 = unlimited.
 MAINTENANCE_DAILY_TOKEN_BUDGET=0
 
-# Batch relation vetting is optional; /discover vets directly hit edges lazily.
+# Batch relation vetting is optional; /discover --vet queues seed-scoped vetting.
 RELATION_BACKGROUND_VETTING_ENABLED=false
 
 # LLM defaults — every profile (chat / reflect / ingest / vision / audio)

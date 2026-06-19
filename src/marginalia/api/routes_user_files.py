@@ -12,7 +12,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from marginalia.api.http_headers import content_disposition
 from marginalia.db.models import Folder
 from marginalia.db.session import get_session
+from marginalia.repositories import audit_events as audit_events_repo
 from marginalia.services.recommend import find_related
+from marginalia.services.relation_vetting import schedule_direct_relation_vetting
 from marginalia.services.user_files import (
     EntryNotFoundError,
     FolderNotFoundError,
@@ -42,12 +44,40 @@ async def discover(
     entry_id: str,
     top_k: int = Query(default=8, ge=1, le=30),
     include_unvetted: bool = Query(default=False),
+    vet: bool = Query(default=False),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     """Random-walk recommendation from a seed entry. Drives the
     `/discover` REPL command and the related_entries pre-fill in
     search/get_metadata. Vetted edges only by default; pass
-    include_unvetted=true to walk the raw graph."""
+    include_unvetted=true to walk the raw graph. Pass vet=true to queue
+    background vetting for the seed's direct raw edges; the response itself
+    stays pure-read."""
+    vetting = None
+    if vet:
+        scheduled = await schedule_direct_relation_vetting(
+            session,
+            entry_id=entry_id,
+            limit=top_k,
+        )
+        vetting = {
+            "requested": scheduled.requested,
+            "candidates_available": scheduled.candidates_available,
+            "queued": scheduled.queued,
+            "task_id": scheduled.task_id,
+        }
+        if scheduled.task_id is not None:
+            await audit_events_repo.append(
+                session,
+                kind="task_enqueued",
+                task_id=scheduled.task_id,
+                payload={
+                    "kind": "vet_relations",
+                    "entry_id": entry_id,
+                    "scheduled_by": "discover:explicit",
+                },
+            )
+        await session.commit()
     rows = await find_related(
         session, seed_entry_id=entry_id, top_k=top_k,
         include_unvetted=include_unvetted,
@@ -65,6 +95,7 @@ async def discover(
             for r in rows
         ],
         "count": len(rows),
+        "vetting": vetting,
     }
 
 

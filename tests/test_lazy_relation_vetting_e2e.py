@@ -170,7 +170,7 @@ async def _seed_unvetted_graph() -> dict[str, str]:
 
 
 @pytest.mark.asyncio
-async def test_discover_lazily_vets_uncached_edges_and_reuses_cache(
+async def test_discover_explicit_vet_queues_background_task(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
@@ -188,15 +188,42 @@ async def test_discover_lazily_vets_uncached_edges_and_reuses_cache(
         async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
             first = await client.get(f"/v1/discover/{ids['A']}", params={"top_k": 5})
             assert first.status_code == 200, first.text
-            first_results = first.json()["results"]
-            assert [row["entry_id"] for row in first_results] == [ids["B"]]
-            assert fake.calls == 1
+            first_body = first.json()
+            assert first_body["results"] == []
+            assert first_body["vetting"] is None
+            assert fake.calls == 0
 
+            queued = await client.get(
+                f"/v1/discover/{ids['A']}",
+                params={"top_k": 5, "vet": "true"},
+            )
+            assert queued.status_code == 200, queued.text
+            queued_body = queued.json()
+            assert queued_body["results"] == []
+            assert queued_body["vetting"]["candidates_available"] is True
+            assert queued_body["vetting"]["queued"] is True
+            task_id = queued_body["vetting"]["task_id"]
+            assert task_id
+            assert fake.calls == 0
+
+    from marginalia.tasks.handlers.vet_relations import handle_vet_relations
+
+    async with session_scope() as db:
+        task = await db.get(Task, task_id)
+        assert task is not None
+        assert task.kind == KIND_VET_RELATIONS
+        assert task.payload["entry_id"] == ids["A"]
+        payload = dict(task.payload)
+
+    await handle_vet_relations(payload)
+    assert fake.calls == 1
+
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
             second = await client.get(f"/v1/discover/{ids['A']}", params={"top_k": 5})
             assert second.status_code == 200, second.text
             second_results = second.json()["results"]
             assert [row["entry_id"] for row in second_results] == [ids["B"]]
-            assert fake.calls == 1
 
     async with session_scope() as db:
         ab = await db.get(EntryRelation, ids["rel_AB"])
@@ -206,6 +233,40 @@ async def test_discover_lazily_vets_uncached_edges_and_reuses_cache(
         assert "consensus" in (ab.vetted_reason or "").lower()
         assert ac is not None and ac.vetted is False
         assert ac.vetted_observation_count == 4
+
+
+@pytest.mark.asyncio
+async def test_explicit_vetting_skips_enqueue_when_seed_has_no_raw_edges(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    await _prepare_home(monkeypatch, tmp_path)
+    from marginalia.repositories import entry_relations as relations_repo
+    from marginalia.services.relation_vetting import schedule_direct_relation_vetting
+
+    async def _fail_detail_query(*_args, **_kwargs):
+        raise AssertionError("candidate detail query should be skipped")
+
+    monkeypatch.setattr(
+        relations_repo,
+        "list_direct_unvetted_candidates",
+        _fail_detail_query,
+    )
+
+    async with session_scope() as db:
+        result = await schedule_direct_relation_vetting(
+            db,
+            entry_id="entry-with-no-relations",
+            limit=5,
+        )
+        vet_tasks = (
+            await db.execute(select(Task.id).where(Task.kind == KIND_VET_RELATIONS))
+        ).scalars().all()
+
+    assert result.requested is True
+    assert result.candidates_available is False
+    assert result.queued is False
+    assert vet_tasks == []
 
 
 @pytest.mark.asyncio

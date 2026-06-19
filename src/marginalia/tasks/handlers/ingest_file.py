@@ -279,18 +279,21 @@ async def _persist(
     entry.updated_at = now
 
     # --- entry tags --------------------------------------------------------
+    attached_tag_ids = set(await entry_tags_repo.list_tag_ids_for_entry(session, entry_id))
+    tags_added = 0
     for sugg in result.entry_tags:
         tag_id = await _resolve_or_create_tag(session, sugg, now)
-        existing = await entry_tags_repo.find_one(
-            session, entry_id=entry_id, tag_id=tag_id,
-        )
-        if existing is None:
-            session.add(EntryTag(
-                entry_id=entry_id,
-                tag_id=tag_id,
-                source="ingest",
-                created_at=now,
-            ))
+        if tag_id in attached_tag_ids:
+            continue
+        session.add(EntryTag(
+            entry_id=entry_id,
+            tag_id=tag_id,
+            source="ingest",
+            created_at=now,
+        ))
+        attached_tag_ids.add(tag_id)
+        tags_added += 1
+        await _mark_tag_attached(session, tag_id=tag_id, now=now)
 
     await audit_events_repo.append(
         session,
@@ -301,6 +304,8 @@ async def _persist(
             "kind": result.kind,
             "section_count": len(result.description.get("sections", [])) if isinstance(result.description, dict) else 0,
             "tag_count": len(result.entry_tags),
+            "tags_added": tags_added,
+            "tags_total": len(attached_tag_ids),
             "catalog_path": result.entry_catalog_path,
         },
     )
@@ -345,8 +350,6 @@ async def _resolve_or_create_tag(session, sugg: TagSuggestion, now: datetime) ->
     if existing is not None:
         if existing.alias_of:
             return existing.alias_of
-        existing.doc_count = (existing.doc_count or 0) + 1
-        existing.last_used_at = now
         return existing.id
 
     tag = Tag(
@@ -354,8 +357,8 @@ async def _resolve_or_create_tag(session, sugg: TagSuggestion, now: datetime) ->
         name=sugg.name,
         facet=sugg.facet,
         alias_of=None,
-        doc_count=1,
-        last_used_at=now,
+        doc_count=0,
+        last_used_at=None,
         created_at=now,
         updated_at=now,
     )
@@ -367,3 +370,12 @@ async def _resolve_or_create_tag(session, sugg: TagSuggestion, now: datetime) ->
         payload={"tag_id": tag.id, "name": sugg.name, "facet": sugg.facet, "source": "ingest"},
     )
     return tag.id
+
+
+async def _mark_tag_attached(session, *, tag_id: str, now: datetime) -> None:
+    tag = await session.get(Tag, tag_id)
+    if tag is None:
+        raise ValueError(f"tag_id {tag_id!r} vanished mid-ingest")
+    tag.doc_count = (tag.doc_count or 0) + 1
+    tag.last_used_at = now
+    tag.updated_at = now
