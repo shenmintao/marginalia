@@ -2,6 +2,46 @@
 
 ## Unreleased
 
+## 0.2.7 - 2026-06-19
+
+### Added
+
+- Desktop folder uploads now show an import filter after scanning files and
+  folders. Videos are skipped by default, and users can include or exclude
+  whole file-type groups or individual extension chips before upload creates
+  files or ingest tasks.
+- The desktop Library sidebar can now be resized by dragging the separator,
+  with the chosen width saved locally.
+- Bundled agent skills now include `allowed-tools` / `compatibility` metadata
+  and one-shot CLI command references for agents that do not enter the REPL.
+
+### Changed
+
+- `/v1/discover` is now a pure read path by default; seed-scoped relation
+  vetting runs only when explicitly requested via `vet=true` / `--vet` and is
+  scheduled in the background.
+- Task runner settings are refreshed dynamically so runtime configuration
+  updates are picked up without restarting long-lived workers.
+
+### Fixed
+
+- Desktop navigation now uses hash routing in Tauri, avoiding full webview
+  reloads and repeated cold API calls while moving between Chat and Library.
+- The desktop Library now exposes failed-only reprocess actions globally and
+  per folder while keeping full-scope reprocess available.
+- Empty agent execute responses after planning now surface as explicit errors
+  instead of silent zero-token answers.
+- Resumed tool results use the expected message roles.
+- Duplicate ingest tag attachments are de-duplicated before insert, avoiding
+  `entry_tags(entry_id, tag_id)` uniqueness failures.
+- Discover relation vetting skips detail queries when there are no candidates.
+
+### Documentation
+
+- Documented PDF and image indexing budgets, chunking behavior, OCR caps,
+  embedded PDF image caption limits, standalone image ingest limits, and PDF
+  read-time windows in English and Chinese usage docs.
+
 ## 0.2.6 - 2026-06-19
 
 ### Added
