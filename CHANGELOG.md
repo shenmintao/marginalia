@@ -8,8 +8,8 @@
 
 - Desktop folder uploads now show an import filter after scanning files and
   folders. Videos are skipped by default, and users can include or exclude
-  whole file-type groups or individual extension chips before upload creates
-  files or ingest tasks.
+  whole file-type groups, individual extensions, or individual files in a
+  downloader-style selection table before upload creates files or ingest tasks.
 - The desktop Library sidebar can now be resized by dragging the separator,
   with the chosen width saved locally.
 - Bundled agent skills now include `allowed-tools` / `compatibility` metadata
@@ -34,6 +34,10 @@
 - Resumed tool results use the expected message roles.
 - Duplicate ingest tag attachments are de-duplicated before insert, avoiding
   `entry_tags(entry_id, tag_id)` uniqueness failures.
+- Files are now marked `failed` whenever their `ingest_file` task reaches
+  terminal `dead`, including stale-task recovery and no-LLM startup sweeps.
+  A bootstrap repair also reconciles older databases where files were left in
+  `processing` after dead ingest tasks.
 - Discover relation vetting skips detail queries when there are no candidates.
 
 ### Documentation
