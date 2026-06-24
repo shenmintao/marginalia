@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-import json
+from dataclasses import dataclass
+from typing import Any
 
+from marginalia.agent import read_compression as mod
 from marginalia.agent.read_compression import (
     CompressionSettings,
     compress_read_text,
@@ -9,44 +11,63 @@ from marginalia.agent.read_compression import (
 from marginalia.pipelines import resolve_pipeline
 
 
-def _cfg() -> CompressionSettings:
-    return CompressionSettings(
+@dataclass(slots=True)
+class FakeCompressed:
+    text: str = "compact headroom view"
+    strategy: str = "headroom.fake"
+    lossy: bool = True
+
+    def metadata(self) -> dict[str, Any]:
+        return {
+            "strategy": self.strategy,
+            "original_chars": 1000,
+            "compressed_chars": len(self.text),
+            "tokens_saved_estimate": 100,
+            "lossy": self.lossy,
+        }
+
+
+def _cfg(**overrides: Any) -> CompressionSettings:
+    values = dict(
         enabled=True,
-        min_chars=500,
-        target_chars=1_600,
-        context_chars=120,
+        min_chars=10,
+        target_chars=100,
+        context_chars=40,
+        max_ratio=0.85,
+    )
+    values.update(overrides)
+    return CompressionSettings(**values)
+
+
+def test_disabled_or_small_reads_are_not_compressed(monkeypatch) -> None:
+    def fail_if_called(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("Headroom should not be called")
+
+    monkeypatch.setattr(mod, "maybe_compress_read_view", fail_if_called)
+
+    disabled = compress_read_text(
+        "x" * 100,
+        entry_id="entry-text",
+        args={"max_chars": 1000},
+        settings=_cfg(enabled=False),
+    )
+    small = compress_read_text(
+        "x" * 9,
+        entry_id="entry-text",
+        args={"max_chars": 1000},
+        settings=_cfg(min_chars=10),
     )
 
-
-def test_pdf_page_sampling_preserves_page_markers_and_reopen_args() -> None:
-    pages = []
-    for page in range(1, 12):
-        marker = " needle evidence" if page == 7 else ""
-        body = (f"Page {page} background{marker}. " * 80).strip()
-        pages.append(f"[Page {page}]\n{body}")
-    text = "\n\n".join(pages)
-
-    result = compress_read_text(
-        text,
-        entry_id="entry-pdf",
-        args={"max_chars": 16_000},
-        pipeline="pdf",
-        query="needle evidence",
-        settings=_cfg(),
-    )
-
-    assert result.compressed is True
-    assert result.strategy == "pdf_text"
-    assert "[Page 1]" in result.text
-    assert "[Page 7]" in result.text
-    assert "omitted pages" in result.text
-    assert result.omitted
-    assert all(item["read_files_args"]["compress"] is False for item in result.omitted)
-    assert result.metadata()["lossy"] is True
+    assert disabled.compressed is False
+    assert small.compressed is False
 
 
-def test_pattern_reads_are_not_compressed() -> None:
-    text = "needle\n" + ("large context\n" * 1_000)
+def test_precision_reads_are_not_compressed(monkeypatch) -> None:
+    def fail_if_called(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("Headroom should not be called")
+
+    monkeypatch.setattr(mod, "maybe_compress_read_view", fail_if_called)
+    text = "needle\n" + ("large context\n" * 20)
 
     result = compress_read_text(
         text,
@@ -62,144 +83,120 @@ def test_pattern_reads_are_not_compressed() -> None:
     assert result.text == text
 
 
-def test_context_chars_clips_long_relevant_text_units() -> None:
-    target_paragraph = (
-        ("background prefix " * 80)
-        + "target signal"
-        + (" background suffix" * 80)
-    )
-    text = "\n\n".join([
-        "opening background " * 80,
-        "middle background " * 80,
-        target_paragraph,
-        "closing background " * 80,
-    ])
+def test_explicit_uncompressed_read_is_not_recompressed(monkeypatch) -> None:
+    def fail_if_called(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("Headroom should not be called")
 
-    small_context = compress_read_text(
-        text,
-        entry_id="entry-text",
-        args={"max_chars": 16_000},
-        pipeline="text",
-        query="target signal",
-        settings=CompressionSettings(
-            enabled=True,
-            min_chars=500,
-            target_chars=2_400,
-            context_chars=80,
-        ),
-    )
-    large_context = compress_read_text(
-        text,
-        entry_id="entry-text",
-        args={"max_chars": 16_000},
-        pipeline="text",
-        query="target signal",
-        settings=CompressionSettings(
-            enabled=True,
-            min_chars=500,
-            target_chars=2_400,
-            context_chars=360,
-        ),
-    )
-
-    assert small_context.compressed is True
-    assert large_context.compressed is True
-    assert "target signal" in small_context.text
-    assert "omitted chars" in small_context.text
-    assert len(small_context.text) < len(large_context.text)
-
-
-def test_json_list_sampling_marks_omitted_items() -> None:
-    items = [
-        {
-            "id": idx,
-            "name": f"item-{idx}",
-            "payload": "target signal" if idx == 25 else "background " * 20,
-        }
-        for idx in range(60)
-    ]
-    text = json.dumps(items, ensure_ascii=False, indent=2)
+    monkeypatch.setattr(mod, "maybe_compress_read_view", fail_if_called)
+    text = "x" * 100
 
     result = compress_read_text(
         text,
-        entry_id="entry-json",
-        args={"max_chars": 16_000},
-        pipeline="text",
-        query="target signal",
+        entry_id="entry-text",
+        args={"compress": False, "max_chars": 1000},
         settings=_cfg(),
     )
 
-    assert result.compressed is True
-    assert result.strategy == "json"
-    rendered = json.loads(result.text)
-    assert any("_marginalia_omitted_items" in item for item in rendered)
-    assert any(item.get("id") == 25 for item in rendered if isinstance(item, dict))
-    assert result.omitted
-    assert result.omitted[0]["read_files_args"]["compress"] is False
+    assert result.compressed is False
+    assert result.text == text
 
 
-def test_log_line_sampling_preserves_relevant_lines_and_reopen_args() -> None:
-    lines = []
-    for idx in range(1, 220):
-        level = "ERROR" if idx in {80, 151} else "INFO"
-        marker = " target failure" if idx == 151 else ""
-        lines.append(f"2026-06-03T10:{idx % 60:02d}:00Z {level} event {idx}{marker}")
-    text = "\n".join(lines)
+def test_successful_headroom_compression_returns_reopen_args(monkeypatch) -> None:
+    calls: list[dict[str, Any]] = []
 
-    result = compress_read_text(
-        text,
-        entry_id="entry-log",
-        args={"max_chars": 16_000},
-        pipeline="log",
-        query="target failure",
-        settings=_cfg(),
-    )
+    def fake_compress(
+        body: str,
+        *,
+        pipeline: str,
+        kind: str,
+        context: str,
+        target_ratio: float,
+    ) -> FakeCompressed:
+        calls.append({
+            "body": body,
+            "pipeline": pipeline,
+            "kind": kind,
+            "context": context,
+            "target_ratio": target_ratio,
+        })
+        return FakeCompressed()
 
-    assert result.compressed is True
-    assert result.strategy == "log"
-    assert "target failure" in result.text
-    assert "omitted lines" in result.text
-    assert result.omitted
-    first_args = result.omitted[0]["read_files_args"]
-    assert "line_start" in first_args
-    assert first_args["compress"] is False
-
-
-def test_code_line_sampling_keeps_definitions() -> None:
-    lines = [
-        "import os",
-        "import sys",
-        "",
-        "class Worker:",
-        "    def run(self):",
-        "        return 'ok'",
-    ]
-    for idx in range(180):
-        lines.append(f"VALUE_{idx} = {idx}")
-    lines.extend([
-        "def target_function():",
-        "    important_value = 'target signal'",
-        "    return important_value",
-    ])
-    for idx in range(180, 260):
-        lines.append(f"TAIL_{idx} = {idx}")
-    text = "\n".join(lines)
+    monkeypatch.setattr(mod, "maybe_compress_read_view", fake_compress)
+    text = "0123456789" * 100
 
     result = compress_read_text(
         text,
-        entry_id="entry-code",
-        args={"max_chars": 16_000},
+        entry_id="entry-text",
+        args={"member_path": "chapter.md", "max_chars": 12000, "offset": 200},
         pipeline="text",
         kind="text",
         query="target signal",
-        settings=_cfg(),
+        settings=_cfg(target_chars=250),
     )
 
     assert result.compressed is True
-    assert result.strategy == "code"
-    assert "def target_function" in result.text
-    assert "omitted lines" in result.text
-    assert result.omitted
+    assert result.text == "compact headroom view"
+    assert result.strategy == "headroom.fake"
+    assert calls == [
+        {
+            "body": text,
+            "pipeline": "text",
+            "kind": "text",
+            "context": "target signal",
+            "target_ratio": 0.25,
+        }
+    ]
+    assert result.omitted == [
+        {
+            "kind": "original_read",
+            "entry_id": "entry-text",
+            "read_files_args": {
+                "member_path": "chapter.md",
+                "offset": 200,
+                "max_chars": 12000,
+                "compress": False,
+            },
+            "original_chars": len(text),
+        }
+    ]
+    meta = result.metadata()
+    assert meta["compressed"] is True
+    assert meta["lossy"] is True
+    assert meta["quote_safe"]
+
+
+def test_weak_headroom_compression_is_rejected(monkeypatch) -> None:
+    monkeypatch.setattr(
+        mod,
+        "maybe_compress_read_view",
+        lambda *args, **kwargs: FakeCompressed(text="y" * 90),
+    )
+    text = "x" * 100
+
+    result = compress_read_text(
+        text,
+        entry_id="entry-text",
+        args={"max_chars": 1000},
+        settings=_cfg(max_ratio=0.85),
+    )
+
+    assert result.compressed is False
+    assert result.text == text
+
+
+def test_headroom_none_fails_open(monkeypatch) -> None:
+    monkeypatch.setattr(mod, "maybe_compress_read_view", lambda *args, **kwargs: None)
+    text = "x" * 100
+
+    result = compress_read_text(
+        text,
+        entry_id="entry-text",
+        args={"max_chars": 1000},
+        settings=_cfg(),
+    )
+
+    assert result.compressed is False
+    assert result.text == text
 
 
 def test_text_pipeline_routes_json_and_code_extensions() -> None:

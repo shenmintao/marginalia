@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Literal
 
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -123,11 +124,45 @@ class Settings(BaseSettings):
     # This is intentionally backend-owned so desktop, web, and CLI clients
     # get the same stuck-turn recovery behavior.
     agent_turn_timeout_seconds: float = 1800.0
-    read_compression_enabled: bool = True
-    read_compression_min_chars: int = 12_000
-    read_compression_target_chars: int = 8_000
-    read_compression_context_chars: int = 220
-
+    # Unified compression switch. COMPRESSION_ENABLED is canonical; legacy
+    # READ_/HEADROOM_ env names are accepted only for upgrades.
+    compression_enabled: bool = Field(
+        True,
+        validation_alias=AliasChoices(
+            "COMPRESSION_ENABLED",
+            "READ_COMPRESSION_ENABLED",
+            "HEADROOM_COMPRESSION_ENABLED",
+        ),
+    )
+    compression_min_chars: int = Field(
+        12_000,
+        validation_alias=AliasChoices(
+            "COMPRESSION_MIN_CHARS",
+            "READ_COMPRESSION_MIN_CHARS",
+            "HEADROOM_COMPRESSION_MIN_CHARS",
+        ),
+    )
+    compression_target_chars: int = Field(
+        8_000,
+        validation_alias=AliasChoices(
+            "COMPRESSION_TARGET_CHARS",
+            "READ_COMPRESSION_TARGET_CHARS",
+        ),
+    )
+    compression_context_chars: int = Field(
+        220,
+        validation_alias=AliasChoices(
+            "COMPRESSION_CONTEXT_CHARS",
+            "READ_COMPRESSION_CONTEXT_CHARS",
+        ),
+    )
+    compression_max_ratio: float = Field(
+        0.85,
+        validation_alias=AliasChoices(
+            "COMPRESSION_MAX_RATIO",
+            "HEADROOM_COMPRESSION_MAX_RATIO",
+        ),
+    )
     # Bounded fan-out for ingest-time LLM work: long text/PDF chunk
     # indexing and scanned-PDF OCR page calls. Keep this conservative;
     # provider rate limits and local network bandwidth are the real cap.

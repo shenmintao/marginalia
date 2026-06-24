@@ -44,7 +44,7 @@ type ServerNumberField =
   | "rerank_concurrency";
 
 type ServerBooleanField =
-  | "read_compression_enabled"
+  | "compression_enabled"
   | "semantic_recall_enabled"
   | "rerank_enabled";
 
@@ -472,9 +472,9 @@ function PreferencesSection({ ctx }: { ctx: ServerCtx }) {
         >
           <input
             type="checkbox"
-            checked={Boolean(server?.read_compression_enabled)}
+            checked={Boolean(server?.compression_enabled)}
             disabled={!server}
-            onChange={(e) => setServerBoolean("read_compression_enabled", e.target.checked)}
+            onChange={(e) => setServerBoolean("compression_enabled", e.target.checked)}
             className="h-4 w-4 accent-accent disabled:opacity-50"
           />
         </Row>
@@ -824,7 +824,7 @@ function ServerSection({ ctx }: { ctx: ServerCtx }) {
           <Kv k={t.settings.kv.executeTurns} v={String(server.agent_execute_max_turns)} />
           <Kv
             k={t.settings.kv.readCompression}
-            v={server.read_compression_enabled ? t.common.enabled : t.common.disabled}
+            v={server.compression_enabled ? t.common.enabled : t.common.disabled}
           />
           <Kv k={t.settings.kv.ingestConcurrency} v={String(server.llm_ingest_concurrency)} />
           <Kv

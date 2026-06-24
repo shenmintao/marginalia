@@ -38,10 +38,11 @@ _ALLOWED_FIELDS: frozenset[str] = frozenset({
     "agent_final_answer_continue_turns",
     "agent_final_answer_max_chars",
     "agent_turn_timeout_seconds",
-    "read_compression_enabled",
-    "read_compression_min_chars",
-    "read_compression_target_chars",
-    "read_compression_context_chars",
+    "compression_enabled",
+    "compression_min_chars",
+    "compression_target_chars",
+    "compression_context_chars",
+    "compression_max_ratio",
     "llm_ingest_concurrency",
     "worker_batch_size",
     "maintenance_daily_token_budget",
@@ -80,6 +81,15 @@ _ALLOWED_FIELDS: frozenset[str] = frozenset({
     "evidence_selection",
 })
 
+_LEGACY_FIELD_ALIASES: dict[str, str] = {
+    "read_compression_enabled": "compression_enabled",
+    "read_compression_min_chars": "compression_min_chars",
+    "read_compression_target_chars": "compression_target_chars",
+    "read_compression_context_chars": "compression_context_chars",
+    "headroom_compression_enabled": "compression_enabled",
+    "headroom_compression_min_chars": "compression_min_chars",
+    "headroom_compression_max_ratio": "compression_max_ratio",
+}
 _VALID_PROVIDERS: frozenset[str] = frozenset({"openai", "openai-compatible", "anthropic"})
 _VALID_EMBEDDING_PROVIDERS: frozenset[str] = frozenset({"dashscope", "openai-compatible"})
 _VALID_SEMANTIC_INDEX_BACKENDS: frozenset[str] = frozenset({"auto", "file", "sqlite-vec"})
@@ -105,7 +115,15 @@ def read_overlay(home: str | os.PathLike[str]) -> dict[str, Any]:
         return {}
     if not isinstance(raw, dict):
         return {}
-    return {k: v for k, v in raw.items() if k in _ALLOWED_FIELDS}
+    return _canonical_overlay(raw)
+
+
+def _canonical_overlay(raw: dict[str, Any]) -> dict[str, Any]:
+    out = {k: v for k, v in raw.items() if k in _ALLOWED_FIELDS}
+    for old, new in _LEGACY_FIELD_ALIASES.items():
+        if old in raw and new not in out:
+            out[new] = raw[old]
+    return out
 
 
 def write_overlay(home: str | os.PathLike[str], values: dict[str, Any]) -> None:
@@ -187,9 +205,9 @@ def validate_and_normalize(patch: dict[str, Any]) -> dict[str, Any]:
             "agent_execute_max_turns",
             "agent_final_answer_continue_turns",
             "agent_final_answer_max_chars",
-            "read_compression_min_chars",
-            "read_compression_target_chars",
-            "read_compression_context_chars",
+            "compression_min_chars",
+            "compression_target_chars",
+            "compression_context_chars",
             "llm_ingest_concurrency",
             "worker_batch_size",
             "maintenance_daily_token_budget",
@@ -229,17 +247,21 @@ def validate_and_normalize(patch: dict[str, Any]) -> dict[str, Any]:
             if v < lower or v > upper:
                 bad.append(f"{k}: out of range [{lower}, {upper}]")
                 continue
-        if k == "agent_turn_timeout_seconds":
+        if k in ("agent_turn_timeout_seconds", "compression_max_ratio"):
             try:
                 v = float(v)
             except (TypeError, ValueError):
                 bad.append(f"{k}: must be a number")
                 continue
-            if v < 0 or v > 86_400:
-                bad.append(f"{k}: out of range [0, 86400]")
+            if k == "compression_max_ratio":
+                lower, upper = 0.05, 1.0
+            else:
+                lower, upper = 0.0, 86_400.0
+            if v < lower or v > upper:
+                bad.append(f"{k}: out of range [{lower:g}, {upper:g}]")
                 continue
         if k in (
-            "read_compression_enabled",
+            "compression_enabled",
             "semantic_recall_enabled",
             "rerank_enabled",
             "relation_background_vetting_enabled",

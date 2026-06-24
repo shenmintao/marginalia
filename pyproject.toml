@@ -53,6 +53,9 @@ marginalia-mcp = "marginalia.mcp_server:main"
 semantic = [
     "sqlite-vec>=0.1.6",
 ]
+headroom = [
+    "headroom-ai>=0.4",
+]
 dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",

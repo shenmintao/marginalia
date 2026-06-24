@@ -15,6 +15,7 @@ import json
 import logging
 from typing import Any
 
+from marginalia.agent.headroom_adapter import maybe_compress_ingest_view
 from marginalia.llm import ChatRequest, cacheable_prompt_messages, get_chat_client
 from marginalia.llm.tagged_response import (
     parse_path,
@@ -83,6 +84,13 @@ async def index_extracted_text(
             entry_catalog_path=None,
             entry_tags=[],
         )
+    body_for_index, headroom_meta = maybe_compress_ingest_view(
+        body,
+        kind=kind,
+        context=ctx.display_name or "",
+    )
+    if headroom_meta is not None:
+        coverage["headroom_compression"] = headroom_meta
     user_payload = {
         "folder_path": ctx.folder_path,
         "sibling_names": ctx.sibling_names,
@@ -105,7 +113,7 @@ async def index_extracted_text(
     file_content = (
         f"<context>\n{json.dumps(user_payload, ensure_ascii=False)}\n"
         "</context>\n\n"
-        f"<document>\n{body}\n</document>"
+        f"<document>\n{body_for_index}\n</document>"
     )
 
     client = get_chat_client("ingest")
@@ -114,7 +122,7 @@ async def index_extracted_text(
     # anything; a 2-3k cap leaves nothing for the actual <summary>/<sections>
     # block and the response comes back empty. Floor at 8k, scale up to 16k
     # for long bodies.
-    max_out = min(16384, max(8192, len(body) // 8))
+    max_out = min(16384, max(8192, len(body_for_index) // 8))
 
     resp = await client.complete(ChatRequest(
         system=INDEXER_SYSTEM,

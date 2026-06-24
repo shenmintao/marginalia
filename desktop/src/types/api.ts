@@ -343,10 +343,11 @@ export interface ServerSettings {
   agent_final_answer_continue_turns: number;
   agent_final_answer_max_chars: number;
   agent_turn_timeout_seconds: number;
-  read_compression_enabled: boolean;
-  read_compression_min_chars: number;
-  read_compression_target_chars: number;
-  read_compression_context_chars: number;
+  compression_enabled: boolean;
+  compression_min_chars: number;
+  compression_target_chars: number;
+  compression_context_chars: number;
+  compression_max_ratio: number;
   llm_ingest_concurrency: number;
   embedding_provider: "dashscope" | "openai-compatible";
   embedding_api_key_set: boolean;

@@ -236,10 +236,11 @@ async def read_files(
     storage = get_storage()
     settings = get_settings()
     compression_settings = CompressionSettings(
-        enabled=settings.read_compression_enabled,
-        min_chars=settings.read_compression_min_chars,
-        target_chars=settings.read_compression_target_chars,
-        context_chars=settings.read_compression_context_chars,
+        enabled=settings.compression_enabled,
+        min_chars=settings.compression_min_chars,
+        target_chars=settings.compression_target_chars,
+        context_chars=settings.compression_context_chars,
+        max_ratio=settings.compression_max_ratio,
     )
     results: list[dict[str, Any]] = list(early_results)
 

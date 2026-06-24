@@ -101,3 +101,48 @@ def test_overlay_validates_agent_turn_timeout_seconds() -> None:
         except OverlayValidationError:
             continue
         raise AssertionError(f"expected validation error for {bad!r}")
+
+
+def test_overlay_accepts_unified_compression_fields() -> None:
+    from marginalia.services.config_overlay import (
+        OverlayValidationError, validate_and_normalize,
+    )
+
+    cleaned = validate_and_normalize({
+        "compression_enabled": "true",
+        "compression_min_chars": "2048",
+        "compression_target_chars": "1024",
+        "compression_context_chars": 80,
+        "compression_max_ratio": "0.75",
+    })
+    assert cleaned == {
+        "compression_enabled": True,
+        "compression_min_chars": 2048,
+        "compression_target_chars": 1024,
+        "compression_context_chars": 80,
+        "compression_max_ratio": 0.75,
+    }
+
+    for bad in (0, 1.5, "not-a-number"):
+        try:
+            validate_and_normalize({"compression_max_ratio": bad})
+        except OverlayValidationError:
+            continue
+        raise AssertionError(f"expected validation error for {bad!r}")
+
+def test_overlay_canonicalizes_legacy_compression_fields() -> None:
+    from marginalia.services import config_overlay as mod
+
+    cleaned = mod._canonical_overlay({
+        "read_compression_enabled": "false",
+        "read_compression_min_chars": "2048",
+        "headroom_compression_max_ratio": "0.75",
+        "headroom_query_compression_enabled": True,
+        "headroom_ingest_compression_enabled": True,
+    })
+
+    assert cleaned == {
+        "compression_enabled": "false",
+        "compression_min_chars": "2048",
+        "compression_max_ratio": "0.75",
+    }

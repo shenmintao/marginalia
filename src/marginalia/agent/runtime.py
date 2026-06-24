@@ -54,6 +54,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any, AsyncIterator, Literal
 
+from marginalia.agent.headroom_adapter import maybe_compress_tool_result_for_model
 from marginalia.agent.stable_context import (
     build_resumed_messages,
     build_stable_snapshot,
@@ -1833,7 +1834,17 @@ async def _dispatch_tool_calls(
                     }
                 else:
                     result_for_model_source = result
-                result_for_model = _copy_jsonish(result_for_model_source)
+                compressed_for_model = maybe_compress_tool_result_for_model(
+                    tc.name,
+                    result_for_model_source,
+                    context=ctx.user_message,
+                )
+                model_payload = (
+                    compressed_for_model
+                    if compressed_for_model is not None
+                    else result_for_model_source
+                )
+                result_for_model = _copy_jsonish(model_payload)
                 if isinstance(result_for_model, (dict, list)):
                     result_text, _trim_marker = _structured_truncate(
                         result_for_model, MAX_TOOL_RESULT_LEN,

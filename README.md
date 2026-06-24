@@ -418,11 +418,20 @@ AGENT_PLAN_MAX_TOKENS=1024
 AGENT_EXECUTE_MAX_TOKENS=2048
 AGENT_FINAL_ANSWER_CONTINUE_TURNS=3
 AGENT_FINAL_ANSWER_MAX_CHARS=120000
+
+# Optional Headroom-backed compression. Install with: pip install "marginalia[headroom]"
+COMPRESSION_ENABLED=true
+COMPRESSION_MIN_CHARS=12000
+COMPRESSION_TARGET_CHARS=8000
+COMPRESSION_CONTEXT_CHARS=220
+COMPRESSION_MAX_RATIO=0.85
 ```
 
 Use `openai-compatible` for DeepSeek, Together, Groq, local vLLM, Ollama, and other OpenAI wire-compatible services.
 
 The `vision` profile is optional. Without it, image enrichment, PDF figure captioning, and scanned-PDF OCR degrade gracefully or are skipped.
+
+Compression uses one master switch, `COMPRESSION_ENABLED`. When the optional `headroom` extra is installed, Marginalia uses Headroom-backed transforms for large `read_files` model views, model-facing results from `search_metadata`, `query_sql`, and `query_log`, and low-risk log ingest views. It fails open to original content if Headroom is not installed or the compressed view does not beat `COMPRESSION_MAX_RATIO`. Persisted tool-call results, UI previews, and original files stay unmodified; compressed `read_files` metadata includes `compress=false` reopen args for exact quoting.
 
 `MAINTENANCE_DAILY_TOKEN_BUDGET` is a rolling 24-hour cap for background
 maintenance LLM usage. When it is exhausted, low-priority speculative tasks
@@ -503,6 +512,8 @@ Current tests cover upload, ingest, agent runtime, tool execution, export, task 
 This open-source project is linked with and recognized by the LINUX DO community:
 
 LINUX DO: [https://linux.do/](https://linux.do/)
+
+Thanks to [Headroom](https://github.com/chopratejas/headroom) for the compression ideas and optional compressor surfaces that informed Marginalia's Headroom bridge.
 
 ## License
 
