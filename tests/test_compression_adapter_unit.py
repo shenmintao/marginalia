@@ -37,7 +37,7 @@ def test_query_tool_compression_returns_model_only_envelope(monkeypatch) -> None
         "_compress_query_payload",
         lambda tool_name, payload, context: mod.CompressedText(
             text="a\n1\n2",
-            strategy="marginalia.smart_crusher.csv-schema",
+            strategy="headroom.smart_crusher.records",
             original_chars=200,
             compressed_chars=5,
             extra={"lossy": False},
@@ -61,7 +61,7 @@ def test_query_tool_compression_returns_model_only_envelope(monkeypatch) -> None
     assert result["columns"] == ["a", "b"]
     assert result["row_count"] == 50
     assert result["compressed_text"] == "a\n1\n2"
-    assert result["compression"]["strategy"] == "marginalia.smart_crusher.csv-schema"
+    assert result["compression"]["strategy"] == "headroom.smart_crusher.records"
 
 
 def test_ingest_compression_records_metadata(monkeypatch) -> None:
@@ -71,7 +71,7 @@ def test_ingest_compression_records_metadata(monkeypatch) -> None:
         "_compress_ingest_text",
         lambda body, kind, context: mod.CompressedText(
             text="ERROR compact",
-            strategy="marginalia.log",
+            strategy="headroom.log_compressor",
             original_chars=500,
             compressed_chars=13,
             extra={"lossy": True},
@@ -86,7 +86,7 @@ def test_ingest_compression_records_metadata(monkeypatch) -> None:
 
     assert text == "ERROR compact"
     assert meta is not None
-    assert meta["strategy"] == "marginalia.log"
+    assert meta["strategy"] == "headroom.log_compressor"
     assert meta["lossy"] is True
 
 
@@ -122,19 +122,7 @@ def test_read_routing_uses_source_and_member_extensions() -> None:
     ) == "code"
 
 
-def test_read_code_route_requires_explicit_allow_code(monkeypatch) -> None:
-    monkeypatch.setattr(
-        mod,
-        "_compress_code_text",
-        lambda body, context, target_ratio: mod.CompressedText(
-            text="compact code",
-            strategy="marginalia.code_aware",
-            original_chars=len(body),
-            compressed_chars=12,
-            extra={"lossy": True},
-        ),
-    )
-
+def test_read_code_route_is_not_compressed_without_vendored_code_compressor() -> None:
     skipped = mod._compress_read_text(
         "def fn():\n    return 1\n",
         pipeline="text",
@@ -144,7 +132,7 @@ def test_read_code_route_requires_explicit_allow_code(monkeypatch) -> None:
         source_name="worker.py",
         allow_code=False,
     )
-    compressed = mod._compress_read_text(
+    explicit = mod._compress_read_text(
         "def fn():\n    return 1\n",
         pipeline="text",
         kind="text",
@@ -155,9 +143,7 @@ def test_read_code_route_requires_explicit_allow_code(monkeypatch) -> None:
     )
 
     assert skipped is None
-    assert compressed is not None
-    assert compressed.strategy == "marginalia.code_aware"
-    assert compressed.extra["route"] == "code"
+    assert explicit is None
 
 
 def test_table_read_route_builds_records_for_smartcrusher(monkeypatch) -> None:
@@ -173,7 +159,7 @@ def test_table_read_route_builds_records_for_smartcrusher(monkeypatch) -> None:
         })
         return mod.CompressedText(
             text="compact table",
-            strategy="marginalia.smart_crusher.table",
+            strategy="headroom.smart_crusher.table",
             original_chars=original_chars or 0,
             compressed_chars=13,
             extra={"lossy": lossy},
@@ -195,8 +181,9 @@ def test_table_read_route_builds_records_for_smartcrusher(monkeypatch) -> None:
     assert compressed.extra["route"] == "table"
     assert calls[0]["source_format"] == "table-text"
     assert calls[0]["lossy"] is True
-    assert calls[0]["records"][0]["sheet"] == "Main"
-    assert calls[0]["records"][1]["col_2"] == "3"
+    assert calls[0]["records"] == [
+        {"row": 1, "sheet": "Main", "name": "alpha", "total": "3"}
+    ]
 
 
 def test_jsonl_read_route_uses_records(monkeypatch) -> None:
@@ -206,7 +193,7 @@ def test_jsonl_read_route_uses_records(monkeypatch) -> None:
         calls.append({"records": records, "source_format": source_format})
         return mod.CompressedText(
             text="compact jsonl",
-            strategy="marginalia.smart_crusher.json",
+            strategy="headroom.smart_crusher.json",
             original_chars=original_chars or 0,
             compressed_chars=13,
             extra={"lossy": lossy},
@@ -233,7 +220,7 @@ def test_ingest_table_routes_to_table_compressor(monkeypatch) -> None:
         "_compress_table_text",
         lambda body, context: mod.CompressedText(
             text="compact table",
-            strategy="marginalia.smart_crusher.table",
+            strategy="headroom.smart_crusher.table",
             original_chars=len(body),
             compressed_chars=13,
             extra={"lossy": True},
@@ -248,7 +235,7 @@ def test_ingest_table_routes_to_table_compressor(monkeypatch) -> None:
 
     assert compressed is not None
     assert compressed.text == "compact table"
-    assert compressed.strategy == "marginalia.smart_crusher.table"
+    assert compressed.strategy == "headroom.smart_crusher.table"
 
 
 def test_ingest_jsonl_routes_to_structured_compressor(monkeypatch) -> None:
@@ -258,7 +245,7 @@ def test_ingest_jsonl_routes_to_structured_compressor(monkeypatch) -> None:
         calls.append({"records": records, "source_format": source_format})
         return mod.CompressedText(
             text="compact jsonl",
-            strategy="marginalia.smart_crusher.json",
+            strategy="headroom.smart_crusher.json",
             original_chars=original_chars or 0,
             compressed_chars=13,
             extra={"lossy": lossy},
@@ -309,7 +296,7 @@ def test_archive_peeks_are_compressed_with_reopen_metadata(monkeypatch) -> None:
         "_compress_read_text",
         lambda body, **kwargs: mod.CompressedText(
             text="compact peek",
-            strategy="marginalia.log",
+            strategy="headroom.log_compressor",
             original_chars=len(body),
             compressed_chars=12,
             extra={"lossy": True, "route": "log"},
@@ -335,7 +322,7 @@ def test_ingest_aggregate_view_uses_text_compressor(monkeypatch) -> None:
         "_compress_plain_text",
         lambda body, context, target_ratio: mod.CompressedText(
             text="compact aggregate",
-            strategy="marginalia.text_extract",
+            strategy="headroom.text_crusher",
             original_chars=len(body),
             compressed_chars=17,
             extra={"lossy": True},
@@ -352,3 +339,69 @@ def test_ingest_aggregate_view_uses_text_compressor(monkeypatch) -> None:
     assert meta is not None
     assert meta["aggregate"] is True
     assert meta["kind"] == "text_aggregate"
+
+
+def test_actual_headroom_log_compressor_preserves_error_lines() -> None:
+    body = "\n".join(
+        [f"2026-01-01T00:00:{idx:02d}Z INFO worker heartbeat {idx}" for idx in range(90)]
+        + ["2026-01-01T00:02:00Z ERROR payment failed with timeout"]
+        + [f"2026-01-01T00:03:{idx:02d}Z INFO worker recovered {idx}" for idx in range(90)]
+    )
+
+    compressed = mod._compress_log_text(body, context="payment timeout")
+
+    assert compressed is not None
+    assert compressed.strategy == "headroom.log_compressor"
+    assert "ERROR payment failed" in compressed.text
+    assert compressed.extra["lines_omitted"] > 0
+    assert len(compressed.text) < len(body)
+
+
+def test_actual_headroom_search_compressor_omits_redundant_matches() -> None:
+    body = "\n".join(
+        f"src/service_{idx % 4}.py:{idx + 1}:def handler_{idx}(): raise RuntimeError('boom')"
+        for idx in range(60)
+    )
+
+    compressed = mod._compress_search_text(body, context="RuntimeError service_1")
+
+    assert compressed is not None
+    assert compressed.strategy == "headroom.search_compressor"
+    assert compressed.extra["matches_omitted"] > 0
+    assert "more matches" in compressed.text
+    assert len(compressed.text) < len(body)
+
+
+def test_actual_headroom_smartcrusher_preserves_error_record() -> None:
+    records = [
+        {"id": idx, "status": "ok", "score": 100 - idx, "message": "routine event"}
+        for idx in range(80)
+    ]
+    records[57] = {
+        "id": 57,
+        "status": "failed",
+        "score": 0,
+        "message": "critical failure in ingest worker",
+    }
+
+    compressed = mod._compress_records(records, context="critical failure")
+
+    assert compressed is not None
+    assert compressed.strategy == "headroom.smart_crusher.records"
+    assert "critical failure" in compressed.text
+    assert compressed.extra["compressed_item_count"] < len(records)
+    assert len(compressed.text) < compressed.original_chars
+
+
+def test_actual_headroom_textcrusher_compresses_plain_text() -> None:
+    body = "\n".join(
+        f"Section {idx}. The ingest aggregate mentions keyword-{idx} and stable supporting detail."
+        for idx in range(120)
+    )
+
+    compressed = mod._compress_plain_text(body, context="keyword-119", target_ratio=0.25)
+
+    assert compressed is not None
+    assert compressed.strategy == "headroom.text_crusher"
+    assert compressed.extra["kept_segments"] < compressed.extra["total_segments"]
+    assert len(compressed.text) < len(body)

@@ -21,6 +21,7 @@ import re
 from collections import Counter
 from typing import Any
 
+from marginalia.config import get_settings
 from marginalia.pipelines._text_indexer import index_extracted_text
 from marginalia.pipelines.base import (
     Pipeline,
@@ -30,11 +31,15 @@ from marginalia.pipelines.base import (
 )
 from marginalia.pipelines.registry import register_pipeline
 from marginalia.storage.base import StorageBackend
+from marginalia.vendor.headroom.transforms.log_compressor import (
+    LogCompressor,
+    LogCompressorConfig,
+)
 
 log = logging.getLogger(__name__)
 
 MAX_LOG_BYTES = 50 * 1024 * 1024
-MAX_INGEST_LINES = 400  # head + tail + sampled middles
+MAX_INGEST_LINES = 400
 DEFAULT_MAX_CHARS = 8000
 
 # Severity tokens, ordered most-severe-first so we report the highest seen.
@@ -93,7 +98,7 @@ class LogPipeline(Pipeline):
             loaded_lines=len(lines),
             sampled_lines=_sampled_line_count(sampled),
             read_truncated=read_truncated,
-            sample_truncated=any("sample truncated" in line for line in sampled),
+            sample_truncated=any("sample truncated" in line or "safety cap" in line for line in sampled),
         )
         body = (
             f"Log file extracted view:\n"
@@ -306,28 +311,34 @@ def _summarize(lines: list[str]) -> dict[str, Any]:
 def _sample_for_indexer(
     lines: list[str], stats: dict[str, Any],
 ) -> list[str]:
-    """Build a representative sample: head + tail + first errors/warns."""
+    """Build the model-facing log view with Headroom when enabled."""
+    if not lines:
+        return []
+    settings = get_settings()
+    if settings.compression_enabled:
+        raw = "\n".join(lines)
+        try:
+            result = LogCompressor(
+                LogCompressorConfig(
+                    max_total_lines=MAX_INGEST_LINES,
+                    min_lines_to_compress=80,
+                    include_line_numbers=True,
+                )
+            ).compress(raw, context=str(stats))
+            if result.compressed and len(result.compressed) < len(raw):
+                return result.compressed.splitlines()
+        except Exception as exc:  # noqa: BLE001 - ingest must fail open
+            log.debug("Headroom log ingest compression skipped: %r", exc)
+    return _bounded_log_view(lines)
+
+
+def _bounded_log_view(lines: list[str]) -> list[str]:
     out: list[str] = []
-    head_n = min(50, len(lines))
-    out.extend(f"L{i+1}: {ln}" for i, ln in enumerate(lines[:head_n]))
-
-    err_warn = [
-        (i + 1, ln) for i, ln in enumerate(lines)
-        if _detect_level(ln) in ("FATAL", "ERROR", "WARN")
-    ][:60]
-    if err_warn:
-        out.append(f"\n--- {len(err_warn)} ERROR/WARN/FATAL lines ---")
-        out.extend(f"L{i}: {ln}" for i, ln in err_warn)
-
-    if len(lines) > head_n + 50:
-        out.append("\n--- last 50 lines ---")
-        for i, ln in enumerate(lines[-50:], start=len(lines) - 49):
-            out.append(f"L{i}: {ln}")
-
-    if len(out) > MAX_INGEST_LINES:
-        out = out[:MAX_INGEST_LINES] + ["[... sample truncated ...]"]
+    for i, ln in enumerate(lines[:MAX_INGEST_LINES], start=1):
+        out.append(f"L{i}: {ln}")
+    if len(lines) > MAX_INGEST_LINES:
+        out.append("[... ingest log safety cap reached ...]")
     return out
-
 
 def _sampled_line_count(sampled: list[str]) -> int:
     return sum(1 for line in sampled if line.startswith("L"))

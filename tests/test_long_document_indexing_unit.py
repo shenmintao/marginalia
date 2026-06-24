@@ -207,7 +207,7 @@ async def test_pdf_long_ingest_chunks_then_aggregates(
     def fake_compress_aggregate(body: str, *, kind: str, context: str):
         aggregate_calls.append(kind)
         return "compressed aggregate prompt", {
-            "strategy": "marginalia.text_extract",
+            "strategy": "headroom.text_crusher",
             "aggregate": True,
             "kind": kind,
         }
@@ -282,7 +282,7 @@ async def test_text_long_ingest_chunks_then_aggregates(
     def fake_compress_aggregate(body: str, *, kind: str, context: str):
         aggregate_calls.append(kind)
         return "compressed aggregate prompt", {
-            "strategy": "marginalia.text_extract",
+            "strategy": "headroom.text_crusher",
             "aggregate": True,
             "kind": kind,
         }

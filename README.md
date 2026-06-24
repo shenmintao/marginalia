@@ -431,7 +431,7 @@ Use `openai-compatible` for DeepSeek, Together, Groq, local vLLM, Ollama, and ot
 
 The `vision` profile is optional. Without it, image enrichment, PDF figure captioning, and scanned-PDF OCR degrade gracefully or are skipped.
 
-Compression uses one master switch, `COMPRESSION_ENABLED`. Marginalia includes built-in deterministic transforms for large `read_files` model views, model-facing results from `search_metadata`, `query_sql`, and `query_log`, structured/log ingest views, archive member peeks, and long aggregate index prompts. It fails open to original content if a compressed view does not beat `COMPRESSION_MAX_RATIO`. Persisted tool-call results, UI previews, and original files stay unmodified; compressed `read_files` metadata includes `compress=false` reopen args for exact quoting.
+Compression uses one master switch, `COMPRESSION_ENABLED`. Marginalia vendors the dependency-free Headroom SearchCompressor, LogCompressor, SmartCrusher, and TextCrusher cores for large `read_files` model views, model-facing results from `search_metadata`, `query_sql`, and `query_log`, structured/log ingest views, archive member peeks, and long aggregate index prompts. It fails open to original content if a compressed view does not beat `COMPRESSION_MAX_RATIO`. Persisted tool-call results, UI previews, and original files stay unmodified; compressed `read_files` metadata includes `compress=false` reopen args for exact quoting.
 
 `MAINTENANCE_DAILY_TOKEN_BUDGET` is a rolling 24-hour cap for background
 maintenance LLM usage. When it is exhausted, low-priority speculative tasks
@@ -513,7 +513,7 @@ This open-source project is linked with and recognized by the LINUX DO community
 
 LINUX DO: [https://linux.do/](https://linux.do/)
 
-Thanks to [Headroom](https://github.com/chopratejas/headroom) for compression ideas and architecture that informed Marginalia's built-in compression path.
+Thanks to [Headroom](https://github.com/chopratejas/headroom) for the compression algorithms and architecture vendored into Marginalia's built-in compression path.
 
 ## License
 

@@ -818,20 +818,39 @@ def _section_body(section: dict, full_text: str) -> tuple[str, dict[str, Any]]:
     if title:
         idx = full_text.find(title)
         if idx != -1:
-            # Take from heading to the next ~4KB of text (or to next heading
-            # if we can spot one — kept simple here).
-            return full_text[idx: idx + 4096], {
+            text, extras = _title_scan_body(full_text, idx)
+            extras.update({
                 "title": title,
                 "section_id": section.get("id"),
                 "located_via": "title-scan",
-            }
-
+            })
+            return text, extras
     return "", {
         "title": section.get("title"),
         "section_id": section.get("id"),
         "summary": section.get("summary"),
         "key_terms": section.get("key_terms"),
         "note": "anchor not resolvable from body; section summary returned in extras",
+    }
+
+
+def _title_scan_body(full_text: str, title_idx: int, *, max_chars: int = 4096) -> tuple[str, dict[str, Any]]:
+    hard_end = min(len(full_text), title_idx + max_chars)
+    line_start = full_text.rfind("\n", 0, title_idx) + 1
+    line_end_raw = full_text.find("\n", title_idx)
+    line_end = len(full_text) if line_end_raw == -1 else line_end_raw
+    heading_line = full_text[line_start:line_end]
+    match = re.match(r"\s{0,3}(#{1,6})\s+\S", heading_line)
+    if not match:
+        return full_text[title_idx:hard_end], {"scan_capped": hard_end < len(full_text)}
+
+    level = len(match.group(1))
+    next_heading_re = re.compile(rf"(?m)^\s{{0,3}}#{{1,{level}}}\s+\S")
+    next_match = next_heading_re.search(full_text, pos=line_end + 1)
+    end = min(next_match.start(), hard_end) if next_match else hard_end
+    return full_text[title_idx:end].rstrip(), {
+        "scan_capped": end == hard_end and hard_end < len(full_text),
+        "heading_level": level,
     }
 
 

@@ -519,7 +519,7 @@ async def main():
     compression_meta = compressed_read["extras"]["read_compression"]
     assert compression_meta["compressed"] is True, compression_meta
     assert compression_meta["omitted"], compression_meta
-    assert str(compression_meta["strategy"]).startswith("marginalia."), compression_meta
+    assert str(compression_meta["strategy"]).startswith("headroom."), compression_meta
     assert len(compressed_read["text"]) < compression_meta["original_chars"]
 
     rf_uncompressed = await _call("read_files", {
