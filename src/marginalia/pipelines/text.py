@@ -629,11 +629,16 @@ class TextPipeline(Pipeline):
                     error="section_id/heading lookup needs persisted description",
                 )
             target = _find_section(sections, section_id=section_id, heading=heading)
-            if target is None:
-                miss = section_id or f"heading={heading!r}"
-                return SegmentResult(error=f"section not found: {miss}")
-            text, extras = _section_body(target, body)
-            return _clamp(text, offset, max_chars, extras=extras)
+            if target is not None:
+                text, extras = _section_body(target, body)
+                return _clamp(text, offset, max_chars, extras=extras)
+            if heading:
+                scanned = _heading_scan_body(body, heading)
+                if scanned is not None:
+                    text, extras = scanned
+                    return _clamp(text, offset, max_chars, extras=extras)
+            miss = section_id or f"heading={heading!r}"
+            return SegmentResult(error=f"section not found: {miss}")
 
         line_start = args.get("line_start")
         line_end = args.get("line_end")
@@ -787,6 +792,9 @@ def _find_section(
         for s in sections:
             if (s.get("title") or "").strip() == heading.strip():
                 return s
+        for s in sections:
+            if _heading_matches(str(s.get("title") or ""), heading):
+                return s
     return None
 
 
@@ -852,6 +860,72 @@ def _title_scan_body(full_text: str, title_idx: int, *, max_chars: int = 4096) -
         "scan_capped": end == hard_end and hard_end < len(full_text),
         "heading_level": level,
     }
+
+
+def _heading_scan_body(full_text: str, heading: str) -> tuple[str, dict[str, Any]] | None:
+    """Find a Markdown heading in the already-read source text.
+
+    This is the safety net for formats such as EPUB where the raw extracted
+    Markdown has useful chapter headings even when the LLM-generated section
+    map is incomplete or used a longer title than the caller supplied.
+    """
+    line_start = 0
+    line_no = 1
+    for line in full_text.splitlines(keepends=True):
+        line_body = line.rstrip("\r\n")
+        match = re.match(r"\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$", line_body)
+        if not match:
+            line_start += len(line)
+            line_no += 1
+            continue
+        title = match.group(2).strip()
+        if not _heading_matches(title, heading):
+            line_start += len(line)
+            line_no += 1
+            continue
+
+        level = len(match.group(1))
+        next_heading_re = re.compile(rf"(?m)^\s{{0,3}}#{{1,{level}}}\s+\S")
+        next_match = next_heading_re.search(full_text, pos=line_start + len(line))
+        end = next_match.start() if next_match else len(full_text)
+        text = full_text[line_start:end].rstrip()
+        return text, {
+            "title": title,
+            "requested_heading": heading,
+            "located_via": "body-heading-scan",
+            "heading_level": level,
+            "line_start": line_no,
+            "line_end": line_no + text.count("\n"),
+        }
+    return None
+
+
+def _heading_matches(title: str, heading: str) -> bool:
+    title_norm = _normalize_heading(title)
+    heading_norm = _normalize_heading(heading)
+    if not title_norm or not heading_norm:
+        return False
+    if title_norm == heading_norm:
+        return True
+    if title_norm.startswith(heading_norm):
+        rest = title_norm[len(heading_norm):]
+        if rest and (rest[0].isspace() or rest[0] in ":：-–—.。)）]】"):
+            return True
+
+    title_compact = re.sub(r"\s+", "", title_norm)
+    heading_compact = re.sub(r"\s+", "", heading_norm)
+    return bool(
+        title_compact
+        and heading_compact
+        and title_compact.startswith(heading_compact)
+        and heading_compact[-1] in "章节部篇回卷"
+    )
+
+
+def _normalize_heading(value: str) -> str:
+    cleaned = re.sub(r"\s+", " ", value.strip())
+    cleaned = re.sub(r"^\s*#{1,6}\s+", "", cleaned)
+    return cleaned.casefold()
 
 
 def _clamp(
