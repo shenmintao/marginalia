@@ -122,12 +122,12 @@ jobs:
       - name: Build bundles
         if: matrix.platform != 'linux'
         working-directory: desktop
-        run: npm run tauri:build -- --ci ${{ matrix.tauri_args }}
+        run: npm run tauri:build -- --ci --verbose ${{ matrix.tauri_args }}
 
       - name: Build Linux deb/rpm bundles
         if: matrix.platform == 'linux'
         working-directory: desktop
-        run: npm run tauri:build -- --ci ${{ matrix.tauri_args }}
+        run: npm run tauri:build -- --ci --verbose ${{ matrix.tauri_args }}
 
       - name: Build Linux AppImage bundle
         if: matrix.platform == 'linux'
