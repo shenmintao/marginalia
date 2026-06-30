@@ -119,10 +119,53 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: node scripts/prepare-backend.mjs
 
-      - name: Build bundles
-        if: matrix.platform != 'linux'
+      - name: Build Windows bundles
+        if: matrix.platform == 'windows'
         working-directory: desktop
         run: npm run tauri:build -- --ci --verbose ${{ matrix.tauri_args }}
+
+      - name: Build macOS bundles
+        if: matrix.platform == 'macos'
+        shell: bash
+        working-directory: desktop
+        run: |
+          set -euo pipefail
+          set +e
+          npm run tauri:build -- --ci --verbose ${{ matrix.tauri_args }}
+          status="$?"
+          set -e
+          if [ "$status" -eq 0 ]; then
+            exit 0
+          fi
+
+          dmg_dir="src-tauri/target/release/bundle/dmg"
+          macos_dir="src-tauri/target/release/bundle/macos"
+          if compgen -G "$dmg_dir/*.dmg" >/dev/null; then
+            echo "Tauri returned $status, but a final DMG exists; continuing."
+            exit 0
+          fi
+
+          temp_dmg="$(ls -t "$macos_dir"/rw.*.dmg 2>/dev/null | head -n 1 || true)"
+          if [ -z "$temp_dmg" ]; then
+            echo "Tauri returned $status and no recoverable temporary DMG was found." >&2
+            exit "$status"
+          fi
+
+          echo "Tauri DMG bundling failed after creating $temp_dmg."
+          echo "Forcing detach of any create-dmg mountpoints before conversion."
+          for mount in /Volumes/dmg.*; do
+            if [ -e "$mount" ]; then
+              hdiutil detach -force "$mount" || true
+            fi
+          done
+
+          final_dmg="$dmg_dir/$(basename "$temp_dmg" | sed -E 's/^rw\.[0-9]+\.//')"
+          mkdir -p "$dmg_dir"
+          rm -f "$final_dmg"
+          hdiutil convert "$temp_dmg" -format UDZO -o "$final_dmg"
+          rm -f "$temp_dmg"
+          test -f "$final_dmg"
+          echo "Recovered DMG: $final_dmg"
 
       - name: Build Linux deb/rpm bundles
         if: matrix.platform == 'linux'
