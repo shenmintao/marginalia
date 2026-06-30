@@ -430,6 +430,29 @@ Compose 默认只把 API 和 MinIO 控制台绑定到 `127.0.0.1`。如果要主
 marginalia --server http://localhost:8000
 ```
 
+### WebDAV 快照同步
+
+如果只想用 WebDAV 在多设备间传递知识库,不要把 `MARGINALIA_HOME` 放进
+WebDAV 同步目录。请在 Settings -> WebDAV sync 中配置:
+
+```ini
+WEBDAV_URL=https://example.com/dav
+WEBDAV_USERNAME=...
+WEBDAV_PASSWORD=...
+WEBDAV_REMOTE_PATH=/marginalia
+```
+
+然后:
+
+- Library 左侧工具栏云按钮:导出当前知识库快照并上传到 WebDAV。
+- Settings -> WebDAV sync -> Pull metadata:读取远端 `latest.json` 和
+  `*.jsonl`,在本机创建远端待下载索引;这些条目不会直接出现在 Library。
+- Settings -> WebDAV sync 的远端文件清单:按需下载原始 blob。下载成功后,
+  条目才会进入 Library,并可正常预览、搜索和引用。
+
+这个模式同步的是知识库快照和原始 blob,不是数据库实时复制;tags、summary、
+catalog、relations 会随 metadata 带过来,本机索引和缓存仍由本机维护。
+
 ---
 
 ## 12. 看后台在干什么

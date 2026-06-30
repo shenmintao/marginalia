@@ -41,6 +41,7 @@ from marginalia.tasks.kinds import (
     KIND_SUGGEST_LIFECYCLE,
     KIND_SUMMARIZE_SESSION,
     KIND_VET_RELATIONS,
+    KIND_WEBDAV_PUBLISH,
     PERIODIC_INTERVALS,
     task_handler,
 )
@@ -140,6 +141,34 @@ async def handle_periodic_tick(payload: Mapping[str, Any]) -> None:
                     task_id=task.id,
                     payload={"kind": kind, "scheduled_by": "periodic_tick"},
                 )
+
+        if settings.webdav_auto_sync_enabled and settings.webdav_url:
+            interval = timedelta(
+                minutes=max(5, int(settings.webdav_auto_sync_interval_minutes or 60))
+            )
+            kind = KIND_WEBDAV_PUBLISH
+            if await tasks_repo.has_inflight_for_kind(session, kind):
+                skipped_inflight.append(kind)
+            else:
+                last_done_at = _aware(await tasks_repo.last_done_at_for_kind(session, kind))
+                if last_done_at is not None and (now - last_done_at) < interval:
+                    skipped_recent.append(kind)
+                else:
+                    task = await enqueue(
+                        session,
+                        kind=kind,
+                        payload={"path": "webdav", "scheduled_by": "periodic_tick"},
+                        dedup_key=kind,
+                        max_attempts=2,
+                    )
+                    if task is not None:
+                        dispatched.append(kind)
+                        await audit_events_repo.append(
+                            session,
+                            kind="task_enqueued",
+                            task_id=task.id,
+                            payload={"kind": kind, "scheduled_by": "periodic_tick"},
+                        )
 
         # Per-session summarize dispatch (doesn't fit the global PERIODIC_INTERVALS
         # pattern — one task per eligible session, dedup_key encodes session_id).

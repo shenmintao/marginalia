@@ -20,8 +20,8 @@ import {
 import { useSearchParams } from "react-router-dom";
 import { Inbox } from "lucide-react";
 
-import { fileEntries, tasks } from "@/api/client";
-import type { ActiveTasks, FileEntrySummary, FileMetadata, Folder } from "@/types/api";
+import { fileEntries, tasks, webdavSync } from "@/api/client";
+import type { ActiveTasks, FileEntrySummary, FileMetadata, Folder, WebDavStatus } from "@/types/api";
 import { FolderTree } from "@/components/library/FolderTree";
 import { FileViewer } from "@/components/library/FileViewer";
 import { MetaPanel } from "@/components/library/MetaPanel";
@@ -63,6 +63,8 @@ export function LibraryPage() {
   const [uploadInto, setUploadInto] = useState<{ id: string | null; name: string } | null>(null);
 
   const [active, setActive] = useState<ActiveTasks | null>(null);
+  const [webdav, setWebdav] = useState<WebDavStatus | null>(null);
+  const [webdavPublishing, setWebdavPublishing] = useState(false);
   const sidebarRef = useRef<HTMLDivElement>(null);
   const [sidebarWidth, setSidebarWidth] = useState(readSidebarWidth);
   const ingestingFileIds = useMemo<Set<string>>(() => {
@@ -93,6 +95,17 @@ export function LibraryPage() {
     const handle = window.setInterval(tick, 4000);
     return () => { cancelled = true; window.clearInterval(handle); };
   }, [triggerRefresh]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const tick = () => webdavSync.status().then(
+      (s) => { if (!cancelled) setWebdav(s); },
+      () => {},
+    );
+    tick();
+    const handle = window.setInterval(tick, 4000);
+    return () => { cancelled = true; window.clearInterval(handle); };
+  }, []);
 
   // ?entry=<id> deep-link: ask the backend for the folder ancestor
   // chain, hand the ids to FolderTree as expandPath so each parent
@@ -170,6 +183,29 @@ export function LibraryPage() {
     setMeta(null);
   }, []);
 
+  const publishWebDav = useCallback(async () => {
+    if (webdavPublishing) return;
+    setWebdavPublishing(true);
+    try {
+      await webdavSync.publish();
+      setWebdav(await webdavSync.status());
+    } catch (e) {
+      alert(e instanceof Error ? e.message : String(e));
+    } finally {
+      setWebdavPublishing(false);
+    }
+  }, [webdavPublishing]);
+
+  const refreshSelectedEntry = useCallback(() => {
+    if (!selectedEntry) return;
+    setMetaLoading(true);
+    fileEntries.metadata(selectedEntry.id)
+      .then(setMeta)
+      .catch(() => setMeta(null))
+      .finally(() => setMetaLoading(false));
+    triggerRefresh();
+  }, [selectedEntry, triggerRefresh]);
+
   // The Library header buttons live on the tree, but uploading to "root"
   // when the user has clearly picked a folder is rarely what they want.
   // Bias header actions toward the current selection; fall back to root.
@@ -229,6 +265,9 @@ export function LibraryPage() {
             id: headerTargetFolderId,
             name: headerTargetName,
           })}
+          webdav={webdav}
+          webdavPublishing={webdavPublishing}
+          onWebDavPublish={publishWebDav}
           onEntryDeleted={(id) => {
             if (selectedEntry?.id === id) {
               setSelectedEntry(null);
@@ -262,6 +301,7 @@ export function LibraryPage() {
             meta={meta}
             locator={pendingLocator}
             onLocatorConsumed={() => setPendingLocator(null)}
+            onHydrated={refreshSelectedEntry}
           />
         ) : (
           <EmptyViewer folder={selectedFolder} onClick={clearSelection} t={t} />

@@ -95,7 +95,19 @@ export interface FileMetadata {
   tags?: { name: string; facet?: string | null }[];
   extra?: string | null;
   related_entries?: RelatedEntry[];
+  webdav_remote?: WebDavRemoteMarker | null;
   [key: string]: unknown;
+}
+
+export interface WebDavRemoteMarker {
+  remote_root?: string;
+  library_id?: string;
+  snapshot_id?: string;
+  blob_path?: string;
+  sha256?: string;
+  hydrated?: boolean;
+  imported_at?: string;
+  hydrated_at?: string;
 }
 
 /** Folder ancestor chain (root → leaf) for an entry, returned by
@@ -370,6 +382,89 @@ export interface ServerSettings {
   rerank_configured: boolean;
   evidence_selection: "quota" | "rerank";
   vision_profile_configured: boolean;
+  webdav?: WebDavStatus;
+}
+
+export interface WebDavSyncLast {
+  ok?: boolean;
+  status?: "running" | "success" | "failed" | string;
+  started_at?: string | null;
+  finished_at?: string | null;
+  snapshot_id?: string | null;
+  remote_path?: string | null;
+  latest_snapshot?: string | null;
+  uploaded_blobs?: number;
+  skipped_blobs?: number;
+  uploaded_metadata_files?: number;
+  entry_count?: number;
+  blob_count?: number;
+  blob_bytes?: number;
+  error?: string | null;
+  last_pull_at?: string | null;
+  last_pulled_snapshot_id?: string | null;
+  last_pull?: Record<string, number>;
+}
+
+export interface WebDavStatus {
+  configured: boolean;
+  url?: string | null;
+  username?: string | null;
+  password_set: boolean;
+  remote_path: string;
+  auto_sync_enabled: boolean;
+  auto_sync_interval_minutes: number;
+  last?: WebDavSyncLast | null;
+}
+
+export interface WebDavPublishResult {
+  ok: boolean;
+  task_id: string | null;
+}
+
+export interface WebDavPullResult {
+  ok: boolean;
+  remote_path: string;
+  snapshot_id?: string | null;
+  folders: number;
+  catalogs: number;
+  views: number;
+  tags: number;
+  tag_aliases: number;
+  entries: number;
+  entry_tags: number;
+  relations: number;
+  remote_files: number;
+}
+
+export interface WebDavHydrateResult {
+  ok: boolean;
+  entry_id: string;
+  file_id: string;
+  hydrated: boolean;
+  already_local?: boolean;
+  storage_key?: string;
+}
+
+export interface WebDavRemoteEntry {
+  entry_id: string;
+  file_id: string;
+  display_name: string;
+  folder_id: string | null;
+  folder_path?: string | null;
+  size_bytes?: number;
+  mime_type?: string | null;
+  sha256?: string | null;
+  summary?: string | null;
+  snapshot_id?: string | null;
+  imported_at?: string | null;
+}
+
+export interface WebDavRemoteEntriesResult {
+  entries: WebDavRemoteEntry[];
+  count: number;
+  total: number;
+  limit: number;
+  offset: number;
 }
 
 export interface SemanticIndexStatus {

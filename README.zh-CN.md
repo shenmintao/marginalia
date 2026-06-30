@@ -493,6 +493,26 @@ Compose 默认只把 API 和 MinIO 控制台绑定到 `127.0.0.1`。如果要主
 运行的 `MARGINALIA_HOME`。SQLite 和 mirror/local 存储在并发复制下可能损坏。
 多设备共享请使用 Postgres + S3 兼容对象存储的 remote 部署形态。
 
+### WebDAV 知识库快照
+
+v0.3.0 起桌面端支持 WebDAV knowledge-pack 同步。它不会同步运行中的
+SQLite、cache、runtime 或任务队列，而是把当前知识库导出成可验证快照:
+
+```text
+latest.json
+snapshots/<snapshot_id>/manifest.json
+snapshots/<snapshot_id>/entries.jsonl
+snapshots/<snapshot_id>/folders.jsonl
+snapshots/<snapshot_id>/tags.jsonl
+blobs/sha256/<prefix>/<sha256>
+```
+
+在 Settings -> WebDAV sync 中配置 URL、用户名、密码和远端路径。Library 左侧
+工具栏的云按钮会发布本机快照到 WebDAV。另一台设备可在 Settings 里 Pull
+metadata,先索引文件名、摘要、标签、catalog 和关系;这些远端文件会出现在
+Settings 的远端待下载清单中,不会直接进入 Library。点击下载后按 sha256
+从 WebDAV hydrate 到本地,完成后才会显示在 Library。
+
 ## 文档
 
 - [USAGE.zh-CN.md](USAGE.zh-CN.md): 使用和运维手册。

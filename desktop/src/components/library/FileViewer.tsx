@@ -1,7 +1,7 @@
-import { useEffect, useMemo } from "react";
-import { FileText, Download } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { FileText, Download, Cloud, Loader2 } from "lucide-react";
 
-import { fileEntries } from "@/api/client";
+import { fileEntries, webdavSync } from "@/api/client";
 import type { FileMetadata } from "@/types/api";
 import { useI18n } from "@/lib/i18n";
 import {
@@ -27,6 +27,7 @@ interface Props {
   meta: FileMetadata | null;
   locator?: ViewerLocator | null;
   onLocatorConsumed?: () => void;
+  onHydrated?: () => void;
 }
 
 type Kind = "pdf" | "image" | "md" | "text" | "code" | "docx" | "xlsx" | "pptx" | "epub" | "email" | "archive" | "binary";
@@ -81,12 +82,16 @@ function parseLineRange(value: string): { start: number; end: number } | null {
   return { start, end: Math.max(start, end) };
 }
 
-export function FileViewer({ entryId, meta, locator, onLocatorConsumed }: Props) {
+export function FileViewer({ entryId, meta, locator, onLocatorConsumed, onHydrated }: Props) {
   const { t } = useI18n();
+  const [hydrating, setHydrating] = useState(false);
+  const [hydrateError, setHydrateError] = useState<string | null>(null);
   const name = meta?.display_name || "";
   const kind = useMemo<Kind>(() => classifyByName(name), [name]);
   const contentUrl = fileEntries.contentUrl(entryId);
   const downloadUrl = fileEntries.downloadUrl(entryId);
+  const remote = meta?.webdav_remote;
+  const needsHydrate = Boolean(remote && !remote.hydrated);
 
   const lineLoc = locator?.kind === "line" ? parseLineRange(locator.value) : null;
   const pageLoc = locator?.kind === "page" ? parseInt(locator.value, 10) : null;
@@ -101,11 +106,46 @@ export function FileViewer({ entryId, meta, locator, onLocatorConsumed }: Props)
       <header className="flex shrink-0 items-center gap-2 border-b border-border bg-bg-subtle px-4 py-2 text-sm">
         <FileText size={14} className="text-fg-muted" />
         <span className="flex-1 truncate font-medium">{name || t.common.unset}</span>
-        <a href={downloadUrl} download className="flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs hover:bg-bg-muted">
-          <Download size={12} /> {t.library.download}
-        </a>
+        {needsHydrate ? (
+          <button
+            type="button"
+            disabled={hydrating}
+            onClick={async () => {
+              setHydrating(true);
+              setHydrateError(null);
+              try {
+                await webdavSync.hydrate(entryId);
+                onHydrated?.();
+              } catch (e) {
+                setHydrateError(e instanceof Error ? e.message : String(e));
+              } finally {
+                setHydrating(false);
+              }
+            }}
+            className="flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs hover:bg-bg-muted disabled:opacity-50"
+          >
+            {hydrating ? <Loader2 size={12} className="animate-spin" /> : <Cloud size={12} />}
+            {t.library.hydrateFromWebDav}
+          </button>
+        ) : (
+          <a href={downloadUrl} download className="flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs hover:bg-bg-muted">
+            <Download size={12} /> {t.library.download}
+          </a>
+        )}
       </header>
       <div className="flex-1 overflow-hidden">
+        {needsHydrate && (
+          <div className="flex h-full items-center justify-center p-8 text-center">
+            <div className="max-w-sm">
+              <Cloud className="mx-auto h-8 w-8 text-fg-muted" />
+              <h2 className="mt-3 text-sm font-semibold">{t.library.remoteFileTitle}</h2>
+              <p className="mt-1 text-sm text-fg-muted">{t.library.remoteFileBody}</p>
+              {hydrateError && <p className="mt-3 text-xs text-danger">{hydrateError}</p>}
+            </div>
+          </div>
+        )}
+        {!needsHydrate && (
+          <>
         {kind === "pdf" && (
           <PdfView
             url={contentUrl}
@@ -168,6 +208,8 @@ export function FileViewer({ entryId, meta, locator, onLocatorConsumed }: Props)
         )}
         {kind === "archive" && <ArchiveView url={downloadUrl} name={name} />}
         {kind === "binary" && <BinaryView url={downloadUrl} name={name} />}
+          </>
+        )}
       </div>
     </div>
   );

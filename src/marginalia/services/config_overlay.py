@@ -47,6 +47,13 @@ _ALLOWED_FIELDS: frozenset[str] = frozenset({
     "worker_batch_size",
     "maintenance_daily_token_budget",
     "relation_background_vetting_enabled",
+    # WebDAV knowledge-pack publishing
+    "webdav_url",
+    "webdav_username",
+    "webdav_password",
+    "webdav_remote_path",
+    "webdav_auto_sync_enabled",
+    "webdav_auto_sync_interval_minutes",
     # LLM defaults
     "llm_default_provider",
     "llm_default_api_key",
@@ -198,6 +205,7 @@ def validate_and_normalize(patch: dict[str, Any]) -> dict[str, Any]:
             "llm_ingest_concurrency",
             "worker_batch_size",
             "maintenance_daily_token_budget",
+            "webdav_auto_sync_interval_minutes",
             "embedding_dimensions",
             "embedding_batch_size",
             "semantic_recall_limit",
@@ -217,6 +225,8 @@ def validate_and_normalize(patch: dict[str, Any]) -> dict[str, Any]:
                 upper = 32
             elif k == "maintenance_daily_token_budget":
                 lower, upper = 0, 200_000_000
+            elif k == "webdav_auto_sync_interval_minutes":
+                lower, upper = 5, 10_080
             elif k == "embedding_dimensions":
                 upper = 8192
             elif k == "embedding_batch_size":
@@ -252,11 +262,24 @@ def validate_and_normalize(patch: dict[str, Any]) -> dict[str, Any]:
             "semantic_recall_enabled",
             "rerank_enabled",
             "relation_background_vetting_enabled",
+            "webdav_auto_sync_enabled",
         ):
             if isinstance(v, str):
                 v = v.strip().lower() in {"1", "true", "yes", "on"}
             else:
                 v = bool(v)
+        if k in ("webdav_url", "webdav_username", "webdav_password", "webdav_remote_path"):
+            if v is not None:
+                v = str(v).strip()
+                if not v:
+                    v = None
+        if k == "webdav_url" and v is not None:
+            if not (str(v).startswith("http://") or str(v).startswith("https://")):
+                bad.append("webdav_url: must start with http:// or https://")
+                continue
+        if k == "webdav_remote_path" and v is not None:
+            if not str(v).startswith("/"):
+                v = "/" + str(v)
         out[k] = v
     if bad:
         raise OverlayValidationError("; ".join(bad))

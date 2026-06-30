@@ -39,6 +39,11 @@ import type {
   SessionTotals,
   SessionTranscript,
   UploadResult,
+  WebDavHydrateResult,
+  WebDavPullResult,
+  WebDavPublishResult,
+  WebDavRemoteEntriesResult,
+  WebDavStatus,
 } from "@/types/api";
 import { describeError, frontendLog } from "@/lib/frontendLog";
 
@@ -455,4 +460,34 @@ export const settings = {
       method: "POST",
       body: JSON.stringify({ concurrency }),
     }),
+};
+
+// ---- WebDAV knowledge-pack sync ------------------------------------------
+
+export const webdavSync = {
+  status: () => _request<WebDavStatus>(`/v1/sync/webdav/status`),
+  updateConfig: (patch: Record<string, string | number | boolean | null>) =>
+    _request<WebDavStatus>(`/v1/sync/webdav/config`, {
+      method: "PUT",
+      body: JSON.stringify({ patch }),
+    }),
+  test: () => _request<{ ok: boolean; remote_path: string; latest?: unknown }>(
+    `/v1/sync/webdav/test`,
+    { method: "POST" },
+  ),
+  publish: () => _request<WebDavPublishResult>(`/v1/sync/webdav/publish`, {
+    method: "POST",
+  }),
+  pull: () => _request<WebDavPullResult>(`/v1/sync/webdav/pull`, {
+    method: "POST",
+  }),
+  remoteEntries: (limit = 100, offset = 0) =>
+    _request<WebDavRemoteEntriesResult>(
+      `/v1/sync/webdav/remote-entries?limit=${limit}&offset=${offset}`,
+    ),
+  hydrate: (entryId: string) =>
+    _request<WebDavHydrateResult>(
+      `/v1/sync/webdav/hydrate/${encodeURIComponent(entryId)}`,
+      { method: "POST" },
+    ),
 };

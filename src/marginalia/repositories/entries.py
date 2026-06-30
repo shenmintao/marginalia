@@ -80,6 +80,14 @@ def _live_file():
     return File.deleted_at.is_(None)
 
 
+def _webdav_remote_unhydrated(file_row: File) -> bool:
+    description = file_row.description
+    if not isinstance(description, dict):
+        return False
+    marker = description.get("_webdav_remote")
+    return isinstance(marker, dict) and not marker.get("hydrated")
+
+
 def _apply_tag_filters(
     stmt,
     *,
@@ -324,11 +332,12 @@ async def list_live_in_folder(
     without them (it streams the whole list to the browser); the agent
     tool passes both to honor the pagination contract."""
     stmt = (
-        select(FileEntry, File.ingest_status)
+        select(FileEntry, File)
         .join(File, File.id == FileEntry.file_id)
         .where(
             _folder_clause(folder_id),
             _live_entry(),
+            _live_file(),
         )
         .order_by(FileEntry.display_name)
     )
@@ -337,7 +346,11 @@ async def list_live_in_folder(
     if limit is not None:
         stmt = stmt.limit(limit)
     rows = (await db.execute(stmt)).all()
-    return [(e, status) for e, status in rows]
+    return [
+        (e, file_row.ingest_status)
+        for e, file_row in rows
+        if not _webdav_remote_unhydrated(file_row)
+    ]
 
 
 async def count_live_in_folder(
@@ -345,13 +358,18 @@ async def count_live_in_folder(
 ) -> int:
     """Total live entries directly under `folder_id`. Pair with the
     paginated list_live_in_folder for the agent's `total` field."""
-    stmt = (
-        select(func.count())
-        .select_from(FileEntry)
-        .join(File, File.id == FileEntry.file_id)
-        .where(_folder_clause(folder_id), _live_entry())
-    )
-    return int((await db.execute(stmt)).scalar_one())
+    rows = (
+        await db.execute(
+            select(File)
+            .join(FileEntry, File.id == FileEntry.file_id)
+            .where(
+                _folder_clause(folder_id),
+                _live_entry(),
+                _live_file(),
+            )
+        )
+    ).scalars().all()
+    return sum(1 for file_row in rows if not _webdav_remote_unhydrated(file_row))
 
 
 async def find_live_by_folder_and_name(
@@ -410,7 +428,7 @@ async def search_with_file(
             stmt.order_by(FileEntry.updated_at.desc()).limit(limit)
         )
     ).all()
-    return [(e, f) for e, f in rows]
+    return [(e, f) for e, f in rows if not _webdav_remote_unhydrated(f)]
 
 
 async def get_live_with_file(
@@ -430,6 +448,8 @@ async def get_live_with_file(
     ).first()
     if pair is None:
         return None
+    if _webdav_remote_unhydrated(pair[1]):
+        return None
     return pair[0], pair[1]
 
 
@@ -445,7 +465,7 @@ async def list_live_with_file(db: AsyncSession) -> list[tuple[FileEntry, File]]:
             )
         )
     ).all()
-    return [(e, f) for e, f in rows]
+    return [(e, f) for e, f in rows if not _webdav_remote_unhydrated(f)]
 
 
 async def list_live_with_file_in_folders(
@@ -468,7 +488,7 @@ async def list_live_with_file_in_folders(
             .order_by(FileEntry.folder_id, FileEntry.display_name)
         )
     ).all()
-    return [(e, f) for e, f in rows]
+    return [(e, f) for e, f in rows if not _webdav_remote_unhydrated(f)]
 
 
 def _build_filtered_stmt(
@@ -575,7 +595,7 @@ async def search_filtered(
     if limit is not None:
         stmt = stmt.limit(limit)
     rows = (await db.execute(stmt)).all()
-    return [(e, f) for e, f in rows]
+    return [(e, f) for e, f in rows if not _webdav_remote_unhydrated(f)]
 
 
 async def count_filtered(
@@ -597,9 +617,7 @@ async def count_filtered(
     ignoring limit/offset. Used to populate `total` / `has_more` in the
     pagination contract."""
     metadata_search = await _metadata_fts_query(db, text)
-    base = select(func.count()).select_from(
-        FileEntry.__table__.join(File.__table__, File.id == FileEntry.file_id)
-    )
+    base = select(File).join(FileEntry, File.id == FileEntry.file_id)
     stmt, empty = _build_filtered_stmt(
         text=None if metadata_search is not None else text,
         lifecycle=lifecycle, kind=kind,
@@ -612,7 +630,8 @@ async def count_filtered(
         return 0
     if metadata_search is not None:
         stmt = _apply_metadata_fts_filter(stmt, metadata_search)
-    return int((await db.execute(stmt)).scalar_one())
+    rows = (await db.execute(stmt)).scalars().all()
+    return sum(1 for file_row in rows if not _webdav_remote_unhydrated(file_row))
 
 
 async def list_ids_under_filter_spec(
@@ -626,8 +645,9 @@ async def list_ids_under_filter_spec(
     `catalog_subtree_expander(root_id) -> list[str]` is injected so this
     repo doesn't import the catalogs repo (and breaks no layering)."""
     stmt = (
-        select(FileEntry.id)
-        .where(_live_entry())
+        select(FileEntry.id, File)
+        .join(File, File.id == FileEntry.file_id)
+        .where(_live_entry(), _live_file())
         .where(FileEntry.lifecycle.in_(spec.get("lifecycle") or default_lifecycle))
     )
     sub = spec.get("catalog_subtree") or []
@@ -644,7 +664,8 @@ async def list_ids_under_filter_spec(
         tags_any=spec.get("tags_any"),
         tags_none=spec.get("tags_none"),
     )
-    return list((await db.execute(stmt)).scalars().all())
+    rows = (await db.execute(stmt)).all()
+    return [entry_id for entry_id, file_row in rows if not _webdav_remote_unhydrated(file_row)]
 
 
 async def list_with_file_by_ids_any(
@@ -825,7 +846,7 @@ async def list_live_with_file_by_ids(
             )
         )
     ).all()
-    return [(e, f) for e, f in rows]
+    return [(e, f) for e, f in rows if not _webdav_remote_unhydrated(f)]
 
 
 async def filter_live_ids(

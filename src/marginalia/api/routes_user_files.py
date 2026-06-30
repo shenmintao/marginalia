@@ -20,8 +20,10 @@ from marginalia.services.user_files import (
     DownloadHandle,
     EntryNotFoundError,
     EntryPreviewError,
+    EntryRemoteNotHydratedError,
     EntryPreviewUnsupportedError,
     FolderNotFoundError,
+    FolderRemoteNotHydratedError,
     collect_folder_entries,
     get_entry_path,
     get_user_metadata,
@@ -151,6 +153,8 @@ async def file_entry_preview_text(
         raise HTTPException(status_code=404, detail="entry not found")
     except EntryPreviewUnsupportedError:
         raise HTTPException(status_code=415, detail="text preview not supported")
+    except EntryRemoteNotHydratedError:
+        raise HTTPException(status_code=409, detail="entry is remote; hydrate first")
     except EntryPreviewError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
 
@@ -180,6 +184,8 @@ async def file_entry_content(
         handle = await open_for_download(session, entry_id=entry_id)
     except EntryNotFoundError:
         raise HTTPException(status_code=404, detail="entry not found")
+    except EntryRemoteNotHydratedError:
+        raise HTTPException(status_code=409, detail="entry is remote; hydrate first")
 
     headers = _file_content_headers(handle, disposition="inline")
     byte_range = _parse_range_header(range_header, handle.size_bytes)
@@ -212,6 +218,8 @@ async def file_entry_download(
         handle = await open_for_download(session, entry_id=entry_id)
     except EntryNotFoundError:
         raise HTTPException(status_code=404, detail="entry not found")
+    except EntryRemoteNotHydratedError:
+        raise HTTPException(status_code=409, detail="entry is remote; hydrate first")
 
     headers = {
         "Content-Disposition": content_disposition("attachment", handle.display_name),
@@ -313,6 +321,15 @@ async def folder_download(
         members = await collect_folder_entries(session, folder_id=folder_id)
     except FolderNotFoundError:
         raise HTTPException(status_code=404, detail="folder not found")
+    except FolderRemoteNotHydratedError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "folder_contains_remote_entries",
+                "message": "folder contains remote entries; hydrate them first",
+                "entry_ids": exc.entry_ids,
+            },
+        )
 
     root_folder = await session.get(Folder, folder_id)
     archive_name = (root_folder.name if root_folder else "folder") + ".zip"
