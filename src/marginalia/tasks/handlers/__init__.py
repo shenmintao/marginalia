@@ -20,3 +20,4 @@ from marginalia.tasks.handlers import suggest_lifecycle  # noqa: F401
 from marginalia.tasks.handlers import summarize_session  # noqa: F401
 from marginalia.tasks.handlers import tag_quality  # noqa: F401
 from marginalia.tasks.handlers import vet_relations  # noqa: F401
+from marginalia.tasks.handlers import webdav_publish  # noqa: F401

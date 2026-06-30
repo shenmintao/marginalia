@@ -12,11 +12,11 @@ import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import {
   ChevronDown, ChevronRight, Folder as FolderIcon, FolderOpen,
   FileText, Loader2, Plus, Upload as UploadIcon, Download, RefreshCw, Trash2,
-  AlertTriangle, CircleDashed,
+  AlertTriangle, CircleDashed, CloudDownload, CloudUpload,
 } from "lucide-react";
 
 import { folders, fileEntries, files, ApiError } from "@/api/client";
-import type { Folder, FolderIngestSummary, FileEntrySummary } from "@/types/api";
+import type { Folder, FolderIngestSummary, FileEntrySummary, WebDavStatus } from "@/types/api";
 import { cn } from "@/lib/utils";
 import { useI18n, type I18nStrings } from "@/lib/i18n";
 
@@ -55,6 +55,9 @@ interface Props {
   onPendingEntryResolved?: () => void;
   onUploadHere: (target: FolderActionTarget | null) => void;
   onNewFolderHere: (target: FolderActionTarget | null) => void;
+  webdav?: WebDavStatus | null;
+  onWebDavUploadSync?: () => void;
+  onWebDavDownloadSync?: () => void;
   onEntryDeleted: (entryId: string) => void;
   onFolderDeleted: (folderId: string) => void;
   onClearSelection: () => void;
@@ -183,6 +186,26 @@ export function FolderTree(props: Props) {
               : <RefreshCw size={13} />}
           </button>
           <button
+            onClick={() => props.onWebDavDownloadSync?.()}
+            disabled={!props.webdav?.configured}
+            title={props.webdav?.configured
+              ? webdavDownloadTitle(props.webdav, t)
+              : t.library.webdavNotConfigured}
+            className="rounded p-1 text-fg-muted hover:bg-bg-muted hover:text-fg-base disabled:opacity-50"
+          >
+            <CloudDownload size={13} />
+          </button>
+          <button
+            onClick={() => props.onWebDavUploadSync?.()}
+            disabled={!props.webdav?.configured}
+            title={props.webdav?.configured
+              ? webdavUploadTitle(props.webdav, t)
+              : t.library.webdavNotConfigured}
+            className="rounded p-1 text-fg-muted hover:bg-bg-muted hover:text-fg-base disabled:opacity-50"
+          >
+            <CloudUpload size={13} />
+          </button>
+          <button
             onClick={() => props.onNewFolderHere(null)}
             title={t.library.newFolderIn(headerTarget)}
             className="rounded p-1 text-fg-muted hover:bg-bg-muted hover:text-fg-base"
@@ -237,6 +260,20 @@ export function FolderTree(props: Props) {
       </div>
     </div>
   );
+}
+
+function webdavUploadTitle(status: WebDavStatus, t: I18nStrings): string {
+  if (status.last?.finished_at) {
+    return t.library.webdavLastUploaded(new Date(status.last.finished_at).toLocaleString());
+  }
+  return t.library.webdavUploadNow;
+}
+
+function webdavDownloadTitle(status: WebDavStatus, t: I18nStrings): string {
+  if (status.last?.last_download_at) {
+    return t.library.webdavLastPulled(new Date(status.last.last_download_at).toLocaleString());
+  }
+  return t.library.webdavPullNow;
 }
 
 function FolderRow({

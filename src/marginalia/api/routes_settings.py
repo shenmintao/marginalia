@@ -36,6 +36,7 @@ from marginalia.semantic.index import semantic_index_status
 from marginalia.services.config_overlay import (
     OverlayValidationError, read_overlay, validate_and_normalize, write_overlay,
 )
+from marginalia.services.webdav_sync import read_status as read_webdav_status
 
 router = APIRouter(prefix="/settings", tags=["settings"])
 
@@ -102,6 +103,7 @@ def server_settings() -> dict[str, Any]:
         "rerank_configured": bool(s.rerank_enabled and s.rerank_api_key),
         "evidence_selection": s.evidence_selection,
         "vision_profile_configured": has_vision_profile(s),
+        "webdav": read_webdav_status(s),
     }
 
 
@@ -142,7 +144,7 @@ def llm_settings() -> dict[str, Any]:
     overlay = read_overlay(s.marginalia_home)
     masked_overlay: dict[str, Any] = {}
     for k, v in overlay.items():
-        if k.endswith("_api_key") and isinstance(v, str):
+        if (k.endswith("_api_key") or k.endswith("_password")) and isinstance(v, str):
             masked_overlay[k] = _mask(v)
         else:
             masked_overlay[k] = v

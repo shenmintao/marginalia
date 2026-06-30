@@ -20,13 +20,14 @@ import {
   getApiToken,
   getBaseUrl,
   settings as settingsApi,
+  webdavSync,
 } from "@/api/client";
 import { LlmProfileEditor } from "@/components/LlmProfileEditor";
 import { usePrefs, type LanguagePreference } from "@/lib/prefs";
 import { useTheme } from "@/lib/theme";
 import { useI18n } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
-import type { LlmSettings, OnConflict, ServerSettings } from "@/types/api";
+import type { LlmSettings, OnConflict, ServerSettings, WebDavStatus } from "@/types/api";
 
 const STORAGE_KEY = "marginalia.api_base";
 
@@ -81,6 +82,7 @@ export function SettingsPage() {
 
         <QuickStartSection ctx={ctx} />
         <ConnectionSection />
+        <WebDavSection initial={ctx.server?.webdav ?? null} />
         <PreferencesSection ctx={ctx} />
         <RetrievalSection ctx={ctx} />
         <ServerSection ctx={ctx} />
@@ -354,6 +356,209 @@ function ConnectionSection() {
           {t.common.saved} · {new Date(savedAt).toLocaleTimeString()}
         </p>
       )}
+    </Section>
+  );
+}
+
+// ---- WebDAV sync -----------------------------------------------------------
+
+function WebDavSection({ initial }: { initial: WebDavStatus | null }) {
+  const { t } = useI18n();
+  const [status, setStatus] = useState<WebDavStatus | null>(initial);
+  const [url, setUrl] = useState(initial?.url ?? "");
+  const [username, setUsername] = useState(initial?.username ?? "");
+  const [password, setPassword] = useState("");
+  const [remotePath, setRemotePath] = useState(initial?.remote_path ?? "/marginalia");
+  const [autoSync, setAutoSync] = useState(Boolean(initial?.auto_sync_enabled));
+  const [interval, setIntervalValue] = useState(String(initial?.auto_sync_interval_minutes ?? 60));
+  const [busy, setBusy] = useState<"save" | "test" | "remote" | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    webdavSync.status().then(
+      (s) => {
+        if (cancelled) return;
+        setStatus(s);
+        setUrl(s.url ?? "");
+        setUsername(s.username ?? "");
+        setRemotePath(s.remote_path || "/marginalia");
+        setAutoSync(Boolean(s.auto_sync_enabled));
+        setIntervalValue(String(s.auto_sync_interval_minutes ?? 60));
+      },
+      () => {},
+    );
+    return () => { cancelled = true; };
+  }, []);
+
+  const refresh = async () => {
+    const next = await webdavSync.status();
+    setStatus(next);
+    return next;
+  };
+
+  const save = async () => {
+    setBusy("save");
+    setMessage(null);
+    setError(null);
+    try {
+      const patch: Record<string, string | number | boolean | null> = {
+        webdav_url: url.trim() || null,
+        webdav_username: username.trim() || null,
+        webdav_remote_path: remotePath.trim() || "/marginalia",
+        webdav_auto_sync_enabled: autoSync,
+        webdav_auto_sync_interval_minutes: parseInt(interval, 10) || 60,
+      };
+      if (password.trim()) patch.webdav_password = password.trim();
+      const next = await webdavSync.updateConfig(patch);
+      setStatus(next);
+      setPassword("");
+      setMessage(t.settings.webdavSaved);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const test = async () => {
+    setBusy("test");
+    setMessage(null);
+    setError(null);
+    try {
+      await webdavSync.test();
+      await refresh();
+      setMessage(t.settings.webdavTestOk);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const syncRemoteStatus = async () => {
+    setBusy("remote");
+    setMessage(null);
+    setError(null);
+    try {
+      const result = await webdavSync.remoteStatus();
+      await refresh();
+      setMessage(t.settings.webdavRemoteStatusOk(result.status));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const last = status?.last;
+  const lastUpload = last?.finished_at ? formatDateTime(last.finished_at) : t.common.unset;
+  const lastRemoteCheck = last?.last_remote_check_at
+    ? formatDateTime(last.last_remote_check_at)
+    : t.common.unset;
+  const remoteUpdated = last?.remote_updated_at
+    ? formatDateTime(last.remote_updated_at)
+    : t.common.unset;
+  const remoteSnapshot = last?.remote_snapshot_id || t.common.unset;
+
+  return (
+    <Section title={t.settings.webdavTitle} subtitle={t.settings.webdavSubtitle}>
+      <div className="space-y-4">
+        <Row label={t.settings.webdavUrl}>
+          <input
+            value={url}
+            onChange={(e) => setUrl(e.target.value)}
+            placeholder="https://example.com/dav"
+            className="w-80 rounded border border-border bg-bg-base px-2 py-1 font-mono text-xs"
+          />
+        </Row>
+        <Row label={t.settings.webdavRemotePath} hint={t.settings.webdavRemotePathHint}>
+          <input
+            value={remotePath}
+            onChange={(e) => setRemotePath(e.target.value)}
+            placeholder="/marginalia"
+            className="w-56 rounded border border-border bg-bg-base px-2 py-1 font-mono text-xs"
+          />
+        </Row>
+        <Row label={t.settings.webdavUsername}>
+          <input
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            className="w-56 rounded border border-border bg-bg-base px-2 py-1 text-sm"
+          />
+        </Row>
+        <Row
+          label={t.settings.webdavPassword}
+          hint={status?.password_set ? t.settings.webdavPasswordSet : t.settings.webdavPasswordHint}
+        >
+          <input
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            placeholder={status?.password_set ? t.settings.webdavKeepPassword : ""}
+            className="w-56 rounded border border-border bg-bg-base px-2 py-1 text-sm"
+          />
+        </Row>
+        <Row label={t.settings.webdavAutoSync} hint={t.settings.webdavAutoSyncHint}>
+          <div className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={autoSync}
+              onChange={(e) => setAutoSync(e.target.checked)}
+              className="h-4 w-4 accent-accent"
+            />
+            <input
+              type="number"
+              min={5}
+              max={10080}
+              value={interval}
+              onChange={(e) => setIntervalValue(e.target.value)}
+              className="w-20 rounded border border-border bg-bg-base px-2 py-1 text-right font-mono text-xs"
+            />
+            <span className="text-xs text-fg-subtle">{t.settings.webdavMinutes}</span>
+          </div>
+        </Row>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            onClick={save}
+            disabled={busy !== null}
+            className="inline-flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-accent-fg hover:opacity-90 disabled:opacity-50"
+          >
+            <Save size={13} /> {busy === "save" ? t.settings.webdavSaving : t.common.save}
+          </button>
+          <button
+            onClick={test}
+            disabled={busy !== null || !status?.configured}
+            className="inline-flex items-center gap-1.5 rounded-md border border-border bg-bg-base px-3 py-1.5 text-sm hover:bg-bg-muted disabled:opacity-50"
+          >
+            {busy === "test" && <RefreshCw size={13} className="animate-spin" />}
+            {t.settings.webdavTest}
+          </button>
+          <button
+            onClick={syncRemoteStatus}
+            disabled={busy !== null || !status?.configured}
+            className="inline-flex items-center gap-1.5 rounded-md border border-border bg-bg-base px-3 py-1.5 text-sm hover:bg-bg-muted disabled:opacity-50"
+          >
+            {busy === "remote" && <RefreshCw size={13} className="animate-spin" />}
+            {t.settings.webdavRemoteStatus}
+          </button>
+        </div>
+        <dl className="grid grid-cols-[9rem_1fr] gap-x-3 gap-y-1 text-xs">
+          <Kv k={t.settings.webdavConfigured} v={status?.configured ? t.common.yes : t.common.no} />
+          <Kv k={t.settings.webdavLastRemoteCheck} v={lastRemoteCheck} />
+          <Kv k={t.settings.webdavRemoteUpdated} v={remoteUpdated} />
+          <Kv k={t.settings.webdavSnapshot} v={remoteSnapshot} mono />
+          <Kv k={t.settings.webdavLastUpload} v={lastUpload} />
+          {last?.last_download_at && (
+            <Kv k={t.settings.webdavLastDownload} v={formatDateTime(last.last_download_at)} />
+          )}
+          {last?.remote_error && <Kv k={t.settings.webdavRemoteError} v={last.remote_error} />}
+          {last?.error && <Kv k={t.settings.webdavLastError} v={last.error} />}
+        </dl>
+        {message && <p className="text-xs text-fg-subtle">{message}</p>}
+        {error && <p className="text-xs text-danger">{error}</p>}
+      </div>
     </Section>
   );
 }
@@ -908,6 +1113,12 @@ function Kv({ k, v, mono }: { k: string; v: string; mono?: boolean }) {
       <dd className={cn("truncate", mono && "font-mono text-xs")}>{v}</dd>
     </>
   );
+}
+
+function formatDateTime(value: string): string {
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return value;
+  return d.toLocaleString();
 }
 
 function capabilityStatus(

@@ -324,11 +324,12 @@ async def list_live_in_folder(
     without them (it streams the whole list to the browser); the agent
     tool passes both to honor the pagination contract."""
     stmt = (
-        select(FileEntry, File.ingest_status)
+        select(FileEntry, File)
         .join(File, File.id == FileEntry.file_id)
         .where(
             _folder_clause(folder_id),
             _live_entry(),
+            _live_file(),
         )
         .order_by(FileEntry.display_name)
     )
@@ -337,7 +338,7 @@ async def list_live_in_folder(
     if limit is not None:
         stmt = stmt.limit(limit)
     rows = (await db.execute(stmt)).all()
-    return [(e, status) for e, status in rows]
+    return [(e, file_row.ingest_status) for e, file_row in rows]
 
 
 async def count_live_in_folder(
@@ -349,7 +350,11 @@ async def count_live_in_folder(
         select(func.count())
         .select_from(FileEntry)
         .join(File, File.id == FileEntry.file_id)
-        .where(_folder_clause(folder_id), _live_entry())
+        .where(
+            _folder_clause(folder_id),
+            _live_entry(),
+            _live_file(),
+        )
     )
     return int((await db.execute(stmt)).scalar_one())
 

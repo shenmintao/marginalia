@@ -95,7 +95,19 @@ export interface FileMetadata {
   tags?: { name: string; facet?: string | null }[];
   extra?: string | null;
   related_entries?: RelatedEntry[];
+  webdav_remote?: WebDavRemoteMarker | null;
   [key: string]: unknown;
+}
+
+export interface WebDavRemoteMarker {
+  remote_root?: string;
+  library_id?: string;
+  snapshot_id?: string;
+  blob_path?: string;
+  sha256?: string;
+  hydrated?: boolean;
+  imported_at?: string;
+  hydrated_at?: string;
 }
 
 /** Folder ancestor chain (root → leaf) for an entry, returned by
@@ -370,6 +382,141 @@ export interface ServerSettings {
   rerank_configured: boolean;
   evidence_selection: "quota" | "rerank";
   vision_profile_configured: boolean;
+  webdav?: WebDavStatus;
+}
+
+export interface WebDavSyncLast {
+  ok?: boolean;
+  status?: "running" | "success" | "failed" | string;
+  started_at?: string | null;
+  finished_at?: string | null;
+  snapshot_id?: string | null;
+  remote_path?: string | null;
+  latest_snapshot?: string | null;
+  uploaded_blobs?: number;
+  skipped_blobs?: number;
+  uploaded_metadata_files?: number;
+  entry_count?: number;
+  blob_count?: number;
+  blob_bytes?: number;
+  error?: string | null;
+  last_pull_at?: string | null;
+  last_pulled_snapshot_id?: string | null;
+  last_pull?: Record<string, number>;
+  last_download_at?: string | null;
+  last_download?: {
+    requested_files?: number;
+    downloaded_files?: number;
+    failed_files?: number;
+    errors?: Array<{ entry_id: string; error: string }>;
+  };
+  last_remote_check_at?: string | null;
+  remote_status?: "available" | "empty" | "failed" | string;
+  remote_updated_at?: string | null;
+  remote_snapshot_id?: string | null;
+  remote_latest_snapshot?: string | null;
+  remote_app_version?: string | null;
+  remote_entry_count?: number | null;
+  remote_blob_count?: number | null;
+  remote_blob_bytes?: number | null;
+  remote_error?: string | null;
+}
+
+export interface WebDavStatus {
+  configured: boolean;
+  url?: string | null;
+  username?: string | null;
+  password_set: boolean;
+  remote_path: string;
+  auto_sync_enabled: boolean;
+  auto_sync_interval_minutes: number;
+  last?: WebDavSyncLast | null;
+}
+
+export interface WebDavPublishResult {
+  ok: boolean;
+  task_id: string | null;
+}
+
+export interface WebDavRemoteStatusResult {
+  ok: boolean;
+  remote_path: string;
+  status: "available" | "empty" | "failed" | string;
+  checked_at: string;
+  latest?: unknown | null;
+  manifest?: unknown | null;
+}
+
+export interface WebDavPullResult {
+  ok: boolean;
+  remote_path: string;
+  snapshot_id?: string | null;
+  folders: number;
+  catalogs: number;
+  views: number;
+  tags: number;
+  tag_aliases: number;
+  entries: number;
+  entry_tags: number;
+  relations: number;
+  remote_files: number;
+}
+
+export interface WebDavDownloadResult extends WebDavPullResult {
+  downloaded_files: number;
+  failed_files: number;
+  errors: Array<{ entry_id: string; error: string }>;
+}
+
+export type WebDavPlanReason = "new" | "changed" | "missing" | "not_hydrated" | string;
+
+export interface WebDavPlanItem {
+  entry_id: string;
+  display_name: string;
+  folder_id?: string | null;
+  folder_path?: string | null;
+  size_bytes?: number;
+  sha256?: string;
+  updated_at?: string | null;
+  reason: WebDavPlanReason;
+}
+
+export interface WebDavPlanResult {
+  ok: boolean;
+  remote_path: string;
+  snapshot_id?: string | null;
+  remote_updated_at?: string | null;
+  app_version?: string | null;
+  count: number;
+  items: WebDavPlanItem[];
+}
+
+export interface WebDavPublishSelectedResult {
+  ok: boolean;
+  status: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+  snapshot_id?: string | null;
+  remote_path?: string | null;
+  latest_snapshot?: string | null;
+  selected_entries?: number;
+  selected_files?: number;
+  uploaded_blobs?: number;
+  skipped_blobs?: number;
+  uploaded_metadata_files?: number;
+  entry_count?: number;
+  blob_count?: number;
+  blob_bytes?: number;
+  error?: string | null;
+}
+
+export interface WebDavHydrateResult {
+  ok: boolean;
+  entry_id: string;
+  file_id: string;
+  hydrated: boolean;
+  already_local?: boolean;
+  storage_key?: string;
 }
 
 export interface SemanticIndexStatus {

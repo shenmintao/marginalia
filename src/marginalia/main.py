@@ -25,6 +25,7 @@ from marginalia.api.routes_tasks import router as tasks_router
 from marginalia.api.routes_tend import router as tend_router
 from marginalia.api.routes_upload import router as upload_router
 from marginalia.api.routes_user_files import router as user_files_router
+from marginalia.api.routes_webdav_sync import router as webdav_sync_router
 from marginalia.config import LlmConfigError, get_settings, validate_llm_config
 from marginalia.db.bootstrap import bootstrap_schema
 from marginalia.db.engine import dispose_engine
@@ -261,6 +262,7 @@ app.include_router(file_entries_router, prefix=V1_PREFIX)
 app.include_router(files_router, prefix=V1_PREFIX)
 app.include_router(upload_router, prefix=V1_PREFIX)
 app.include_router(user_files_router, prefix=V1_PREFIX)
+app.include_router(webdav_sync_router, prefix=V1_PREFIX)
 app.include_router(sessions_router, prefix=V1_PREFIX)
 app.include_router(chat_router, prefix=V1_PREFIX)
 app.include_router(exports_router, prefix=V1_PREFIX)

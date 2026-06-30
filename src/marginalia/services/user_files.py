@@ -50,6 +50,18 @@ class EntryPreviewError(Exception):
     pass
 
 
+class EntryRemoteNotHydratedError(Exception):
+    def __init__(self, entry_id: str) -> None:
+        super().__init__(entry_id)
+        self.entry_id = entry_id
+
+
+class FolderRemoteNotHydratedError(Exception):
+    def __init__(self, entry_ids: list[str]) -> None:
+        super().__init__(", ".join(entry_ids))
+        self.entry_ids = entry_ids
+
+
 @dataclass(slots=True)
 class DownloadHandle:
     file_id: str
@@ -163,6 +175,8 @@ async def get_user_metadata(
     entry, file_row = pair
 
     folder_path = await _build_folder_path(session, entry.folder_id)
+    from marginalia.services.webdav_sync import webdav_remote_marker
+    remote_marker = webdav_remote_marker(file_row.description)
 
     return {
         "entry_id": entry.id,
@@ -195,6 +209,7 @@ async def get_user_metadata(
         "related_entries": await _related_entries_for(
             session, entry.id, top_k=METADATA_RELATED_TOP_K,
         ),
+        "webdav_remote": remote_marker,
     }
 
 
@@ -240,6 +255,10 @@ async def open_for_download(
     if pair is None:
         raise EntryNotFoundError(entry_id)
     entry, file_row = pair
+    from marginalia.services.webdav_sync import webdav_remote_marker
+    marker = webdav_remote_marker(file_row.description)
+    if marker and not marker.get("hydrated"):
+        raise EntryRemoteNotHydratedError(entry_id)
 
     storage = storage or get_storage()
     return DownloadHandle(
@@ -264,6 +283,10 @@ async def open_extracted_text_preview(
     if pair is None:
         raise EntryNotFoundError(entry_id)
     entry, file_row = pair
+    from marginalia.services.webdav_sync import webdav_remote_marker
+    marker = webdav_remote_marker(file_row.description)
+    if marker and not marker.get("hydrated"):
+        raise EntryRemoteNotHydratedError(entry_id)
 
     pipeline = resolve_pipeline(
         file_row.mime_type,
@@ -346,10 +369,18 @@ async def collect_folder_entries(
     rows = await entries_repo.list_live_with_file_in_folders(session, folder_ids)
 
     result: list[tuple[str, FileEntry, File]] = []
+    remote_entry_ids: list[str] = []
+    from marginalia.services.webdav_sync import webdav_remote_marker
     for entry, file_row in rows:
+        marker = webdav_remote_marker(file_row.description)
+        if marker and not marker.get("hydrated"):
+            remote_entry_ids.append(entry.id)
+            continue
         rel = rel_paths.get(entry.folder_id, "")
         zip_path = (rel + "/" + entry.display_name) if rel else entry.display_name
         result.append((zip_path, entry, file_row))
+    if remote_entry_ids:
+        raise FolderRemoteNotHydratedError(remote_entry_ids)
     return result
 
 

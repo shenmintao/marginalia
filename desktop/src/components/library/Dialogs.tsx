@@ -10,8 +10,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Filter, X, Upload, FolderPlus, Loader2 } from "lucide-react";
 
-import { folders as foldersApi, uploads, ApiError, settings as settingsApi } from "@/api/client";
-import type { OnConflict } from "@/types/api";
+import { folders as foldersApi, uploads, ApiError, settings as settingsApi, webdavSync } from "@/api/client";
+import type { OnConflict, WebDavPlanItem, WebDavPlanResult } from "@/types/api";
 import { cn, formatBytes } from "@/lib/utils";
 import { useI18n } from "@/lib/i18n";
 
@@ -125,7 +125,12 @@ const DEFAULT_INCLUDED_CATEGORIES: UploadCategory[] = CATEGORY_ORDER.filter(
   (c) => c !== "videos",
 );
 
-export function UploadDialog({ folderId, folderName, onClose, onUploaded }: {
+export function UploadDialog({
+  folderId,
+  folderName,
+  onClose,
+  onUploaded,
+}: {
   folderId: string | null;
   folderName: string;
   onClose: () => void;
@@ -447,6 +452,229 @@ export function UploadDialog({ folderId, folderName, onClose, onUploaded }: {
         </button>
       </div>
     </ModalShell>
+  );
+}
+
+export function WebDavSyncDialog({
+  mode,
+  onClose,
+  onDone,
+}: {
+  mode: "upload" | "download";
+  onClose: () => void;
+  onDone: () => void | Promise<void>;
+}) {
+  const { t } = useI18n();
+  const [plan, setPlan] = useState<WebDavPlanResult | null>(null);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [loading, setLoading] = useState(true);
+  const [running, setRunning] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const title = mode === "upload"
+    ? t.library.webdavUploadSyncTitle
+    : t.library.webdavDownloadSyncTitle;
+
+  const refreshPlan = async () => {
+    setLoading(true);
+    setErr(null);
+    try {
+      const nextPlan = mode === "upload"
+        ? await webdavSync.uploadPlan()
+        : await webdavSync.downloadPlan();
+      setPlan(nextPlan);
+      setSelected(new Set(nextPlan.items.map((item) => item.entry_id)));
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void refreshPlan();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode]);
+
+  const selectedBytes = useMemo(() => {
+    if (!plan) return 0;
+    return plan.items
+      .filter((item) => selected.has(item.entry_id))
+      .reduce((sum, item) => sum + (item.size_bytes ?? 0), 0);
+  }, [plan, selected]);
+  const allSelected = Boolean(plan?.items.length) && selected.size === plan?.items.length;
+
+  const toggleAll = () => {
+    if (!plan || running) return;
+    setSelected(allSelected ? new Set() : new Set(plan.items.map((item) => item.entry_id)));
+  };
+
+  const toggleOne = (entryId: string) => {
+    if (running) return;
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(entryId)) next.delete(entryId);
+      else next.add(entryId);
+      return next;
+    });
+  };
+
+  const run = async () => {
+    if (running || selected.size === 0) return;
+    setRunning(true);
+    setErr(null);
+    try {
+      const entryIds = [...selected];
+      if (mode === "upload") await webdavSync.publishSelected(entryIds);
+      else await webdavSync.downloadSelected(entryIds);
+      await onDone();
+      await refreshPlan();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  return (
+    <ModalShell
+      title={<><Upload size={14} /> {title}</>}
+      onClose={onClose}
+      wide
+    >
+      <div className="mb-3 rounded-md border border-border bg-bg-subtle px-3 py-2 text-xs">
+        <div className="grid gap-1 md:grid-cols-2">
+          <KvLine label={t.library.webdavRemoteUpdated} value={remoteUpdated(plan, t)} />
+          <KvLine label={t.library.webdavRemoteSnapshot} value={plan?.snapshot_id || t.common.unset} mono />
+        </div>
+      </div>
+
+      {err && <p className="mb-3 rounded-md bg-danger/10 px-3 py-2 text-xs text-danger">{err}</p>}
+      {loading && <p className="text-sm text-fg-muted">{t.common.loading}</p>}
+      {!loading && plan && (
+        <>
+          <div className="mb-2 flex flex-wrap items-center gap-2 text-xs text-fg-muted">
+            <label className="flex cursor-pointer items-center gap-1.5 text-fg-base">
+              <input
+                type="checkbox"
+                checked={allSelected}
+                disabled={running || plan.items.length === 0}
+                onChange={toggleAll}
+                className="accent-accent"
+              />
+              <span>{t.library.webdavSelectedSummary(selected.size, plan.items.length, formatBytes(selectedBytes))}</span>
+            </label>
+          </div>
+          <div className="max-h-[52vh] overflow-y-auto rounded-md border border-border">
+            {plan.items.length === 0 ? (
+              <div className="px-3 py-8 text-center text-sm text-fg-muted">
+                {mode === "upload" ? t.library.webdavNoUploadItems : t.library.webdavNoDownloadItems}
+              </div>
+            ) : (
+              <table className="w-full table-fixed border-collapse text-xs">
+                <thead className="sticky top-0 bg-bg-subtle text-left text-[11px] text-fg-subtle">
+                  <tr className="border-b border-border">
+                    <th className="w-8 px-3 py-1.5"><span className="sr-only">select</span></th>
+                    <th className="px-1 py-1.5 font-medium">{t.dialogs.uploadFile}</th>
+                    <th className="w-24 px-2 py-1.5 font-medium">{t.library.webdavReason}</th>
+                    <th className="w-24 px-2 py-1.5 text-right font-medium">{t.dialogs.uploadSize}</th>
+                    <th className="w-36 px-2 py-1.5 font-medium">{t.library.webdavUpdated}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {plan.items.map((item) => (
+                    <WebDavPlanRow
+                      key={item.entry_id}
+                      item={item}
+                      selected={selected.has(item.entry_id)}
+                      disabled={running}
+                      onToggle={toggleOne}
+                    />
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+          <div className="mt-4 flex justify-end gap-2">
+            <button
+              onClick={onClose}
+              disabled={running}
+              className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-bg-muted disabled:opacity-50"
+            >
+              {t.common.close}
+            </button>
+            <button
+              onClick={run}
+              disabled={running || selected.size === 0}
+              className={cn(
+                "flex items-center gap-1 rounded-md px-3 py-1.5 text-sm font-medium",
+                running || selected.size === 0
+                  ? "cursor-not-allowed bg-bg-muted text-fg-subtle"
+                  : "bg-accent text-accent-fg hover:opacity-90",
+              )}
+            >
+              {running && <Loader2 size={12} className="animate-spin" />}
+              {mode === "upload" ? t.library.webdavUploadSelected : t.library.webdavDownloadSelected}
+            </button>
+          </div>
+        </>
+      )}
+    </ModalShell>
+  );
+}
+
+function KvLine({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <div className="flex min-w-0 items-center gap-2">
+      <span className="shrink-0 text-fg-subtle">{label}</span>
+      <span className={cn("min-w-0 truncate text-fg-base", mono && "font-mono")}>{value}</span>
+    </div>
+  );
+}
+
+function remoteUpdated(
+  plan: WebDavPlanResult | null,
+  t: ReturnType<typeof useI18n>["t"],
+): string {
+  return plan?.remote_updated_at
+    ? new Date(plan.remote_updated_at).toLocaleString()
+    : t.common.unset;
+}
+
+function WebDavPlanRow({
+  item,
+  selected,
+  disabled,
+  onToggle,
+}: {
+  item: WebDavPlanItem;
+  selected: boolean;
+  disabled: boolean;
+  onToggle: (entryId: string) => void;
+}) {
+  const { t } = useI18n();
+  return (
+    <tr className="border-b border-border last:border-0">
+      <td className="px-3 py-1.5">
+        <input
+          type="checkbox"
+          checked={selected}
+          disabled={disabled}
+          onChange={() => onToggle(item.entry_id)}
+          className="accent-accent"
+        />
+      </td>
+      <td className="min-w-0 px-1 py-1.5">
+        <div className="truncate" title={item.display_name}>{item.display_name}</div>
+        <div className="truncate text-[11px] text-fg-subtle" title={item.folder_path || "/"}>
+          {item.folder_path || "/"}
+        </div>
+      </td>
+      <td className="px-2 py-1.5 text-fg-muted">{t.library.webdavPlanReason(item.reason)}</td>
+      <td className="px-2 py-1.5 text-right text-fg-muted">{formatBytes(item.size_bytes ?? 0)}</td>
+      <td className="px-2 py-1.5 text-fg-muted">
+        {item.updated_at ? new Date(item.updated_at).toLocaleString() : "-"}
+      </td>
+    </tr>
   );
 }
 

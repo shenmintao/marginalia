@@ -54,6 +54,16 @@ class Settings(BaseSettings):
     s3_secret_key: str | None = None
     s3_region: str = "us-east-1"
 
+    # WebDAV snapshot publishing. This is intentionally not a storage
+    # backend: Marginalia keeps its local database/indexes, then publishes
+    # content-addressed knowledge-pack snapshots to WebDAV on demand.
+    webdav_url: str | None = None
+    webdav_username: str | None = None
+    webdav_password: str | None = None
+    webdav_remote_path: str = "/marginalia"
+    webdav_auto_sync_enabled: bool = False
+    webdav_auto_sync_interval_minutes: int = 60
+
     worker_enabled: bool = True
     worker_poll_interval_seconds: float = 2.0
     worker_batch_size: int = 10

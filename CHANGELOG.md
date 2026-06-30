@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.3.0 - 2026-07-01
+
+### Added
+
+- WebDAV knowledge-pack sync can publish and consume snapshots without
+  syncing the live `MARGINALIA_HOME` directory.
+- Desktop Library now provides separate WebDAV upload and download sync
+  flows that list changed files and let users choose which entries to sync.
+- Desktop Settings can save WebDAV connection details and sync lightweight
+  remote status, showing the remote snapshot time and id.
+
 ## 0.2.11 - 2026-06-30
 
 ### Fixed
