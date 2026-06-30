@@ -18,10 +18,16 @@ from marginalia.services.config_overlay import (
 )
 from marginalia.services.webdav_sync import (
     WebDavConfigError,
+    download_latest,
+    download_plan,
+    download_selected,
     hydrate_entry,
+    publish_selected,
     pull_latest_metadata,
     read_status,
+    sync_remote_status,
     test_connection,
+    upload_plan,
 )
 from marginalia.tasks.enqueue import enqueue
 from marginalia.tasks.kinds import KIND_WEBDAV_PUBLISH
@@ -40,6 +46,10 @@ _CONFIG_FIELDS = {
 
 class WebDavConfigBody(BaseModel):
     patch: dict[str, Any] = Field(default_factory=dict)
+
+
+class WebDavSelectedEntriesBody(BaseModel):
+    entry_ids: list[str] = Field(default_factory=list)
 
 
 @router.get("/status")
@@ -80,6 +90,16 @@ async def webdav_test() -> dict[str, Any]:
         raise HTTPException(status_code=502, detail=str(exc))
 
 
+@router.post("/remote-status")
+async def webdav_remote_status() -> dict[str, Any]:
+    try:
+        return await sync_remote_status()
+    except WebDavConfigError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
 @router.post("/publish")
 async def webdav_publish(
     session: AsyncSession = Depends(get_session),
@@ -104,10 +124,60 @@ async def webdav_publish(
     return {"ok": True, "task_id": task.id if task is not None else None}
 
 
+@router.get("/upload-plan")
+async def webdav_upload_plan() -> dict[str, Any]:
+    try:
+        return await upload_plan()
+    except WebDavConfigError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+@router.post("/publish-selected")
+async def webdav_publish_selected(body: WebDavSelectedEntriesBody) -> dict[str, Any]:
+    try:
+        return await publish_selected(body.entry_ids)
+    except WebDavConfigError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
 @router.post("/pull")
 async def webdav_pull() -> dict[str, Any]:
     try:
         return await pull_latest_metadata()
+    except WebDavConfigError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+@router.get("/download-plan")
+async def webdav_download_plan() -> dict[str, Any]:
+    try:
+        return await download_plan()
+    except WebDavConfigError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+@router.post("/download")
+async def webdav_download() -> dict[str, Any]:
+    try:
+        return await download_latest()
+    except WebDavConfigError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+@router.post("/download-selected")
+async def webdav_download_selected(body: WebDavSelectedEntriesBody) -> dict[str, Any]:
+    try:
+        return await download_selected(body.entry_ids)
     except WebDavConfigError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:

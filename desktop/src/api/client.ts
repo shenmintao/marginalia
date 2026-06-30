@@ -39,9 +39,13 @@ import type {
   SessionTotals,
   SessionTranscript,
   UploadResult,
+  WebDavDownloadResult,
   WebDavHydrateResult,
+  WebDavPlanResult,
   WebDavPullResult,
+  WebDavPublishSelectedResult,
   WebDavPublishResult,
+  WebDavRemoteStatusResult,
   WebDavStatus,
 } from "@/types/api";
 import { describeError, frontendLog } from "@/lib/frontendLog";
@@ -474,12 +478,31 @@ export const webdavSync = {
     `/v1/sync/webdav/test`,
     { method: "POST" },
   ),
+  remoteStatus: () => _request<WebDavRemoteStatusResult>(
+    `/v1/sync/webdav/remote-status`,
+    { method: "POST" },
+  ),
   publish: () => _request<WebDavPublishResult>(`/v1/sync/webdav/publish`, {
     method: "POST",
   }),
+  uploadPlan: () => _request<WebDavPlanResult>(`/v1/sync/webdav/upload-plan`),
+  publishSelected: (entryIds: string[]) =>
+    _request<WebDavPublishSelectedResult>(`/v1/sync/webdav/publish-selected`, {
+      method: "POST",
+      body: JSON.stringify({ entry_ids: entryIds }),
+    }),
   pull: () => _request<WebDavPullResult>(`/v1/sync/webdav/pull`, {
     method: "POST",
   }),
+  downloadPlan: () => _request<WebDavPlanResult>(`/v1/sync/webdav/download-plan`),
+  download: () => _request<WebDavDownloadResult>(`/v1/sync/webdav/download`, {
+    method: "POST",
+  }),
+  downloadSelected: (entryIds: string[]) =>
+    _request<WebDavDownloadResult>(`/v1/sync/webdav/download-selected`, {
+      method: "POST",
+      body: JSON.stringify({ entry_ids: entryIds }),
+    }),
   hydrate: (entryId: string) =>
     _request<WebDavHydrateResult>(
       `/v1/sync/webdav/hydrate/${encodeURIComponent(entryId)}`,

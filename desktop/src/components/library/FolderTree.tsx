@@ -12,7 +12,7 @@ import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import {
   ChevronDown, ChevronRight, Folder as FolderIcon, FolderOpen,
   FileText, Loader2, Plus, Upload as UploadIcon, Download, RefreshCw, Trash2,
-  AlertTriangle, CircleDashed, Cloud,
+  AlertTriangle, CircleDashed, CloudDownload, CloudUpload,
 } from "lucide-react";
 
 import { folders, fileEntries, files, ApiError } from "@/api/client";
@@ -56,8 +56,8 @@ interface Props {
   onUploadHere: (target: FolderActionTarget | null) => void;
   onNewFolderHere: (target: FolderActionTarget | null) => void;
   webdav?: WebDavStatus | null;
-  webdavPublishing?: boolean;
-  onWebDavPublish?: () => void;
+  onWebDavUploadSync?: () => void;
+  onWebDavDownloadSync?: () => void;
   onEntryDeleted: (entryId: string) => void;
   onFolderDeleted: (folderId: string) => void;
   onClearSelection: () => void;
@@ -186,16 +186,24 @@ export function FolderTree(props: Props) {
               : <RefreshCw size={13} />}
           </button>
           <button
-            onClick={() => props.onWebDavPublish?.()}
-            disabled={props.webdavPublishing || !props.webdav?.configured}
+            onClick={() => props.onWebDavDownloadSync?.()}
+            disabled={!props.webdav?.configured}
             title={props.webdav?.configured
-              ? webdavSyncTitle(props.webdav, t)
+              ? webdavDownloadTitle(props.webdav, t)
               : t.library.webdavNotConfigured}
             className="rounded p-1 text-fg-muted hover:bg-bg-muted hover:text-fg-base disabled:opacity-50"
           >
-            {props.webdavPublishing || props.webdav?.last?.status === "running"
-              ? <Loader2 size={13} className="animate-spin" />
-              : <Cloud size={13} />}
+            <CloudDownload size={13} />
+          </button>
+          <button
+            onClick={() => props.onWebDavUploadSync?.()}
+            disabled={!props.webdav?.configured}
+            title={props.webdav?.configured
+              ? webdavUploadTitle(props.webdav, t)
+              : t.library.webdavNotConfigured}
+            className="rounded p-1 text-fg-muted hover:bg-bg-muted hover:text-fg-base disabled:opacity-50"
+          >
+            <CloudUpload size={13} />
           </button>
           <button
             onClick={() => props.onNewFolderHere(null)}
@@ -254,16 +262,18 @@ export function FolderTree(props: Props) {
   );
 }
 
-function webdavSyncTitle(status: WebDavStatus, t: I18nStrings): string {
-  const last = status.last;
-  if (last?.status === "running") return t.library.webdavSyncRunning;
-  if (last?.status === "failed") {
-    return t.library.webdavSyncFailed(last.error || "");
+function webdavUploadTitle(status: WebDavStatus, t: I18nStrings): string {
+  if (status.last?.finished_at) {
+    return t.library.webdavLastUploaded(new Date(status.last.finished_at).toLocaleString());
   }
-  if (last?.finished_at) {
-    return t.library.webdavLastSynced(new Date(last.finished_at).toLocaleString());
+  return t.library.webdavUploadNow;
+}
+
+function webdavDownloadTitle(status: WebDavStatus, t: I18nStrings): string {
+  if (status.last?.last_download_at) {
+    return t.library.webdavLastPulled(new Date(status.last.last_download_at).toLocaleString());
   }
-  return t.library.webdavSyncNow;
+  return t.library.webdavPullNow;
 }
 
 function FolderRow({

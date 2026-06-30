@@ -371,7 +371,7 @@ function WebDavSection({ initial }: { initial: WebDavStatus | null }) {
   const [remotePath, setRemotePath] = useState(initial?.remote_path ?? "/marginalia");
   const [autoSync, setAutoSync] = useState(Boolean(initial?.auto_sync_enabled));
   const [interval, setIntervalValue] = useState(String(initial?.auto_sync_interval_minutes ?? 60));
-  const [busy, setBusy] = useState<"save" | "test" | "pull" | null>(null);
+  const [busy, setBusy] = useState<"save" | "test" | "remote" | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -437,14 +437,14 @@ function WebDavSection({ initial }: { initial: WebDavStatus | null }) {
     }
   };
 
-  const pull = async () => {
-    setBusy("pull");
+  const syncRemoteStatus = async () => {
+    setBusy("remote");
     setMessage(null);
     setError(null);
     try {
-      const result = await webdavSync.pull();
+      const result = await webdavSync.remoteStatus();
       await refresh();
-      setMessage(t.settings.webdavPullOk(result.entries, result.remote_files));
+      setMessage(t.settings.webdavRemoteStatusOk(result.status));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -454,7 +454,13 @@ function WebDavSection({ initial }: { initial: WebDavStatus | null }) {
 
   const last = status?.last;
   const lastUpload = last?.finished_at ? formatDateTime(last.finished_at) : t.common.unset;
-  const lastPull = last?.last_pull_at ? formatDateTime(last.last_pull_at) : t.common.unset;
+  const lastRemoteCheck = last?.last_remote_check_at
+    ? formatDateTime(last.last_remote_check_at)
+    : t.common.unset;
+  const remoteUpdated = last?.remote_updated_at
+    ? formatDateTime(last.remote_updated_at)
+    : t.common.unset;
+  const remoteSnapshot = last?.remote_snapshot_id || t.common.unset;
 
   return (
     <Section title={t.settings.webdavTitle} subtitle={t.settings.webdavSubtitle}>
@@ -530,19 +536,24 @@ function WebDavSection({ initial }: { initial: WebDavStatus | null }) {
             {t.settings.webdavTest}
           </button>
           <button
-            onClick={pull}
+            onClick={syncRemoteStatus}
             disabled={busy !== null || !status?.configured}
             className="inline-flex items-center gap-1.5 rounded-md border border-border bg-bg-base px-3 py-1.5 text-sm hover:bg-bg-muted disabled:opacity-50"
           >
-            {busy === "pull" && <RefreshCw size={13} className="animate-spin" />}
-            {t.settings.webdavPull}
+            {busy === "remote" && <RefreshCw size={13} className="animate-spin" />}
+            {t.settings.webdavRemoteStatus}
           </button>
         </div>
         <dl className="grid grid-cols-[9rem_1fr] gap-x-3 gap-y-1 text-xs">
           <Kv k={t.settings.webdavConfigured} v={status?.configured ? t.common.yes : t.common.no} />
+          <Kv k={t.settings.webdavLastRemoteCheck} v={lastRemoteCheck} />
+          <Kv k={t.settings.webdavRemoteUpdated} v={remoteUpdated} />
+          <Kv k={t.settings.webdavSnapshot} v={remoteSnapshot} mono />
           <Kv k={t.settings.webdavLastUpload} v={lastUpload} />
-          <Kv k={t.settings.webdavLastPull} v={lastPull} />
-          {last?.snapshot_id && <Kv k={t.settings.webdavSnapshot} v={last.snapshot_id} mono />}
+          {last?.last_download_at && (
+            <Kv k={t.settings.webdavLastDownload} v={formatDateTime(last.last_download_at)} />
+          )}
+          {last?.remote_error && <Kv k={t.settings.webdavRemoteError} v={last.remote_error} />}
           {last?.error && <Kv k={t.settings.webdavLastError} v={last.error} />}
         </dl>
         {message && <p className="text-xs text-fg-subtle">{message}</p>}

@@ -25,7 +25,7 @@ import type { ActiveTasks, FileEntrySummary, FileMetadata, Folder, WebDavStatus 
 import { FolderTree } from "@/components/library/FolderTree";
 import { FileViewer } from "@/components/library/FileViewer";
 import { MetaPanel } from "@/components/library/MetaPanel";
-import { NewFolderDialog, UploadDialog } from "@/components/library/Dialogs";
+import { NewFolderDialog, UploadDialog, WebDavSyncDialog } from "@/components/library/Dialogs";
 import { useI18n, type I18nStrings } from "@/lib/i18n";
 
 const SIDEBAR_WIDTH_KEY = "marginalia.library.sidebarWidth";
@@ -64,7 +64,7 @@ export function LibraryPage() {
 
   const [active, setActive] = useState<ActiveTasks | null>(null);
   const [webdav, setWebdav] = useState<WebDavStatus | null>(null);
-  const [webdavPublishing, setWebdavPublishing] = useState(false);
+  const [webdavDialog, setWebdavDialog] = useState<"upload" | "download" | null>(null);
   const sidebarRef = useRef<HTMLDivElement>(null);
   const [sidebarWidth, setSidebarWidth] = useState(readSidebarWidth);
   const ingestingFileIds = useMemo<Set<string>>(() => {
@@ -183,19 +183,6 @@ export function LibraryPage() {
     setMeta(null);
   }, []);
 
-  const publishWebDav = useCallback(async () => {
-    if (webdavPublishing) return;
-    setWebdavPublishing(true);
-    try {
-      await webdavSync.publish();
-      setWebdav(await webdavSync.status());
-    } catch (e) {
-      alert(e instanceof Error ? e.message : String(e));
-    } finally {
-      setWebdavPublishing(false);
-    }
-  }, [webdavPublishing]);
-
   const refreshSelectedEntry = useCallback(() => {
     if (!selectedEntry) return;
     setMetaLoading(true);
@@ -266,8 +253,8 @@ export function LibraryPage() {
             name: headerTargetName,
           })}
           webdav={webdav}
-          webdavPublishing={webdavPublishing}
-          onWebDavPublish={publishWebDav}
+          onWebDavUploadSync={() => setWebdavDialog("upload")}
+          onWebDavDownloadSync={() => setWebdavDialog("download")}
           onEntryDeleted={(id) => {
             if (selectedEntry?.id === id) {
               setSelectedEntry(null);
@@ -328,6 +315,21 @@ export function LibraryPage() {
           folderName={uploadInto.name}
           onClose={() => setUploadInto(null)}
           onUploaded={triggerRefresh}
+        />
+      )}
+      {webdavDialog && (
+        <WebDavSyncDialog
+          mode={webdavDialog}
+          onClose={() => setWebdavDialog(null)}
+          onDone={async () => {
+            triggerRefresh();
+            if (selectedEntry) refreshSelectedEntry();
+            try {
+              setWebdav(await webdavSync.status());
+            } catch {
+              // Best effort status refresh; the dialog already surfaced operation errors.
+            }
+          }}
         />
       )}
     </div>

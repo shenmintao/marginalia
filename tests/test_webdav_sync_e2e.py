@@ -60,8 +60,13 @@ from marginalia.services.user_files import (  # noqa: E402
 from marginalia.services.webdav_sync import (  # noqa: E402
     WebDavClient,
     WebDavConfigError,
+    download_latest,
+    download_plan,
+    download_selected,
     hydrate_entry,
+    publish_selected,
     pull_latest_metadata,
+    upload_plan,
 )
 from marginalia.storage import get_storage, reset_storage_cache  # noqa: E402
 from marginalia.utils.ids import new_id  # noqa: E402
@@ -267,6 +272,33 @@ class _MemoryWebDavClient:
     async def read_bytes(self, path: str) -> bytes:
         return self.remote[path]
 
+    async def exists(self, path: str) -> bool:
+        return path in self.remote
+
+    async def ensure_dir(self, path: str) -> None:
+        return None
+
+    async def put_bytes(
+        self,
+        path: str,
+        body: bytes,
+        *,
+        content_type: str = "application/octet-stream",
+    ) -> None:
+        self.remote[path] = body
+
+    async def put_stream(
+        self,
+        path: str,
+        stream: AsyncIterator[bytes],
+        *,
+        content_type: str | None,
+    ) -> None:
+        body = bytearray()
+        async for chunk in stream:
+            body.extend(chunk)
+        self.remote[path] = bytes(body)
+
     async def stream_to_storage(
         self,
         path: str,
@@ -344,6 +376,90 @@ async def test_pull_metadata_then_hydrate_on_demand(monkeypatch: pytest.MonkeyPa
         assert await session.scalar(select(func.count(Session.id))) == 1
         assert await session.scalar(select(func.count(Conversation.id))) == 1
         assert await session.scalar(select(func.count(Journal.id))) == 1
+
+
+async def test_selected_upload_publishes_chosen_entries(monkeypatch: pytest.MonkeyPatch) -> None:
+    source_home = _TEST_ROOT / "source_selected_upload"
+    await _activate_home(source_home)
+    seeded = await _seed_source()
+    _MemoryWebDavClient.remote = {}
+    monkeypatch.setattr(
+        "marginalia.services.webdav_sync.WebDavClient",
+        _MemoryWebDavClient,
+    )
+
+    plan = await upload_plan()
+    assert plan["count"] == 1
+    assert plan["items"][0]["entry_id"] == seeded["entry_id"]
+
+    published = await publish_selected([str(seeded["entry_id"])])
+    assert published["selected_entries"] == 1
+    latest = json.loads(_MemoryWebDavClient.remote["/marginalia-test/latest.json"].decode("utf-8"))
+    snapshot_root = f"/marginalia-test/snapshots/{latest['snapshot_id']}"
+    entries = [
+        json.loads(line)
+        for line in _MemoryWebDavClient.remote[f"{snapshot_root}/entries.jsonl"].decode("utf-8").splitlines()
+        if line.strip()
+    ]
+    assert [entry["entry_id"] for entry in entries] == [seeded["entry_id"]]
+
+
+async def test_download_latest_pulls_metadata_and_blobs(monkeypatch: pytest.MonkeyPatch) -> None:
+    source_home = _TEST_ROOT / "source_download"
+    dest_home = _TEST_ROOT / "dest_download"
+    await _activate_home(source_home)
+    seeded = await _seed_source()
+    remote, _manifest = await _build_remote_pack()
+
+    await _activate_home(dest_home)
+    _MemoryWebDavClient.remote = remote
+    monkeypatch.setattr(
+        "marginalia.services.webdav_sync.WebDavClient",
+        _MemoryWebDavClient,
+    )
+
+    downloaded = await download_latest()
+    assert downloaded["entries"] == 1
+    assert downloaded["downloaded_files"] == 1
+    assert downloaded["failed_files"] == 0
+
+    factory = get_session_factory()
+    async with factory() as session:
+        meta = await get_user_metadata(session, entry_id=str(seeded["entry_id"]))
+        assert meta["webdav_remote"]["hydrated"] is True
+        handle = await open_for_download(session, entry_id=str(seeded["entry_id"]))
+        body = bytearray()
+        async for chunk in handle.stream:
+            body.extend(chunk)
+        assert bytes(body) == seeded["body"]
+
+
+async def test_download_plan_then_selected_download(monkeypatch: pytest.MonkeyPatch) -> None:
+    source_home = _TEST_ROOT / "source_selected_download"
+    dest_home = _TEST_ROOT / "dest_selected_download"
+    await _activate_home(source_home)
+    seeded = await _seed_source()
+    remote, _manifest = await _build_remote_pack()
+
+    await _activate_home(dest_home)
+    _MemoryWebDavClient.remote = remote
+    monkeypatch.setattr(
+        "marginalia.services.webdav_sync.WebDavClient",
+        _MemoryWebDavClient,
+    )
+
+    plan = await download_plan()
+    assert plan["count"] == 1
+    assert plan["items"][0]["entry_id"] == seeded["entry_id"]
+
+    downloaded = await download_selected([str(seeded["entry_id"])])
+    assert downloaded["downloaded_files"] == 1
+    assert downloaded["failed_files"] == 0
+
+    factory = get_session_factory()
+    async with factory() as session:
+        meta = await get_user_metadata(session, entry_id=str(seeded["entry_id"]))
+        assert meta["webdav_remote"]["hydrated"] is True
 
 
 async def test_webdav_stream_to_storage_checks_sha256() -> None:
