@@ -371,7 +371,7 @@ function WebDavSection({ initial }: { initial: WebDavStatus | null }) {
   const [remotePath, setRemotePath] = useState(initial?.remote_path ?? "/marginalia");
   const [autoSync, setAutoSync] = useState(Boolean(initial?.auto_sync_enabled));
   const [interval, setIntervalValue] = useState(String(initial?.auto_sync_interval_minutes ?? 60));
-  const [busy, setBusy] = useState<"save" | "test" | "remote" | null>(null);
+  const [busy, setBusy] = useState<"save" | "remote" | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -415,21 +415,6 @@ function WebDavSection({ initial }: { initial: WebDavStatus | null }) {
       setStatus(next);
       setPassword("");
       setMessage(t.settings.webdavSaved);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const test = async () => {
-    setBusy("test");
-    setMessage(null);
-    setError(null);
-    try {
-      await webdavSync.test();
-      await refresh();
-      setMessage(t.settings.webdavTestOk);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -526,14 +511,6 @@ function WebDavSection({ initial }: { initial: WebDavStatus | null }) {
             className="inline-flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-accent-fg hover:opacity-90 disabled:opacity-50"
           >
             <Save size={13} /> {busy === "save" ? t.settings.webdavSaving : t.common.save}
-          </button>
-          <button
-            onClick={test}
-            disabled={busy !== null || !status?.configured}
-            className="inline-flex items-center gap-1.5 rounded-md border border-border bg-bg-base px-3 py-1.5 text-sm hover:bg-bg-muted disabled:opacity-50"
-          >
-            {busy === "test" && <RefreshCw size={13} className="animate-spin" />}
-            {t.settings.webdavTest}
           </button>
           <button
             onClick={syncRemoteStatus}
