@@ -13,6 +13,7 @@ POST /upload?folder_id=<id>[&display_name=foo.pdf][&on_conflict=...]
 """
 from __future__ import annotations
 
+import logging
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
@@ -30,6 +31,7 @@ from marginalia.services.upload import (
 from marginalia.storage import get_storage
 
 router = APIRouter(tags=["upload"])
+log = logging.getLogger(__name__)
 
 _DEFAULT_CHUNK = 1024 * 256
 
@@ -70,6 +72,13 @@ async def upload_endpoint(
             "hint": "exactly one of remote_path or folder_id is required",
         })
     storage = get_storage()
+    destination = "remote_path" if remote_path is not None else "folder_id"
+    log.info(
+        "upload started destination=%s content_type=%s conflict_policy=%s",
+        destination,
+        file.content_type,
+        on_conflict or "default",
+    )
     try:
         result = await upload_service(
             session,
@@ -84,9 +93,11 @@ async def upload_endpoint(
         )
     except FolderNotFoundError:
         await session.rollback()
+        log.warning("upload rejected: folder not found destination=%s", destination)
         raise HTTPException(status_code=404, detail="folder not found")
     except AmbiguousRemotePathError as e:
         await session.rollback()
+        log.warning("upload rejected: ambiguous remote path")
         raise HTTPException(status_code=400, detail={
             "error": "ambiguous_remote_path",
             "remote_path": e.remote,
@@ -94,6 +105,11 @@ async def upload_endpoint(
         })
     except DisplayNameConflictError as e:
         await session.rollback()
+        log.warning(
+            "upload rejected: display name conflict folder_id=%s existing_entry_id=%s",
+            e.folder_id,
+            e.existing_entry_id,
+        )
         raise HTTPException(
             status_code=409,
             detail={
@@ -104,7 +120,19 @@ async def upload_endpoint(
                 "existing_file_id": e.existing_file_id,
             },
         )
+    except Exception:
+        await session.rollback()
+        log.exception("upload failed unexpectedly destination=%s", destination)
+        raise
     await session.commit()
+    log.info(
+        "upload completed file_id=%s entry_id=%s folder_id=%s deduped=%s skipped=%s",
+        result.file_id,
+        result.entry_id,
+        result.folder_id,
+        result.deduped,
+        result.skipped,
+    )
     return {
         "file_id": result.file_id,
         "entry_id": result.entry_id,

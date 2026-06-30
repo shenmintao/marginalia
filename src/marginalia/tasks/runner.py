@@ -136,6 +136,7 @@ class TaskRunner:
                 except asyncio.TimeoutError:
                     pass
                 continue
+            log.info("claimed %d task(s): %s", len(claimed), ", ".join(claimed))
             for task_id in claimed:
                 t = asyncio.create_task(self._process(task_id))
                 self._inflight.add(t)
@@ -185,6 +186,14 @@ class TaskRunner:
             await self._fail(task_id, attempts, max_attempts, f"no handler registered for {kind!r}")
             return
 
+        log.info(
+            "task %s (%s) started attempt=%d/%d",
+            task_id,
+            kind,
+            attempts,
+            max_attempts,
+        )
+
         # Guard: if this kind needs LLM and no key is configured, mark
         # dead immediately with a clean message instead of letting the
         # handler crash with `OpenAIError: Missing credentials`. Catches
@@ -232,6 +241,7 @@ class TaskRunner:
                     outcome="applied",
                     detail=counters.to_detail(duration_ms=duration_ms),
                 )
+                log.info("task %s (%s) done duration_ms=%d", task_id, kind, duration_ms)
             await session.commit()
 
     async def _record_outcome(
@@ -293,14 +303,34 @@ class TaskRunner:
                         payload=task.payload or {},
                         reason=error,
                     )
+                if changed:
+                    log.warning(
+                        "task %s (%s) marked dead after %d/%d attempts: %s",
+                        task_id,
+                        task.kind if task is not None else "?",
+                        attempts,
+                        max_attempts,
+                        error,
+                    )
             else:
+                next_run_at = _now() + _backoff(attempts)
                 changed = await tasks_repo.reschedule_for_retry(
                     session,
                     task_id=task_id,
                     error=error,
-                    next_run_at=_now() + _backoff(attempts),
+                    next_run_at=next_run_at,
                     worker_id=self.worker_id,
                 )
+                if changed:
+                    log.warning(
+                        "task %s (%s) scheduled for retry attempt=%d/%d next_run_at=%s: %s",
+                        task_id,
+                        task.kind if task is not None else "?",
+                        attempts,
+                        max_attempts,
+                        next_run_at.isoformat(),
+                        error,
+                    )
             await session.commit()
             return changed
 

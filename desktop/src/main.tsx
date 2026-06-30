@@ -4,12 +4,17 @@ import { BrowserRouter, HashRouter } from "react-router-dom";
 
 import App from "./App";
 import { resolveTauriBaseUrl } from "./api/client";
+import { frontendLog, installFrontendErrorLogging } from "./lib/frontendLog";
 import "./styles/globals.css";
+
+installFrontendErrorLogging();
 
 // Kick off Tauri backend-port resolution before render. The fetch wrapper
 // awaits this on first use, so a slow IPC round-trip just delays the first
 // API call rather than blocking the window from showing.
-void resolveTauriBaseUrl();
+void resolveTauriBaseUrl().then((baseUrl) => {
+  frontendLog("info", "initial backend base URL resolved", { baseUrl });
+});
 
 function isTauri(): boolean {
   return Boolean(

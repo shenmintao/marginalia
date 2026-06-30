@@ -40,6 +40,7 @@ import type {
   SessionTranscript,
   UploadResult,
 } from "@/types/api";
+import { describeError, frontendLog } from "@/lib/frontendLog";
 
 const STORAGE_KEY = "marginalia.api_base";
 const TOKEN_STORAGE_KEY = "marginalia.api_token";
@@ -77,18 +78,26 @@ export async function resolveTauriBaseUrl(): Promise<string> {
 
   _tauriResolved = (async () => {
     try {
+      frontendLog("info", "resolving Tauri backend base URL");
       const { invoke } = await import("@tauri-apps/api/core");
       const baseUrl = await invoke<string | null>("backend_base_url");
       if (typeof baseUrl === "string" && baseUrl.trim()) {
         _base = baseUrl.trim().replace(/\/$/, "");
+        frontendLog("info", "backend base URL from Tauri shell", { baseUrl: _base });
         return _base;
       }
       const port = await invoke<number | null>("backend_port");
       if (typeof port === "number" && port > 0) {
         _base = `http://127.0.0.1:${port}`;
+        frontendLog("info", "backend base URL from Tauri port", { baseUrl: _base });
+      } else {
+        frontendLog("warn", "Tauri shell returned no backend URL or port");
       }
     } catch (e) {
       console.error("failed to resolve Tauri backend URL:", e);
+      frontendLog("error", "failed to resolve Tauri backend URL", {
+        error: describeError(e),
+      });
     }
     return _base;
   })();
@@ -127,16 +136,26 @@ async function _request<T>(
   init: RequestInit = {},
 ): Promise<T> {
   if (!_base && isTauri()) await resolveTauriBaseUrl();
-  const res = await fetch(_base + path, {
-    ...init,
-    headers: {
-      ...(init.body && !(init.body instanceof FormData)
-        ? { "Content-Type": "application/json" }
-        : {}),
-      ...authHeaders(),
-      ...(init.headers || {}),
-    },
-  });
+  let res: Response;
+  try {
+    res = await fetch(_base + path, {
+      ...init,
+      headers: {
+        ...(init.body && !(init.body instanceof FormData)
+          ? { "Content-Type": "application/json" }
+          : {}),
+        ...authHeaders(),
+        ...(init.headers || {}),
+      },
+    });
+  } catch (e) {
+    frontendLog("error", "fetch failed", {
+      path,
+      baseUrl: _base,
+      error: describeError(e),
+    });
+    throw e;
+  }
   if (!res.ok) {
     let body: ApiErrorBody | string | null = null;
     const ct = res.headers.get("content-type") || "";
@@ -319,7 +338,14 @@ export const uploads = {
           reject(new ApiError(xhr.status, body as ApiErrorBody, `${xhr.status} ${detail}`));
         }
       };
-      xhr.onerror = () => reject(new ApiError(0, null, "network error"));
+      xhr.onerror = () => {
+        frontendLog("error", "upload request failed", {
+          path: "/v1/upload",
+          baseUrl: _base,
+          status: xhr.status,
+        });
+        reject(new ApiError(0, null, "network error"));
+      };
       xhr.send(fd);
     });
   },

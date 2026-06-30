@@ -22,11 +22,12 @@
 //! that's also where the packaged app picks up `.env` — users get one
 //! directory to manage (db + library + .env).
 
+use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -193,20 +194,65 @@ fn local_port_from_base_url(url: &str) -> Option<u16> {
     port.parse::<u16>().ok()
 }
 
-fn local_port_is_open(port: u16) -> bool {
+fn local_backend_health_ok(base_url: &str, port: u16) -> bool {
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    TcpStream::connect_timeout(&addr, Duration::from_millis(250)).is_ok()
+    let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(250)) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
+    let host = if base_url.starts_with("http://localhost:") {
+        "localhost"
+    } else {
+        "127.0.0.1"
+    };
+    let request = format!(
+        "GET /health HTTP/1.1\r\nHost: {}:{}\r\nConnection: close\r\n\r\n",
+        host, port
+    );
+    if stream.write_all(request.as_bytes()).is_err() {
+        return false;
+    }
+    let mut response = [0_u8; 256];
+    let Ok(n) = stream.read(&mut response) else {
+        return false;
+    };
+    let head = String::from_utf8_lossy(&response[..n]);
+    head.starts_with("HTTP/1.1 200") || head.starts_with("HTTP/1.0 200")
 }
 
 fn discover_backend(home: &Path) -> Option<String> {
     let state_path = home.join("runtime").join("server.json");
     let bytes = std::fs::read(&state_path).ok()?;
-    let state: ServerDiscoveryState = serde_json::from_slice(&bytes).ok()?;
+    let state: ServerDiscoveryState = match serde_json::from_slice(&bytes) {
+        Ok(s) => s,
+        Err(e) => {
+            append_launcher_log(
+                home,
+                "warn",
+                &format!(
+                    "ignoring invalid backend discovery file {}: {}",
+                    state_path.display(),
+                    e
+                ),
+            );
+            return None;
+        }
+    };
     let base_url = normalize_base_url(&state.base_url);
     let port = local_port_from_base_url(&base_url)?;
-    if local_port_is_open(port) {
+    if local_backend_health_ok(&base_url, port) {
         Some(base_url)
     } else {
+        append_launcher_log(
+            home,
+            "warn",
+            &format!(
+                "ignoring stale backend discovery file {}; /health did not pass for {}",
+                state_path.display(),
+                base_url
+            ),
+        );
         None
     }
 }
@@ -221,12 +267,28 @@ fn backend_base_url(state: State<'_, BackendState>) -> Option<String> {
     state.base_url.lock().unwrap().clone()
 }
 
+#[tauri::command]
+fn logs_dir() -> String {
+    marginalia_home().join("logs").display().to_string()
+}
+
+#[tauri::command]
+fn append_frontend_log(level: String, message: String) -> Result<(), String> {
+    append_named_log(&marginalia_home(), "frontend.log", &level, &message)
+        .map_err(|e| format!("could not write frontend log: {}", e))
+}
+
 impl BackendState {
     fn spawn(&self, app: &AppHandle) {
         let home = marginalia_home();
         if let Err(e) = std::fs::create_dir_all(&home) {
             log::warn!("could not create MARGINALIA_HOME {}: {}", home.display(), e);
         }
+        append_launcher_log(
+            &home,
+            "info",
+            &format!("desktop launch using MARGINALIA_HOME={}", home.display()),
+        );
         // First-launch: drop a starter .env so users have somewhere to put
         // their LLM key. validate_llm_config still flags an empty key, but
         // the desktop launch path soft-fails (MARGINALIA_DESKTOP=1) so the
@@ -237,6 +299,11 @@ impl BackendState {
             let server = normalize_base_url(&server);
             if !server.is_empty() {
                 log::info!("using backend from MARGINALIA_SERVER: {}", server);
+                append_launcher_log(
+                    &home,
+                    "info",
+                    &format!("using backend from MARGINALIA_SERVER: {}", server),
+                );
                 *self.base_url.lock().unwrap() = Some(server);
                 return;
             }
@@ -244,6 +311,14 @@ impl BackendState {
 
         if let Some(discovered) = discover_backend(&home) {
             log::info!("using discovered backend: {}", discovered);
+            append_launcher_log(
+                &home,
+                "info",
+                &format!(
+                    "using discovered backend from runtime/server.json: {}",
+                    discovered
+                ),
+            );
             *self.base_url.lock().unwrap() = Some(discovered);
             return;
         }
@@ -253,6 +328,11 @@ impl BackendState {
             .unwrap_or(false)
         {
             log::info!("MARGINALIA_AUTOSTART_BACKEND=0, skipping backend spawn");
+            append_launcher_log(
+                &home,
+                "info",
+                "MARGINALIA_AUTOSTART_BACKEND=0, skipping backend spawn",
+            );
             return;
         }
 
@@ -263,6 +343,11 @@ impl BackendState {
                 Ok(p) => p,
                 Err(e) => {
                     log::error!("failed to allocate ephemeral backend port: {}", e);
+                    append_launcher_log(
+                        &home,
+                        "error",
+                        &format!("failed to allocate ephemeral backend port: {}", e),
+                    );
                     return;
                 }
             },
@@ -271,15 +356,22 @@ impl BackendState {
         *self.port.lock().unwrap() = Some(port);
         *self.base_url.lock().unwrap() = Some(base_url.clone());
         log::info!("backend url = {}", base_url);
+        append_launcher_log(&home, "info", &format!("backend url = {}", base_url));
 
         let mut cmd = if let Ok(cmd_str) = std::env::var("MARGINALIA_BACKEND_CMD") {
             let mut parts = cmd_str.split_whitespace();
             let Some(program) = parts.next() else {
                 log::error!("MARGINALIA_BACKEND_CMD is empty");
+                append_launcher_log(&home, "error", "MARGINALIA_BACKEND_CMD is empty");
                 return;
             };
             let args: Vec<String> = parts.map(|s| s.to_string()).collect();
             log::info!("backend cmd from env: {}", cmd_str);
+            append_launcher_log(
+                &home,
+                "info",
+                &format!("backend command from MARGINALIA_BACKEND_CMD: {}", cmd_str),
+            );
             let mut c = Command::new(program);
             c.args(&args);
             c
@@ -289,12 +381,26 @@ impl BackendState {
                     "no bundled backend found and MARGINALIA_BACKEND_CMD not set; \
                      the desktop build is missing its sidecar runtime"
                 );
+                append_launcher_log(
+                    &home,
+                    "error",
+                    "no bundled backend found and MARGINALIA_BACKEND_CMD not set",
+                );
                 return;
             };
             log::info!(
                 "spawning bundled sidecar: {} -m marginalia (backend dir: {})",
                 python.display(),
                 backend_dir.display()
+            );
+            append_launcher_log(
+                &home,
+                "info",
+                &format!(
+                    "spawning bundled sidecar: {} -m marginalia (backend dir: {})",
+                    python.display(),
+                    backend_dir.display()
+                ),
             );
             let mut c = Command::new(&python);
             c.arg("-m").arg("marginalia");
@@ -333,10 +439,16 @@ impl BackendState {
         match cmd.spawn() {
             Ok(child) => {
                 log::info!("spawned backend pid={} cwd={}", child.id(), home.display());
+                append_launcher_log(
+                    &home,
+                    "info",
+                    &format!("spawned backend pid={} cwd={}", child.id(), home.display()),
+                );
                 *self.child.lock().unwrap() = Some(child);
             }
             Err(e) => {
                 log::error!("failed to spawn backend: {}", e);
+                append_launcher_log(&home, "error", &format!("failed to spawn backend: {}", e));
             }
         }
     }
@@ -396,13 +508,77 @@ MARGINALIA_API_HOST=127.0.0.1
 MARGINALIA_API_PORT=8000
 ";
     match std::fs::write(&env_path, template) {
-        Ok(_) => log::info!("wrote starter .env at {}", env_path.display()),
-        Err(e) => log::warn!(
-            "could not write starter .env at {}: {}",
-            env_path.display(),
-            e
-        ),
+        Ok(_) => {
+            log::info!("wrote starter .env at {}", env_path.display());
+            append_launcher_log(
+                home,
+                "info",
+                &format!("wrote starter .env at {}", env_path.display()),
+            );
+        }
+        Err(e) => {
+            log::warn!(
+                "could not write starter .env at {}: {}",
+                env_path.display(),
+                e
+            );
+            append_launcher_log(
+                home,
+                "warn",
+                &format!(
+                    "could not write starter .env at {}: {}",
+                    env_path.display(),
+                    e
+                ),
+            );
+        }
     }
+}
+
+fn append_launcher_log(home: &Path, level: &str, message: &str) {
+    if let Err(e) = append_named_log(home, "launcher.log", level, message) {
+        log::warn!("could not append launcher log: {}", e);
+    }
+}
+
+fn append_named_log(home: &Path, name: &str, level: &str, message: &str) -> std::io::Result<()> {
+    let logs = home.join("logs");
+    std::fs::create_dir_all(&logs)?;
+    let path = logs.join(name);
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    let level = sanitize_log_text(level, 16);
+    let message = sanitize_log_text(message, 8_000);
+    writeln!(file, "{} [{}] {}", log_timestamp(), level, message)
+}
+
+fn log_timestamp() -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_else(|_| Duration::from_secs(0));
+    format!("{}.{:03}Z", now.as_secs(), now.subsec_millis())
+}
+
+fn sanitize_log_text(value: &str, max_chars: usize) -> String {
+    let mut out = String::new();
+    let mut count = 0;
+    for ch in value.chars() {
+        if count >= max_chars {
+            out.push_str("...");
+            break;
+        }
+        match ch {
+            '\r' => out.push_str("\\r"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push('\t'),
+            c if c.is_control() => out.push('?'),
+            c => out.push(c),
+        }
+        count += 1;
+    }
+    out
 }
 
 /// Open append-mode handles for the sidecar's stdout / stderr so its
@@ -414,6 +590,11 @@ fn open_backend_log_streams(home: &Path) -> (Stdio, Stdio) {
     let logs = home.join("logs");
     if let Err(e) = std::fs::create_dir_all(&logs) {
         log::warn!("could not create logs dir {}: {}", logs.display(), e);
+        append_launcher_log(
+            home,
+            "warn",
+            &format!("could not create logs dir {}: {}", logs.display(), e),
+        );
         return (Stdio::null(), Stdio::null());
     }
     let log_path = logs.join("backend.log");
@@ -425,6 +606,11 @@ fn open_backend_log_streams(home: &Path) -> (Stdio, Stdio) {
         Ok(f) => f,
         Err(e) => {
             log::warn!("could not open {}: {}", log_path.display(), e);
+            append_launcher_log(
+                home,
+                "warn",
+                &format!("could not open {}: {}", log_path.display(), e),
+            );
             return (Stdio::null(), Stdio::null());
         }
     };
@@ -432,6 +618,11 @@ fn open_backend_log_streams(home: &Path) -> (Stdio, Stdio) {
         Ok(f) => f,
         Err(e) => {
             log::warn!("could not duplicate {} handle: {}", log_path.display(), e);
+            append_launcher_log(
+                home,
+                "warn",
+                &format!("could not duplicate {} handle: {}", log_path.display(), e),
+            );
             return (Stdio::null(), Stdio::null());
         }
     };
@@ -522,7 +713,12 @@ pub fn run() {
             show_main_window(app);
         }))
         .manage(BackendState::default())
-        .invoke_handler(tauri::generate_handler![backend_port, backend_base_url])
+        .invoke_handler(tauri::generate_handler![
+            backend_port,
+            backend_base_url,
+            logs_dir,
+            append_frontend_log
+        ])
         .setup(|app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(

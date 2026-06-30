@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 import os
+import time
+import uuid
 from contextlib import asynccontextmanager
 from hmac import compare_digest
 
@@ -30,49 +32,72 @@ from marginalia.server_discovery import clear_server_state, write_server_state
 from marginalia.tasks.runner import TaskRunner
 
 log = logging.getLogger(__name__)
+SLOW_REQUEST_LOG_MS = 10_000
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
     state_written = False
+    runner: TaskRunner | None = None
+    log.info(
+        "backend startup: home=%s storage_backend=%s worker_enabled=%s desktop=%s",
+        settings.marginalia_home,
+        settings.storage_backend,
+        settings.worker_enabled,
+        os.environ.get("MARGINALIA_DESKTOP") == "1",
+    )
     # Desktop launch: server must come up even when the user hasn't entered
     # an API key yet, so they can do it from the Settings page. Tasks that
     # actually need an LLM call still fail at call time. Headless / CLI
     # launches keep the historical hard-fail.
-    if os.environ.get("MARGINALIA_DESKTOP") == "1":
-        try:
+    try:
+        if os.environ.get("MARGINALIA_DESKTOP") == "1":
+            try:
+                validate_llm_config(settings)
+            except LlmConfigError as e:
+                log.warning("desktop launch with incomplete LLM config: %s", e)
+        else:
             validate_llm_config(settings)
-        except LlmConfigError as e:
-            log.warning("desktop launch with incomplete LLM config: %s", e)
-    else:
-        validate_llm_config(settings)
-    await bootstrap_schema()
-    await _check_storage_consistency(settings)
-    if os.environ.get("MARGINALIA_HTTP_SERVER") == "1":
-        host = os.environ.get("MARGINALIA_API_HOST") or settings.marginalia_api_host
-        raw_port = os.environ.get("MARGINALIA_API_PORT") or str(settings.marginalia_api_port)
-        try:
-            port = int(raw_port)
-        except ValueError:
-            port = settings.marginalia_api_port
-        write_server_state(settings.marginalia_home, host=host, port=port, pid=os.getpid())
-        state_written = True
-    runner: TaskRunner | None = None
-    if settings.worker_enabled:
-        # Keep the in-process runner on live settings so GUI changes to
-        # WORKER_BATCH_SIZE affect new task claims without a restart.
-        runner = TaskRunner()
-        await runner.start()
-        log.info("task runner started in-process")
+        await bootstrap_schema()
+        log.info("database schema ready")
+        await _check_storage_consistency(settings)
+        log.info("storage consistency check passed")
+        if os.environ.get("MARGINALIA_HTTP_SERVER") == "1":
+            host = os.environ.get("MARGINALIA_API_HOST") or settings.marginalia_api_host
+            raw_port = os.environ.get("MARGINALIA_API_PORT") or str(settings.marginalia_api_port)
+            try:
+                port = int(raw_port)
+            except ValueError:
+                port = settings.marginalia_api_port
+                log.warning("invalid MARGINALIA_API_PORT=%r; using %s", raw_port, port)
+            state = write_server_state(
+                settings.marginalia_home,
+                host=host,
+                port=port,
+                pid=os.getpid(),
+            )
+            state_written = True
+            log.info("server discovery state written: %s", state["base_url"])
+        if settings.worker_enabled:
+            # Keep the in-process runner on live settings so GUI changes to
+            # WORKER_BATCH_SIZE affect new task claims without a restart.
+            runner = TaskRunner()
+            await runner.start()
+            log.info("task runner started in-process")
+    except Exception:
+        log.exception("backend startup failed")
+        raise
     try:
         yield
     finally:
+        log.info("backend shutdown starting")
         if runner is not None:
             await runner.stop()
         if state_written:
             clear_server_state(settings.marginalia_home, pid=os.getpid())
         await dispose_engine()
+        log.info("backend shutdown complete")
 
 
 async def _check_storage_consistency(settings) -> None:
@@ -182,6 +207,53 @@ async def optional_bearer_auth(request: Request, call_next):
             headers={"WWW-Authenticate": "Bearer"},
         )
     return await call_next(request)
+
+
+@app.middleware("http")
+async def request_diagnostics(request: Request, call_next):
+    request_id = uuid.uuid4().hex[:12]
+    request.state.request_id = request_id
+    started = time.perf_counter()
+    try:
+        response = await call_next(request)
+    except Exception:
+        duration_ms = int((time.perf_counter() - started) * 1000)
+        log.exception(
+            "request %s failed method=%s path=%s client=%s duration_ms=%d",
+            request_id,
+            request.method,
+            request.url.path,
+            _client_host(request),
+            duration_ms,
+        )
+        raise
+    duration_ms = int((time.perf_counter() - started) * 1000)
+    response.headers["X-Request-Id"] = request_id
+    path = request.url.path
+    if path != "/health" and response.status_code >= 500:
+        log.error(
+            "request %s returned %d method=%s path=%s client=%s duration_ms=%d",
+            request_id,
+            response.status_code,
+            request.method,
+            path,
+            _client_host(request),
+            duration_ms,
+        )
+    elif path != "/health" and duration_ms >= SLOW_REQUEST_LOG_MS:
+        log.info(
+            "slow request %s returned %d method=%s path=%s duration_ms=%d",
+            request_id,
+            response.status_code,
+            request.method,
+            path,
+            duration_ms,
+        )
+    return response
+
+
+def _client_host(request: Request) -> str:
+    return request.client.host if request.client else "-"
 
 V1_PREFIX = "/v1"
 app.include_router(folders_router, prefix=V1_PREFIX)

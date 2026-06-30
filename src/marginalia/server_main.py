@@ -51,7 +51,10 @@ def main(argv: list[str] | None = None, *, prog: str = "marginalia serve") -> in
     os.environ["MARGINALIA_HTTP_SERVER"] = "1"
     os.environ.setdefault("PYTHONUNBUFFERED", "1")
 
-    logging.basicConfig(level=log_level.upper())
+    logging.basicConfig(
+        level=log_level.upper(),
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
     uvicorn.run(
         "marginalia.main:app",
         host=host,

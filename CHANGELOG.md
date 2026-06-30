@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 0.2.11 - 2026-06-30
+
+### Fixed
+
+- Desktop backend discovery now verifies `/health` instead of only checking
+  whether a local port is open, avoiding false reuse of unrelated local
+  services.
+- Packaged desktop builds now write early launcher diagnostics to
+  `<MARGINALIA_HOME>/logs/launcher.log`, including skipped backend launches,
+  missing bundled backend resources, and sidecar spawn failures.
+- Packaged desktop builds now write frontend diagnostics to
+  `<MARGINALIA_HOME>/logs/frontend.log`, including backend URL resolution,
+  health-check delays, network failures, and uncaught frontend errors.
+- Backend logs now include startup milestones, request failures, slow
+  requests, upload diagnostics, and task runner lifecycle events.
+
 ## 0.2.10 - 2026-06-26
 
 ### Fixed
