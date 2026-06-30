@@ -151,19 +151,23 @@ jobs:
             exit "$status"
           fi
 
-          echo "Tauri DMG bundling failed after creating $temp_dmg."
-          echo "Forcing detach of any create-dmg mountpoints before conversion."
-          for mount in /Volumes/dmg.*; do
-            if [ -e "$mount" ]; then
-              hdiutil detach -force "$mount" || true
-            fi
-          done
-
           final_dmg="$dmg_dir/$(basename "$temp_dmg" | sed -E 's/^rw\.[0-9]+\.//')"
+          app_bundle="$(find "$macos_dir" -maxdepth 1 -type d -name '*.app' | head -n 1 || true)"
+          if [ -z "$app_bundle" ]; then
+            echo "Tauri returned $status and no .app bundle was found for fallback DMG creation." >&2
+            exit "$status"
+          fi
+
+          echo "Tauri DMG bundling failed after creating $temp_dmg."
+          echo "Creating a plain fallback DMG directly from $app_bundle."
+          staging="${RUNNER_TEMP:-/tmp}/marginalia-dmg-staging"
+          rm -rf "$staging"
+          mkdir -p "$staging"
+          ditto "$app_bundle" "$staging/$(basename "$app_bundle")"
+          ln -s /Applications "$staging/Applications"
           mkdir -p "$dmg_dir"
           rm -f "$final_dmg"
-          hdiutil convert "$temp_dmg" -format UDZO -o "$final_dmg"
-          rm -f "$temp_dmg"
+          hdiutil create -volname "Marginalia" -srcfolder "$staging" -ov -format UDZO "$final_dmg"
           test -f "$final_dmg"
           echo "Recovered DMG: $final_dmg"
 
