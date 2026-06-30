@@ -36,6 +36,7 @@ from marginalia.tasks.kinds import (
     KIND_SUGGEST_LIFECYCLE,
     KIND_TAG_QUALITY,
     KIND_VET_RELATIONS,
+    KIND_WEBDAV_PUBLISH,
     PERIODIC_INTERVALS,
     registered_kinds,
 )
@@ -71,6 +72,9 @@ EXPECTED_NON_PERIODIC = {
     # Rebuilding the semantic index is an explicit user/admin operation because
     # it can re-embed the full corpus with the currently configured model.
     KIND_REBUILD_SEMANTIC_INDEX,
+    # WebDAV publish is triggered from explicit sync actions, not periodic
+    # background maintenance.
+    KIND_WEBDAV_PUBLISH,
     KIND_PERIODIC_TICK,
 }
 
