@@ -51,7 +51,8 @@ from marginalia.db.models import (  # noqa: E402
 )
 from marginalia.services.knowledge_pack import build_knowledge_pack  # noqa: E402
 from marginalia.services.user_files import (  # noqa: E402
-    EntryNotFoundError,
+    EntryRemoteNotHydratedError,
+    FolderRemoteNotHydratedError,
     collect_folder_entries,
     get_user_metadata,
     open_for_download,
@@ -60,7 +61,6 @@ from marginalia.services.webdav_sync import (  # noqa: E402
     WebDavClient,
     WebDavConfigError,
     hydrate_entry,
-    list_remote_entries,
     pull_latest_metadata,
 )
 from marginalia.storage import get_storage, reset_storage_cache  # noqa: E402
@@ -320,16 +320,13 @@ async def test_pull_metadata_then_hydrate_on_demand(monkeypatch: pytest.MonkeyPa
 
     factory = get_session_factory()
     async with factory() as session:
-        with pytest.raises(EntryNotFoundError):
-            await get_user_metadata(session, entry_id=str(seeded["entry_id"]))
-        with pytest.raises(EntryNotFoundError):
+        meta = await get_user_metadata(session, entry_id=str(seeded["entry_id"]))
+        assert meta["webdav_remote"]["hydrated"] is False
+        with pytest.raises(EntryRemoteNotHydratedError):
             await open_for_download(session, entry_id=str(seeded["entry_id"]))
+        with pytest.raises(FolderRemoteNotHydratedError):
+            await collect_folder_entries(session, folder_id=str(seeded["folder_id"]))
         assert await session.get(Journal, str(seeded["journal_id"])) is not None
-
-    remote_entries = await list_remote_entries()
-    assert remote_entries["total"] == 1
-    assert remote_entries["entries"][0]["entry_id"] == seeded["entry_id"]
-    assert remote_entries["entries"][0]["folder_path"] == "/sync"
 
     hydrated = await hydrate_entry(str(seeded["entry_id"]))
     assert hydrated["hydrated"] is True

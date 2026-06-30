@@ -461,7 +461,7 @@ async def hydrate_entry(entry_id: str, settings: Settings | None = None) -> dict
         if not blob_path:
             raise WebDavConfigError("remote entry has no blob_path")
         remote_blob = _join_remote(remote_root, blob_path)
-        folder_path = await _folder_path(session, entry.folder_id, include_deleted=True)
+        folder_path = await _folder_path(session, entry.folder_id)
 
     client = WebDavClient(s)
     try:
@@ -495,7 +495,6 @@ async def hydrate_entry(entry_id: str, settings: Settings | None = None) -> dict
                 "hydrated_at": _now_iso(),
             },
         )
-        await _revive_folder_chain(session, entry.folder_id)
         file_row.storage_key = new_storage_key
         file_row.description = description
         file_row.updated_at = datetime.now(timezone.utc)
@@ -506,59 +505,6 @@ async def hydrate_entry(entry_id: str, settings: Settings | None = None) -> dict
             "file_id": file_row.id,
             "hydrated": True,
             "storage_key": new_storage_key,
-        }
-
-
-async def list_remote_entries(
-    *,
-    limit: int = 100,
-    offset: int = 0,
-) -> dict[str, Any]:
-    limit = max(1, min(int(limit), 500))
-    offset = max(0, int(offset))
-    async with session_scope() as session:
-        rows = (
-            await session.execute(
-                select(FileEntry, File)
-                .join(File, File.id == FileEntry.file_id)
-                .where(
-                    FileEntry.deleted_at.is_(None),
-                    File.deleted_at.is_(None),
-                )
-                .order_by(FileEntry.updated_at.desc(), FileEntry.display_name.asc())
-            )
-        ).all()
-        pending: list[tuple[FileEntry, File, dict[str, Any]]] = []
-        for entry, file_row in rows:
-            marker = _remote_marker(file_row.description)
-            if marker and not marker.get("hydrated"):
-                pending.append((entry, file_row, marker))
-        page = pending[offset: offset + limit]
-        entries = []
-        for entry, file_row, marker in page:
-            entries.append({
-                "entry_id": entry.id,
-                "file_id": file_row.id,
-                "display_name": entry.display_name,
-                "folder_id": entry.folder_id,
-                "folder_path": await _folder_path(
-                    session,
-                    entry.folder_id,
-                    include_deleted=True,
-                ),
-                "size_bytes": file_row.size_bytes,
-                "mime_type": file_row.mime_type,
-                "sha256": file_row.sha256,
-                "summary": file_row.summary,
-                "snapshot_id": marker.get("snapshot_id"),
-                "imported_at": marker.get("imported_at"),
-            })
-        return {
-            "entries": entries,
-            "count": len(entries),
-            "total": len(pending),
-            "limit": limit,
-            "offset": offset,
         }
 
 
@@ -614,15 +560,13 @@ async def _import_metadata(
         if not folder_id:
             continue
         row = await session.get(Folder, folder_id)
-        created_placeholder = row is None
         if row is None:
             row = Folder(id=folder_id, created_at=_parse_dt(item.get("created_at")) or now)
             session.add(row)
         row.parent_id = item.get("parent_id")
         row.name = str(item.get("name") or "Untitled")
         row.updated_at = _parse_dt(item.get("updated_at")) or now
-        if created_placeholder:
-            row.deleted_at = now
+        row.deleted_at = None
         imported["folders"] += 1
         await session.flush()
 
@@ -1075,34 +1019,18 @@ def _placeholder_storage_key(
     return f"{top}/{sub}/{file_id}"
 
 
-async def _folder_path(
-    session,
-    folder_id: str | None,
-    *,
-    include_deleted: bool = False,
-) -> str | None:
+async def _folder_path(session, folder_id: str | None) -> str | None:
     if folder_id is None:
         return None
     parts: list[str] = []
     cur = folder_id
     while cur:
         folder = await session.get(Folder, cur)
-        if folder is None or (folder.deleted_at is not None and not include_deleted):
+        if folder is None or folder.deleted_at is not None:
             break
         parts.append(folder.name)
         cur = folder.parent_id
     return "/" + "/".join(reversed(parts)) if parts else None
-
-
-async def _revive_folder_chain(session, folder_id: str | None) -> None:
-    cur = folder_id
-    while cur:
-        folder = await session.get(Folder, cur)
-        if folder is None:
-            return
-        folder.deleted_at = None
-        folder.updated_at = datetime.now(timezone.utc)
-        cur = folder.parent_id
 
 
 def _join_remote(*parts: str) -> str:

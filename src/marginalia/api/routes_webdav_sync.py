@@ -19,7 +19,6 @@ from marginalia.services.config_overlay import (
 from marginalia.services.webdav_sync import (
     WebDavConfigError,
     hydrate_entry,
-    list_remote_entries,
     pull_latest_metadata,
     read_status,
     test_connection,
@@ -113,14 +112,6 @@ async def webdav_pull() -> dict[str, Any]:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc))
-
-
-@router.get("/remote-entries")
-async def webdav_remote_entries(
-    limit: int = 100,
-    offset: int = 0,
-) -> dict[str, Any]:
-    return await list_remote_entries(limit=limit, offset=offset)
 
 
 @router.post("/hydrate/{entry_id}")

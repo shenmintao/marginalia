@@ -535,14 +535,7 @@ const en = {
     webdavTestOk: "WebDAV connection works.",
     webdavPull: "Pull metadata",
     webdavPullOk: (entries: number, remoteFiles: number) =>
-      `Indexed ${entries} remote entries; ${remoteFiles} files are available to download.`,
-    webdavRemoteFiles: "Remote files",
-    webdavRemoteFilesHint: (count: number) =>
-      `${count} indexed files are not stored locally yet.`,
-    webdavRemoteFilesEmpty: "No remote files waiting to download.",
-    webdavRefresh: "Refresh",
-    webdavDownload: "Download",
-    webdavHydrateOk: (name: string) => `Downloaded ${name}. It is now visible in Library.`,
+      `Imported ${entries} entries; ${remoteFiles} remote files can be downloaded from Library.`,
     webdavConfigured: "Configured",
     webdavLastUpload: "Last upload",
     webdavLastPull: "Last pull",
@@ -1188,14 +1181,7 @@ const zh: I18nStrings = {
     webdavTestOk: "WebDAV 连接正常。",
     webdavPull: "拉取 metadata",
     webdavPullOk: (entries: number, remoteFiles: number) =>
-      `已索引 ${entries} 个远端条目；${remoteFiles} 个文件可按需下载。`,
-    webdavRemoteFiles: "远端文件",
-    webdavRemoteFilesHint: (count: number) =>
-      `${count} 个已索引文件尚未下载到本地。`,
-    webdavRemoteFilesEmpty: "没有等待下载的远端文件。",
-    webdavRefresh: "刷新",
-    webdavDownload: "下载",
-    webdavHydrateOk: (name: string) => `已下载 ${name}，现在会显示在资料库中。`,
+      `已导入 ${entries} 个条目；${remoteFiles} 个远端文件可在资料库中按需下载。`,
     webdavConfigured: "已配置",
     webdavLastUpload: "上次上传",
     webdavLastPull: "上次拉取",

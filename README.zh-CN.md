@@ -509,9 +509,9 @@ blobs/sha256/<prefix>/<sha256>
 
 在 Settings -> WebDAV sync 中配置 URL、用户名、密码和远端路径。Library 左侧
 工具栏的云按钮会发布本机快照到 WebDAV。另一台设备可在 Settings 里 Pull
-metadata,先索引文件名、摘要、标签、catalog 和关系;这些远端文件会出现在
-Settings 的远端待下载清单中,不会直接进入 Library。点击下载后按 sha256
-从 WebDAV hydrate 到本地,完成后才会显示在 Library。
+metadata,先导入文件名、摘要、标签、catalog 和关系;这些条目会出现在 Library
+中,但原始文件还未下载。打开远端条目时可按 sha256 从 WebDAV hydrate 到本地,
+完成后再预览、下载或引用原文。
 
 ## 文档
 

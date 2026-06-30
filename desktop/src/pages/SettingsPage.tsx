@@ -12,7 +12,7 @@
  *  Sections 1-2 work without a backend. Section 3 calls /v1/settings/*
  *  and shows a friendly empty state if the server is offline. */
 import { useEffect, useState } from "react";
-import { AlertCircle, CheckCircle2, Save, Sun, Moon, Monitor, RefreshCw, Download, Loader2 } from "lucide-react";
+import { AlertCircle, CheckCircle2, Save, Sun, Moon, Monitor, RefreshCw } from "lucide-react";
 
 import {
   setApiToken,
@@ -26,8 +26,8 @@ import { LlmProfileEditor } from "@/components/LlmProfileEditor";
 import { usePrefs, type LanguagePreference } from "@/lib/prefs";
 import { useTheme } from "@/lib/theme";
 import { useI18n } from "@/lib/i18n";
-import { cn, formatBytes } from "@/lib/utils";
-import type { LlmSettings, OnConflict, ServerSettings, WebDavRemoteEntry, WebDavStatus } from "@/types/api";
+import { cn } from "@/lib/utils";
+import type { LlmSettings, OnConflict, ServerSettings, WebDavStatus } from "@/types/api";
 
 const STORAGE_KEY = "marginalia.api_base";
 
@@ -372,23 +372,8 @@ function WebDavSection({ initial }: { initial: WebDavStatus | null }) {
   const [autoSync, setAutoSync] = useState(Boolean(initial?.auto_sync_enabled));
   const [interval, setIntervalValue] = useState(String(initial?.auto_sync_interval_minutes ?? 60));
   const [busy, setBusy] = useState<"save" | "test" | "pull" | null>(null);
-  const [remoteEntries, setRemoteEntries] = useState<WebDavRemoteEntry[]>([]);
-  const [remoteTotal, setRemoteTotal] = useState(0);
-  const [remoteLoading, setRemoteLoading] = useState(false);
-  const [hydratingId, setHydratingId] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-
-  const loadRemoteEntries = async () => {
-    setRemoteLoading(true);
-    try {
-      const result = await webdavSync.remoteEntries(100, 0);
-      setRemoteEntries(result.entries);
-      setRemoteTotal(result.total);
-    } finally {
-      setRemoteLoading(false);
-    }
-  };
 
   useEffect(() => {
     let cancelled = false;
@@ -401,7 +386,6 @@ function WebDavSection({ initial }: { initial: WebDavStatus | null }) {
         setRemotePath(s.remote_path || "/marginalia");
         setAutoSync(Boolean(s.auto_sync_enabled));
         setIntervalValue(String(s.auto_sync_interval_minutes ?? 60));
-        if (s.configured) void loadRemoteEntries();
       },
       () => {},
     );
@@ -460,27 +444,11 @@ function WebDavSection({ initial }: { initial: WebDavStatus | null }) {
     try {
       const result = await webdavSync.pull();
       await refresh();
-      await loadRemoteEntries();
       setMessage(t.settings.webdavPullOk(result.entries, result.remote_files));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(null);
-    }
-  };
-
-  const hydrateRemoteEntry = async (entry: WebDavRemoteEntry) => {
-    setHydratingId(entry.entry_id);
-    setMessage(null);
-    setError(null);
-    try {
-      await webdavSync.hydrate(entry.entry_id);
-      await loadRemoteEntries();
-      setMessage(t.settings.webdavHydrateOk(entry.display_name));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setHydratingId(null);
     }
   };
 
@@ -577,69 +545,6 @@ function WebDavSection({ initial }: { initial: WebDavStatus | null }) {
           {last?.snapshot_id && <Kv k={t.settings.webdavSnapshot} v={last.snapshot_id} mono />}
           {last?.error && <Kv k={t.settings.webdavLastError} v={last.error} />}
         </dl>
-        <div className="rounded-md border border-border bg-bg-subtle">
-          <div className="flex items-center justify-between border-b border-border px-3 py-2">
-            <div>
-              <h3 className="text-sm font-medium">{t.settings.webdavRemoteFiles}</h3>
-              <p className="text-xs text-fg-subtle">
-                {t.settings.webdavRemoteFilesHint(remoteTotal)}
-              </p>
-            </div>
-            <button
-              type="button"
-              onClick={() => { void loadRemoteEntries(); }}
-              disabled={remoteLoading || !status?.configured}
-              className="inline-flex items-center gap-1 rounded-md border border-border bg-bg-base px-2 py-1 text-xs hover:bg-bg-muted disabled:opacity-50"
-            >
-              <RefreshCw size={12} className={remoteLoading ? "animate-spin" : ""} />
-              {t.settings.webdavRefresh}
-            </button>
-          </div>
-          <div className="max-h-80 overflow-y-auto p-2">
-            {remoteLoading && remoteEntries.length === 0 && (
-              <p className="px-1 py-2 text-xs text-fg-subtle">{t.common.loading}</p>
-            )}
-            {!remoteLoading && remoteEntries.length === 0 && (
-              <p className="px-1 py-2 text-xs text-fg-subtle">{t.settings.webdavRemoteFilesEmpty}</p>
-            )}
-            <div className="space-y-1">
-              {remoteEntries.map((entry) => (
-                <div
-                  key={entry.entry_id}
-                  className="flex items-start gap-3 rounded border border-border bg-bg-base px-3 py-2"
-                >
-                  <div className="min-w-0 flex-1">
-                    <div className="flex min-w-0 items-center gap-2">
-                      <span className="truncate text-sm font-medium">{entry.display_name}</span>
-                      {entry.size_bytes !== undefined && (
-                        <span className="shrink-0 text-xs text-fg-subtle">
-                          {formatBytes(entry.size_bytes)}
-                        </span>
-                      )}
-                    </div>
-                    <p className="mt-0.5 truncate font-mono text-xs text-fg-subtle">
-                      {entry.folder_path || "/"}
-                    </p>
-                    {entry.summary && (
-                      <p className="mt-1 line-clamp-2 text-xs text-fg-muted">{entry.summary}</p>
-                    )}
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => { void hydrateRemoteEntry(entry); }}
-                    disabled={hydratingId !== null}
-                    className="inline-flex shrink-0 items-center gap-1 rounded-md border border-border px-2 py-1 text-xs hover:bg-bg-muted disabled:opacity-50"
-                  >
-                    {hydratingId === entry.entry_id
-                      ? <Loader2 size={12} className="animate-spin" />
-                      : <Download size={12} />}
-                    {t.settings.webdavDownload}
-                  </button>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
         {message && <p className="text-xs text-fg-subtle">{message}</p>}
         {error && <p className="text-xs text-danger">{error}</p>}
       </div>

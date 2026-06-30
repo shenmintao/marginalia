@@ -42,7 +42,6 @@ import type {
   WebDavHydrateResult,
   WebDavPullResult,
   WebDavPublishResult,
-  WebDavRemoteEntriesResult,
   WebDavStatus,
 } from "@/types/api";
 import { describeError, frontendLog } from "@/lib/frontendLog";
@@ -481,10 +480,6 @@ export const webdavSync = {
   pull: () => _request<WebDavPullResult>(`/v1/sync/webdav/pull`, {
     method: "POST",
   }),
-  remoteEntries: (limit = 100, offset = 0) =>
-    _request<WebDavRemoteEntriesResult>(
-      `/v1/sync/webdav/remote-entries?limit=${limit}&offset=${offset}`,
-    ),
   hydrate: (entryId: string) =>
     _request<WebDavHydrateResult>(
       `/v1/sync/webdav/hydrate/${encodeURIComponent(entryId)}`,

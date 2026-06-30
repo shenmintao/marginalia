@@ -446,9 +446,9 @@ WEBDAV_REMOTE_PATH=/marginalia
 
 - Library 左侧工具栏云按钮:导出当前知识库快照并上传到 WebDAV。
 - Settings -> WebDAV sync -> Pull metadata:读取远端 `latest.json` 和
-  `*.jsonl`,在本机创建远端待下载索引;这些条目不会直接出现在 Library。
-- Settings -> WebDAV sync 的远端文件清单:按需下载原始 blob。下载成功后,
-  条目才会进入 Library,并可正常预览、搜索和引用。
+  `*.jsonl`,在本机创建 metadata-only 条目并显示在 Library。
+- 打开远端条目时点 “从 WebDAV 下载”:按 sha256 下载原始 blob 到本机后再预览、
+  搜索和引用原文。
 
 这个模式同步的是知识库快照和原始 blob,不是数据库实时复制;tags、summary、
 catalog、relations 会随 metadata 带过来,本机索引和缓存仍由本机维护。

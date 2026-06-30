@@ -445,28 +445,6 @@ export interface WebDavHydrateResult {
   storage_key?: string;
 }
 
-export interface WebDavRemoteEntry {
-  entry_id: string;
-  file_id: string;
-  display_name: string;
-  folder_id: string | null;
-  folder_path?: string | null;
-  size_bytes?: number;
-  mime_type?: string | null;
-  sha256?: string | null;
-  summary?: string | null;
-  snapshot_id?: string | null;
-  imported_at?: string | null;
-}
-
-export interface WebDavRemoteEntriesResult {
-  entries: WebDavRemoteEntry[];
-  count: number;
-  total: number;
-  limit: number;
-  offset: number;
-}
-
 export interface SemanticIndexStatus {
   index_name: string;
   index_dir: string;
