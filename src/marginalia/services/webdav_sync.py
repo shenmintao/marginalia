@@ -497,10 +497,16 @@ async def upload_plan(settings: Settings | None = None) -> dict[str, Any]:
         )
         folder_names = {
             str(item.get("folder_id")): str(item.get("name") or "")
-            for item in _parse_jsonl(pack.metadata_files["folders.jsonl"])
+            for item in _parse_jsonl(
+                pack.metadata_files["folders.jsonl"],
+                source="local folders.jsonl",
+            )
             if item.get("folder_id")
         }
-        local_entries = _parse_jsonl(pack.metadata_files["entries.jsonl"])
+        local_entries = _parse_jsonl(
+            pack.metadata_files["entries.jsonl"],
+            source="local entries.jsonl",
+        )
 
     items: list[dict[str, Any]] = []
     for entry in local_entries:
@@ -524,7 +530,10 @@ async def upload_plan(settings: Settings | None = None) -> dict[str, Any]:
             "folder_id": entry.get("folder_id"),
             "folder_path": _folder_path_from_export(
                 str(entry.get("folder_id") or "") or None,
-                _parse_jsonl(pack.metadata_files["folders.jsonl"]),
+                _parse_jsonl(
+                    pack.metadata_files["folders.jsonl"],
+                    source="local folders.jsonl",
+                ),
                 folder_names,
             ),
             "size_bytes": int(file_meta.get("size_bytes") or 0),
@@ -574,7 +583,7 @@ async def publish_selected(
             )
 
         local_rows = {
-            name: _parse_jsonl(body)
+            name: _parse_jsonl(body, source=f"local {name}")
             for name, body in local_pack.metadata_files.items()
             if name.endswith(".jsonl")
         }
@@ -856,7 +865,10 @@ async def pull_latest_metadata(settings: Settings | None = None) -> dict[str, An
                 files[name] = []
                 continue
             body = await client.read_bytes(_join_remote(snapshot_root, name))
-            files[name] = _parse_jsonl(body)
+            files[name] = _parse_jsonl(
+                body,
+                source=_join_remote(snapshot_root, name),
+            )
 
         async with session_scope() as session:
             result = await _import_metadata(
@@ -1089,7 +1101,10 @@ async def _read_remote_snapshot(
             rows[name] = []
             continue
         body = await client.read_bytes(_join_remote(snapshot_root, name))
-        rows[name] = _parse_jsonl(body)
+        rows[name] = _parse_jsonl(
+            body,
+            source=_join_remote(snapshot_root, name),
+        )
     return {"latest": latest, "manifest": manifest, "rows": rows}
 
 
@@ -1736,13 +1751,23 @@ def _remote_root(settings: Settings) -> str:
     return "/" + "/".join(_split_path(settings.webdav_remote_path or "/marginalia"))
 
 
-def _parse_jsonl(body: bytes) -> list[dict[str, Any]]:
-    text = body.decode("utf-8")
+def _parse_jsonl(body: bytes, *, source: str = "JSONL metadata") -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
-    for line in text.splitlines():
+    for line_number, raw_line in enumerate(body.split(b"\n"), start=1):
+        line = raw_line.rstrip(b"\r")
         if not line.strip():
             continue
-        value = json.loads(line)
+        try:
+            value = json.loads(line)
+        except UnicodeDecodeError as exc:
+            raise WebDavConfigError(
+                f"{source} line {line_number} is not valid UTF-8"
+            ) from exc
+        except json.JSONDecodeError as exc:
+            raise WebDavConfigError(
+                f"{source} line {line_number} is not valid JSON: "
+                f"{exc.msg} at column {exc.colno}"
+            ) from exc
         if isinstance(value, dict):
             out.append(value)
     return out

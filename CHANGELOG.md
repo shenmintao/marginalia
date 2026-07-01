@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.3.1 - 2026-07-01
+
+### Fixed
+
+- WebDAV JSONL metadata parsing now preserves Unicode line separators inside
+  JSON strings and reports the affected metadata file and line on parse errors.
+
 ## 0.3.0 - 2026-07-01
 
 ### Added

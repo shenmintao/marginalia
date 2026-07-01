@@ -60,6 +60,7 @@ from marginalia.services.user_files import (  # noqa: E402
 from marginalia.services.webdav_sync import (  # noqa: E402
     WebDavClient,
     WebDavConfigError,
+    _parse_jsonl,
     download_latest,
     download_plan,
     download_selected,
@@ -102,6 +103,13 @@ async def _read_storage(key: str) -> bytes:
     async for chunk in get_storage().get(key):
         out.extend(chunk)
     return bytes(out)
+
+
+def test_parse_jsonl_preserves_unicode_line_separator_inside_strings() -> None:
+    row = {"description": "first\u2028second", "entry_id": "entry-1"}
+    body = (json.dumps(row, ensure_ascii=False) + "\n").encode("utf-8")
+
+    assert _parse_jsonl(body, source="entries.jsonl") == [row]
 
 
 async def _seed_source() -> dict[str, str | bytes]:
