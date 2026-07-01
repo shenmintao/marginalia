@@ -79,11 +79,13 @@ async function findEpubQuoteCfi(
     if (section.linear !== false) sections.push(section);
   });
 
-  const request = (book as unknown as { request?: unknown }).request;
+  const loadSection = (book as unknown as {
+    load?: (path: string) => Promise<unknown>;
+  }).load?.bind(book);
   for (const section of sections) {
     let loaded = false;
     try {
-      await section.load(request);
+      await section.load(loadSection);
       loaded = true;
       for (const candidate of candidates) {
         const matches = section.search
