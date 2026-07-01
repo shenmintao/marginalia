@@ -1481,7 +1481,7 @@ async def _import_metadata(
     existing_tag_rows = (await session.execute(select(Tag))).scalars().all()
     tags_by_id = {str(row.id): row for row in existing_tag_rows}
     tags_by_key = {
-        (str(row.name), str(row.facet)): row
+        _tag_import_key(row.name, row.facet): row
         for row in existing_tag_rows
     }
     tag_id_map: dict[str, str] = {}
@@ -1492,24 +1492,37 @@ async def _import_metadata(
             continue
         name = str(item.get("name") or "untitled")
         facet = str(item.get("facet") or "extra")
-        key = (name, facet)
+        key = _tag_import_key(name, facet)
         row = tags_by_id.get(tag_id)
         key_row = tags_by_key.get(key)
+        reused_by_key = False
         if key_row is not None and (row is None or key_row.id != row.id):
             row = key_row
+            reused_by_key = True
         if row is None:
             row = Tag(id=tag_id, created_at=_parse_dt(item.get("created_at")) or now)
             session.add(row)
-        old_key = (str(row.name), str(row.facet))
+        old_key = _tag_import_key(row.name, row.facet)
         if old_key != key and tags_by_key.get(old_key) is row:
             tags_by_key.pop(old_key, None)
-        row.name = name
+        if not reused_by_key:
+            row.name = name
         row.facet = facet
         row.alias_of = None
-        row.doc_count = int(item.get("doc_count") or 0)
-        row.last_used_at = _parse_dt(item.get("last_used_at"))
-        row.last_reaffirmed_at = _parse_dt(item.get("last_reaffirmed_at"))
-        row.reaffirm_count = int(item.get("reaffirm_count") or 0)
+        doc_count = int(item.get("doc_count") or 0)
+        reaffirm_count = int(item.get("reaffirm_count") or 0)
+        last_used_at = _parse_dt(item.get("last_used_at"))
+        last_reaffirmed_at = _parse_dt(item.get("last_reaffirmed_at"))
+        if reused_by_key:
+            row.doc_count = max(int(row.doc_count or 0), doc_count)
+            row.last_used_at = _max_dt(row.last_used_at, last_used_at)
+            row.last_reaffirmed_at = _max_dt(row.last_reaffirmed_at, last_reaffirmed_at)
+            row.reaffirm_count = max(int(row.reaffirm_count or 0), reaffirm_count)
+        else:
+            row.doc_count = doc_count
+            row.last_used_at = last_used_at
+            row.last_reaffirmed_at = last_reaffirmed_at
+            row.reaffirm_count = reaffirm_count
         row.updated_at = _parse_dt(item.get("updated_at")) or now
         tags_by_id[str(row.id)] = row
         tags_by_key[key] = row
@@ -1898,6 +1911,18 @@ def _parse_dt(value: Any) -> datetime | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def _max_dt(a: datetime | None, b: datetime | None) -> datetime | None:
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return max(a, b)
+
+
+def _tag_import_key(name: str, facet: str) -> tuple[str, str]:
+    return (str(name).strip().casefold(), str(facet).strip())
 
 
 def _as_int(value: Any, default: int = 0) -> int:

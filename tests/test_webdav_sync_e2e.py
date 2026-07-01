@@ -407,7 +407,7 @@ async def test_pull_metadata_reuses_existing_tag_name_facet(monkeypatch: pytest.
     async with factory() as session:
         session.add(Tag(
             id=local_tag_id,
-            name="webdav",
+            name="WEBDAV",
             facet="topic",
             alias_of=None,
             doc_count=0,
@@ -428,10 +428,12 @@ async def test_pull_metadata_reuses_existing_tag_name_facet(monkeypatch: pytest.
     async with factory() as session:
         matching_tags = (
             await session.execute(
-                select(Tag).where(Tag.name == "webdav", Tag.facet == "topic")
+                select(Tag).where(Tag.facet == "topic")
             )
         ).scalars().all()
-        assert [tag.id for tag in matching_tags] == [local_tag_id]
+        assert [(tag.id, tag.name.casefold()) for tag in matching_tags] == [
+            (local_tag_id, "webdav")
+        ]
         entry_tag_id = await session.scalar(
             select(EntryTag.tag_id).where(EntryTag.entry_id == str(seeded["entry_id"]))
         )
