@@ -20,7 +20,7 @@ from urllib.parse import quote
 import uuid
 
 import httpx
-from sqlalchemy import delete, select
+from sqlalchemy import delete, null, select
 
 from marginalia import __version__
 from marginalia.config import Settings, get_settings
@@ -1787,7 +1787,13 @@ async def _import_metadata(
         row.tags = item.get("tags") if isinstance(item.get("tags"), list) else []
         row.source_kind = str(item.get("source_kind") or "reflect_turn")
         row.superseded_by_id = None
-        row.summarized_journal_ids = item.get("summarized_journal_ids")
+        if row.source_kind == "insight":
+            summarized_ids = item.get("summarized_journal_ids")
+            row.summarized_journal_ids = (
+                summarized_ids if isinstance(summarized_ids, list) else []
+            )
+        else:
+            row.summarized_journal_ids = null()
         row.invalidated_at = _parse_dt(item.get("invalidated_at"))
         row.invalidated_by_id = None
         row.invalidated_reason = item.get("invalidated_reason")

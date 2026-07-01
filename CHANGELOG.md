@@ -25,6 +25,9 @@
 - WebDAV download sync now reuses existing local tags with the same name and
   facet, including case-only variants such as `FAQ`/`faq`, avoiding
   `tags(name, facet)` uniqueness failures when importing a remote snapshot.
+- WebDAV metadata import now writes `summarized_journal_ids` as SQL NULL for
+  `reflect_turn` journal rows, avoiding the journal integrity check failure
+  exposed by existing remote snapshots.
 - The WebDAV download sync dialog now uses a download icon instead of matching
   the upload sync icon.
 

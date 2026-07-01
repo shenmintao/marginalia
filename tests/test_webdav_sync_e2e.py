@@ -106,6 +106,13 @@ async def _read_storage(key: str) -> bytes:
     return bytes(out)
 
 
+def _jsonl_test_bytes(rows: list[dict[str, object]]) -> bytes:
+    return (
+        "\n".join(json.dumps(row, ensure_ascii=False, sort_keys=True) for row in rows)
+        + "\n"
+    ).encode("utf-8")
+
+
 def test_parse_jsonl_preserves_unicode_line_separator_inside_strings() -> None:
     row = {"description": "first\u2028second", "entry_id": "entry-1"}
     body = (json.dumps(row, ensure_ascii=False) + "\n").encode("utf-8")
@@ -438,6 +445,91 @@ async def test_pull_metadata_reuses_existing_tag_name_facet(monkeypatch: pytest.
             select(EntryTag.tag_id).where(EntryTag.entry_id == str(seeded["entry_id"]))
         )
         assert entry_tag_id == local_tag_id
+
+
+async def test_pull_metadata_merges_case_variant_tags_inside_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_home = _TEST_ROOT / "source_snapshot_case_tags"
+    dest_home = _TEST_ROOT / "dest_snapshot_case_tags"
+    await _activate_home(source_home)
+    seeded = await _seed_source()
+    remote, manifest = await _build_remote_pack()
+    snapshot_root = f"/marginalia-test/snapshots/{manifest['snapshot_id']}"
+    upper_tag_id = new_id()
+    lower_tag_id = new_id()
+    now = datetime.now(timezone.utc).isoformat()
+
+    tags = [
+        {
+            "tag_id": upper_tag_id,
+            "name": "FAQ",
+            "facet": "form",
+            "alias_of": None,
+            "doc_count": 2,
+            "last_used_at": now,
+            "last_reaffirmed_at": None,
+            "reaffirm_count": 0,
+            "created_at": now,
+            "updated_at": now,
+        },
+        {
+            "tag_id": lower_tag_id,
+            "name": "faq",
+            "facet": "form",
+            "alias_of": None,
+            "doc_count": 0,
+            "last_used_at": now,
+            "last_reaffirmed_at": None,
+            "reaffirm_count": 0,
+            "created_at": now,
+            "updated_at": now,
+        },
+    ]
+    remote[f"{snapshot_root}/tags.jsonl"] = _jsonl_test_bytes(tags)
+
+    entries = _parse_jsonl(remote[f"{snapshot_root}/entries.jsonl"])
+    entries[0]["tags"] = [
+        {
+            "tag_id": upper_tag_id,
+            "source": "ingest",
+            "created_at": now,
+            "last_reaffirmed_at": None,
+            "reaffirm_count": 0,
+        },
+        {
+            "tag_id": lower_tag_id,
+            "source": "ingest",
+            "created_at": now,
+            "last_reaffirmed_at": None,
+            "reaffirm_count": 0,
+        },
+    ]
+    remote[f"{snapshot_root}/entries.jsonl"] = _jsonl_test_bytes(entries)
+
+    await _activate_home(dest_home)
+    _MemoryWebDavClient.remote = remote
+    monkeypatch.setattr(
+        "marginalia.services.webdav_sync.WebDavClient",
+        _MemoryWebDavClient,
+    )
+
+    pulled = await pull_latest_metadata()
+    assert pulled["entries"] == 1
+    assert pulled["entry_tags"] == 1
+
+    factory = get_session_factory()
+    async with factory() as session:
+        tags = (
+            await session.execute(select(Tag).where(Tag.facet == "form"))
+        ).scalars().all()
+        assert [(tag.id, tag.name) for tag in tags] == [(upper_tag_id, "FAQ")]
+        entry_tag_ids = (
+            await session.execute(
+                select(EntryTag.tag_id).where(EntryTag.entry_id == str(seeded["entry_id"]))
+            )
+        ).scalars().all()
+        assert entry_tag_ids == [upper_tag_id]
 
 
 async def test_selected_upload_publishes_chosen_entries(monkeypatch: pytest.MonkeyPatch) -> None:
