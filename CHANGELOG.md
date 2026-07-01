@@ -22,6 +22,11 @@
   searches the spine to jump to the cited passage.
 - WebDAV JSONL metadata parsing now preserves Unicode line separators inside
   JSON strings and reports the affected metadata file and line on parse errors.
+- WebDAV download sync now reuses existing local tags with the same name and
+  facet, avoiding `tags(name, facet)` uniqueness failures when importing a
+  remote snapshot.
+- The WebDAV download sync dialog now uses a download icon instead of matching
+  the upload sync icon.
 
 ## 0.2.11 - 2026-06-30
 

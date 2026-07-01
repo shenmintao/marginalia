@@ -8,7 +8,7 @@
  *                       target via /v1/folders before uploading each file.
  */
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Filter, X, Upload, FolderPlus, Loader2 } from "lucide-react";
+import { Filter, X, Upload, Download, FolderPlus, Loader2 } from "lucide-react";
 
 import { folders as foldersApi, uploads, ApiError, settings as settingsApi, webdavSync } from "@/api/client";
 import type { OnConflict, WebDavPlanItem, WebDavPlanResult, WebDavSyncLast } from "@/types/api";
@@ -474,6 +474,7 @@ export function WebDavSyncDialog({
   const title = mode === "upload"
     ? t.library.webdavUploadSyncTitle
     : t.library.webdavDownloadSyncTitle;
+  const TitleIcon = mode === "upload" ? Upload : Download;
 
   const refreshPlan = async () => {
     setLoading(true);
@@ -557,7 +558,7 @@ export function WebDavSyncDialog({
 
   return (
     <ModalShell
-      title={<><Upload size={14} /> {title}</>}
+      title={<><TitleIcon size={14} /> {title}</>}
       onClose={onClose}
       wide
     >

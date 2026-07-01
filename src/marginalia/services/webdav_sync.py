@@ -1478,40 +1478,65 @@ async def _import_metadata(
         row.deleted_at = None
         imported["views"] += 1
 
+    existing_tag_rows = (await session.execute(select(Tag))).scalars().all()
+    tags_by_id = {str(row.id): row for row in existing_tag_rows}
+    tags_by_key = {
+        (str(row.name), str(row.facet)): row
+        for row in existing_tag_rows
+    }
+    tag_id_map: dict[str, str] = {}
     tag_alias_of_updates: list[tuple[str, str | None]] = []
     for item in rows.get("tags.jsonl", []):
         tag_id = str(item.get("tag_id") or "")
         if not tag_id:
             continue
-        row = await session.get(Tag, tag_id)
+        name = str(item.get("name") or "untitled")
+        facet = str(item.get("facet") or "extra")
+        key = (name, facet)
+        row = tags_by_id.get(tag_id)
+        key_row = tags_by_key.get(key)
+        if key_row is not None and (row is None or key_row.id != row.id):
+            row = key_row
         if row is None:
             row = Tag(id=tag_id, created_at=_parse_dt(item.get("created_at")) or now)
             session.add(row)
-        row.name = str(item.get("name") or "untitled")
-        row.facet = str(item.get("facet") or "extra")
+        old_key = (str(row.name), str(row.facet))
+        if old_key != key and tags_by_key.get(old_key) is row:
+            tags_by_key.pop(old_key, None)
+        row.name = name
+        row.facet = facet
         row.alias_of = None
         row.doc_count = int(item.get("doc_count") or 0)
         row.last_used_at = _parse_dt(item.get("last_used_at"))
         row.last_reaffirmed_at = _parse_dt(item.get("last_reaffirmed_at"))
         row.reaffirm_count = int(item.get("reaffirm_count") or 0)
         row.updated_at = _parse_dt(item.get("updated_at")) or now
-        tag_alias_of_updates.append((tag_id, item.get("alias_of")))
+        tags_by_id[str(row.id)] = row
+        tags_by_key[key] = row
+        tag_id_map[tag_id] = str(row.id)
+        tag_alias_of_updates.append((str(row.id), item.get("alias_of")))
         imported["tags"] += 1
 
     if rows.get("tags.jsonl"):
         await session.flush()
         for tag_id, alias_of in tag_alias_of_updates:
-            row = await session.get(Tag, tag_id)
+            row = tags_by_id.get(tag_id) or await session.get(Tag, tag_id)
             if row is None:
                 continue
-            if alias_of and await session.get(Tag, str(alias_of)):
-                row.alias_of = str(alias_of)
+            alias_of_id = tag_id_map.get(str(alias_of or ""), str(alias_of or ""))
+            if alias_of_id and alias_of_id != row.id and tags_by_id.get(alias_of_id):
+                row.alias_of = alias_of_id
         await session.flush()
 
     for item in rows.get("tag_aliases.jsonl", []):
         alias_id = str(item.get("tag_alias_id") or "")
-        to_tag_id = str(item.get("to_tag_id") or "")
+        to_tag_id = tag_id_map.get(
+            str(item.get("to_tag_id") or ""),
+            str(item.get("to_tag_id") or ""),
+        )
         if not alias_id or not to_tag_id:
+            continue
+        if not tags_by_id.get(to_tag_id) and await session.get(Tag, to_tag_id) is None:
             continue
         row = await session.get(TagAlias, alias_id)
         if row is None:
@@ -1604,17 +1629,24 @@ async def _import_metadata(
         await session.flush()
 
         await session.execute(delete(EntryTag).where(EntryTag.entry_id == entry_id))
+        attached_tag_ids: set[str] = set()
         for tag in item.get("tags") or []:
             if not isinstance(tag, dict) or not tag.get("tag_id"):
                 continue
+            tag_id = tag_id_map.get(str(tag["tag_id"]), str(tag["tag_id"]))
+            if tag_id in attached_tag_ids:
+                continue
+            if not tags_by_id.get(tag_id) and await session.get(Tag, tag_id) is None:
+                continue
             session.add(EntryTag(
                 entry_id=entry_id,
-                tag_id=str(tag["tag_id"]),
+                tag_id=tag_id,
                 source=str(tag.get("source") or "ingest"),
                 created_at=_parse_dt(tag.get("created_at")) or now,
                 last_reaffirmed_at=_parse_dt(tag.get("last_reaffirmed_at")),
                 reaffirm_count=int(tag.get("reaffirm_count") or 0),
             ))
+            attached_tag_ids.add(tag_id)
             imported["entry_tags"] += 1
 
     if rows.get("entries.jsonl"):

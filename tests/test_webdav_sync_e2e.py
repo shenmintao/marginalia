@@ -393,6 +393,51 @@ async def test_pull_metadata_then_hydrate_on_demand(monkeypatch: pytest.MonkeyPa
         assert await session.scalar(select(func.count(Journal.id))) == 1
 
 
+async def test_pull_metadata_reuses_existing_tag_name_facet(monkeypatch: pytest.MonkeyPatch) -> None:
+    source_home = _TEST_ROOT / "source_existing_tag"
+    dest_home = _TEST_ROOT / "dest_existing_tag"
+    await _activate_home(source_home)
+    seeded = await _seed_source()
+    remote, _manifest = await _build_remote_pack()
+
+    await _activate_home(dest_home)
+    local_tag_id = new_id()
+    now = datetime.now(timezone.utc)
+    factory = get_session_factory()
+    async with factory() as session:
+        session.add(Tag(
+            id=local_tag_id,
+            name="webdav",
+            facet="topic",
+            alias_of=None,
+            doc_count=0,
+            created_at=now,
+            updated_at=now,
+        ))
+        await session.commit()
+
+    _MemoryWebDavClient.remote = remote
+    monkeypatch.setattr(
+        "marginalia.services.webdav_sync.WebDavClient",
+        _MemoryWebDavClient,
+    )
+
+    pulled = await pull_latest_metadata()
+    assert pulled["entries"] == 1
+
+    async with factory() as session:
+        matching_tags = (
+            await session.execute(
+                select(Tag).where(Tag.name == "webdav", Tag.facet == "topic")
+            )
+        ).scalars().all()
+        assert [tag.id for tag in matching_tags] == [local_tag_id]
+        entry_tag_id = await session.scalar(
+            select(EntryTag.tag_id).where(EntryTag.entry_id == str(seeded["entry_id"]))
+        )
+        assert entry_tag_id == local_tag_id
+
+
 async def test_selected_upload_publishes_chosen_entries(monkeypatch: pytest.MonkeyPatch) -> None:
     source_home = _TEST_ROOT / "source_selected_upload"
     await _activate_home(source_home)
