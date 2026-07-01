@@ -194,6 +194,7 @@ export function FileViewer({ entryId, meta, locator, onLocatorConsumed, onHydrat
             url={contentUrl}
             name={name}
             downloadUrl={downloadUrl}
+            quote={quoteLoc}
             page={Number.isFinite(pageLoc as number) ? (pageLoc as number) : null}
             onScrolled={onLocatorConsumed}
           />

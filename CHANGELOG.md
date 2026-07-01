@@ -18,6 +18,8 @@
 - Follow-up chat turns now give the planner lightweight same-session context,
   so terse requests like "continue" or "expand that" stay on the prior topic
   instead of being mistaken for standalone small talk.
+- EPUB citation links now carry quote locators and the desktop EPUB viewer
+  searches the spine to jump to the cited passage.
 - WebDAV JSONL metadata parsing now preserves Unicode line separators inside
   JSON strings and reports the affected metadata file and line on parse errors.
 

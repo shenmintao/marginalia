@@ -11,10 +11,19 @@ import {
 type EpubBookInstance = import("epubjs").Book;
 type EpubRenditionInstance = import("epubjs").Rendition;
 type EpubLocation = import("epubjs").Location;
+type EpubSearchMatch = { cfi?: unknown; excerpt?: unknown };
+interface EpubSectionSearchable {
+  linear?: boolean;
+  load: (request?: unknown) => Promise<unknown>;
+  search?: (query: string, maxSeqEle?: number) => EpubSearchMatch[];
+  find?: (query: string) => EpubSearchMatch[];
+  unload?: () => void;
+}
 const EPUB_MIN_FONT = 80;
 const EPUB_MAX_FONT = 160;
 const EPUB_FONT_STEP = 10;
 const EPUB_LOCATION_CHARS = 1000;
+const EPUB_QUOTE_CANDIDATE_MAX = 80;
 
 interface EpubProgress {
   atStart: boolean;
@@ -43,10 +52,60 @@ function epubProgress(book: EpubBookInstance | null, loc: EpubLocation | null | 
   return progress;
 }
 
-export function EpubView({ url, name, downloadUrl, page, onScrolled }: {
+function epubQuoteCandidates(quote: string): string[] {
+  const normalized = quote.replace(/\s+/g, " ").trim();
+  const raw = quote.trim();
+  const candidates = [
+    raw,
+    normalized,
+    normalized.slice(0, EPUB_QUOTE_CANDIDATE_MAX).trim(),
+  ].filter((value) => value.length >= 4);
+  return [...new Set(candidates)];
+}
+
+async function findEpubQuoteCfi(
+  book: EpubBookInstance,
+  quote: string,
+): Promise<string | null> {
+  const candidates = epubQuoteCandidates(quote);
+  if (candidates.length === 0) return null;
+  await book.ready;
+
+  const sections: EpubSectionSearchable[] = [];
+  const spine = book.spine as unknown as {
+    each: (fn: (section: EpubSectionSearchable) => void) => void;
+  };
+  spine.each((section) => {
+    if (section.linear !== false) sections.push(section);
+  });
+
+  const request = (book as unknown as { request?: unknown }).request;
+  for (const section of sections) {
+    let loaded = false;
+    try {
+      await section.load(request);
+      loaded = true;
+      for (const candidate of candidates) {
+        const matches = section.search
+          ? section.search(candidate, 8)
+          : section.find?.(candidate) || [];
+        const cfi = matches.find((match) => typeof match.cfi === "string")?.cfi;
+        if (typeof cfi === "string" && cfi) return cfi;
+      }
+    } catch {
+      continue;
+    } finally {
+      if (loaded) section.unload?.();
+    }
+  }
+  return null;
+}
+
+export function EpubView({ url, name, downloadUrl, quote, page, onScrolled }: {
   url: string;
   name: string;
   downloadUrl: string;
+  quote: string | null;
   page: number | null;
   onScrolled?: () => void;
 }) {
@@ -86,6 +145,17 @@ export function EpubView({ url, name, downloadUrl, page, onScrolled }: {
     await rendition.display(cfi);
     updateLocation(rendition.currentLocation() as unknown as EpubLocation | null);
   }, [location.totalPages, updateLocation]);
+
+  const goToQuote = useCallback(async (rawQuote: string): Promise<boolean> => {
+    const book = bookRef.current;
+    const rendition = renditionRef.current;
+    if (!book || !rendition) return false;
+    const cfi = await findEpubQuoteCfi(book, rawQuote);
+    if (!cfi) return false;
+    await rendition.display(cfi);
+    updateLocation(rendition.currentLocation() as unknown as EpubLocation | null);
+    return true;
+  }, [updateLocation]);
 
   const commitPageInput = useCallback(() => {
     const parsed = parseInt(pageInput, 10);
@@ -170,12 +240,22 @@ export function EpubView({ url, name, downloadUrl, page, onScrolled }: {
   }, [updateLocation, url]);
 
   useEffect(() => {
-    if (!ready || !location.totalPages || page == null || page < 1) return;
+    if (!ready) return;
+    if (quote?.trim()) {
+      const key = `${url}:q:${quote}`;
+      if (appliedLocatorRef.current === key) return;
+      appliedLocatorRef.current = key;
+      void goToQuote(quote).then((found) => {
+        if (found) onScrolled?.();
+      });
+      return;
+    }
+    if (!location.totalPages || page == null || page < 1) return;
     const key = `${url}:${page}:${location.totalPages}`;
     if (appliedLocatorRef.current === key) return;
     appliedLocatorRef.current = key;
     void goToPage(page).then(onScrolled);
-  }, [goToPage, location.totalPages, onScrolled, page, ready, url]);
+  }, [goToPage, goToQuote, location.totalPages, onScrolled, page, quote, ready, url]);
 
   useEffect(() => {
     renditionRef.current?.themes.fontSize(`${fontSize}%`);

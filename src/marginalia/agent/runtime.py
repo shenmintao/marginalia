@@ -919,6 +919,7 @@ _TEXT_SEARCHABLE_EXTS = frozenset({
     "py", "rb", "go", "rs", "java", "c", "h", "cpp", "hpp",
     "sh", "bash", "zsh", "ps1", "docx", "pptx", "pptm",
 })
+_EPUB_MIMES = frozenset({"application/epub+zip"})
 
 
 def _is_pdf_file(file: Any) -> bool:
@@ -955,6 +956,7 @@ def _pick_query_string(
     mime = (getattr(file, "mime_type", None) or "").lower()
     ext = (getattr(file, "original_ext", None) or "").lower().lstrip(".")
     kind = (getattr(file, "kind", None) or "").lower()
+    is_epub = ext == "epub" or mime in _EPUB_MIMES
     is_presentation = (
         ext in {"pptx", "pptm"}
         or "presentationml.presentation" in mime
@@ -966,6 +968,8 @@ def _pick_query_string(
         if quote:
             return f"?q={urllib.parse.quote_plus(_unescape_quote(quote))}"
         return ""
+    if is_epub and quote:
+        return f"?q={urllib.parse.quote_plus(_unescape_quote(quote))}"
     is_text_searchable = (
         kind in _TEXT_SEARCHABLE_KINDS
         or ext in _TEXT_SEARCHABLE_EXTS

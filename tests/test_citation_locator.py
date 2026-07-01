@@ -481,7 +481,15 @@ async def _check_rewrite():
         expected_q = urllib.parse.quote_plus("contract clause")
         assert f"[my-doc.md](entry:{eid}?q={expected_q})" in out, out
 
-        # 20. pptx viewer exposes a searchable text-selection layer.
+        # 20. epub viewer can search rendered spine text by quote.
+        set_file(mime_type="application/epub+zip", original_ext="epub", kind="ebook")
+        out = await rt._rewrite_footnotes_for_display(
+            f'body[^a]\n\n[^a]: entry_id={eid}, quote="chapter phrase" - r',
+        )
+        expected_q = urllib.parse.quote_plus("chapter phrase")
+        assert f"[my-doc.md](entry:{eid}?q={expected_q})" in out, out
+
+        # 21. pptx viewer exposes a searchable text-selection layer.
         set_file(
             mime_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
             original_ext="pptx",
@@ -493,13 +501,13 @@ async def _check_rewrite():
         expected_q = urllib.parse.quote_plus("slide bullet")
         assert f"[my-doc.md](entry:{eid}?q={expected_q})" in out, out
 
-        # 21. pptx page-only citations fall back to slide number.
+        # 22. pptx page-only citations fall back to slide number.
         out = await rt._rewrite_footnotes_for_display(
             f"body[^a]\n\n[^a]: entry_id={eid}, page=2 - r",
         )
         assert f"[my-doc.md](entry:{eid}?page=2)" in out, out
 
-        # 22. pptx with quote + page still uses the numeric slide locator;
+        # 23. pptx with quote + page still uses the numeric slide locator;
         # quote search is only a fallback when the page/slide is absent.
         out = await rt._rewrite_footnotes_for_display(
             f'body[^a]\n\n[^a]: entry_id={eid}, quote="slide bullet", page=6 - r',
@@ -507,7 +515,7 @@ async def _check_rewrite():
         assert f"[my-doc.md](entry:{eid}?page=6)" in out, out
         assert "?q=" not in out, out
 
-        # 23. Legacy slide= is accepted but normalized to ?page=N.
+        # 24. Legacy slide= is accepted but normalized to ?page=N.
         out = await rt._rewrite_footnotes_for_display(
             f'body[^a]\n\n[^a]: entry_id={eid}, quote="slide bullet", slide=8 - r',
         )
