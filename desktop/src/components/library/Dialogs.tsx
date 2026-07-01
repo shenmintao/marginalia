@@ -11,7 +11,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Filter, X, Upload, FolderPlus, Loader2 } from "lucide-react";
 
 import { folders as foldersApi, uploads, ApiError, settings as settingsApi, webdavSync } from "@/api/client";
-import type { OnConflict, WebDavPlanItem, WebDavPlanResult } from "@/types/api";
+import type { OnConflict, WebDavPlanItem, WebDavPlanResult, WebDavSyncLast } from "@/types/api";
 import { cn, formatBytes } from "@/lib/utils";
 import { useI18n } from "@/lib/i18n";
 
@@ -469,6 +469,7 @@ export function WebDavSyncDialog({
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
   const [running, setRunning] = useState(false);
+  const [runningStatus, setRunningStatus] = useState<WebDavSyncLast | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const title = mode === "upload"
     ? t.library.webdavUploadSyncTitle
@@ -494,6 +495,23 @@ export function WebDavSyncDialog({
     void refreshPlan();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode]);
+
+  useEffect(() => {
+    if (!running) return;
+    let cancelled = false;
+    const tick = () => webdavSync.status().then(
+      (status) => {
+        if (!cancelled) setRunningStatus(status.last ?? null);
+      },
+      () => {},
+    );
+    tick();
+    const handle = window.setInterval(tick, 1000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(handle);
+    };
+  }, [running]);
 
   const selectedBytes = useMemo(() => {
     if (!plan) return 0;
@@ -521,6 +539,7 @@ export function WebDavSyncDialog({
   const run = async () => {
     if (running || selected.size === 0) return;
     setRunning(true);
+    setRunningStatus(null);
     setErr(null);
     try {
       const entryIds = [...selected];
@@ -532,6 +551,7 @@ export function WebDavSyncDialog({
       setErr(e instanceof Error ? e.message : String(e));
     } finally {
       setRunning(false);
+      setRunningStatus(null);
     }
   };
 
@@ -564,6 +584,11 @@ export function WebDavSyncDialog({
               <span>{t.library.webdavSelectedSummary(selected.size, plan.items.length, formatBytes(selectedBytes))}</span>
             </label>
           </div>
+          {running && (
+            <div className="mb-2 rounded-md border border-border bg-bg-subtle px-3 py-2 text-xs text-fg-muted">
+              {webdavProgressText(runningStatus, mode, t)}
+            </div>
+          )}
           <div className="max-h-[52vh] overflow-y-auto rounded-md border border-border">
             {plan.items.length === 0 ? (
               <div className="px-3 py-8 text-center text-sm text-fg-muted">
@@ -638,6 +663,37 @@ function remoteUpdated(
   return plan?.remote_updated_at
     ? new Date(plan.remote_updated_at).toLocaleString()
     : t.common.unset;
+}
+
+function webdavProgressText(
+  status: WebDavSyncLast | null,
+  mode: "upload" | "download",
+  t: ReturnType<typeof useI18n>["t"],
+): string {
+  const fallback = mode === "upload"
+    ? t.library.webdavUploadRunning
+    : t.library.webdavPullRunning;
+  if (!status) return fallback;
+  if (status.status !== "running") return fallback;
+  const parts = [t.library.webdavSyncPhase(status.phase || "running")];
+  if (status.selected_entries != null) {
+    parts.push(t.library.webdavProgressEntries(status.selected_entries));
+  }
+  if (status.total_blobs != null) {
+    parts.push(t.library.webdavProgressBlobs(
+      status.processed_blobs ?? ((status.uploaded_blobs ?? 0) + (status.skipped_blobs ?? 0)),
+      status.total_blobs,
+      status.uploaded_blobs ?? 0,
+      status.skipped_blobs ?? 0,
+    ));
+  }
+  if (status.total_metadata_files != null) {
+    parts.push(t.library.webdavProgressMetadata(
+      status.uploaded_metadata_files ?? 0,
+      status.total_metadata_files,
+    ));
+  }
+  return parts.join(" · ");
 }
 
 function WebDavPlanRow({

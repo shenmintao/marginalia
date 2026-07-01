@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from collections.abc import AsyncIterator
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -49,7 +50,7 @@ from marginalia.db.models import (  # noqa: E402
     Session,
     Tag,
 )
-from marginalia.services.knowledge_pack import build_knowledge_pack  # noqa: E402
+from marginalia.services.knowledge_pack import build_knowledge_pack, new_snapshot_id  # noqa: E402
 from marginalia.services.user_files import (  # noqa: E402
     EntryRemoteNotHydratedError,
     FolderRemoteNotHydratedError,
@@ -110,6 +111,12 @@ def test_parse_jsonl_preserves_unicode_line_separator_inside_strings() -> None:
     body = (json.dumps(row, ensure_ascii=False) + "\n").encode("utf-8")
 
     assert _parse_jsonl(body, source="entries.jsonl") == [row]
+
+
+def test_new_snapshot_id_is_git_like_hex() -> None:
+    snapshot_id = new_snapshot_id()
+
+    assert re.fullmatch(r"[0-9a-f]{16}", snapshot_id)
 
 
 async def _seed_source() -> dict[str, str | bytes]:
@@ -402,7 +409,9 @@ async def test_selected_upload_publishes_chosen_entries(monkeypatch: pytest.Monk
 
     published = await publish_selected([str(seeded["entry_id"])])
     assert published["selected_entries"] == 1
+    assert re.fullmatch(r"[0-9a-f]{16}", str(published["snapshot_id"]))
     latest = json.loads(_MemoryWebDavClient.remote["/marginalia-test/latest.json"].decode("utf-8"))
+    assert latest["snapshot_id"] == published["snapshot_id"]
     snapshot_root = f"/marginalia-test/snapshots/{latest['snapshot_id']}"
     entries = [
         json.loads(line)

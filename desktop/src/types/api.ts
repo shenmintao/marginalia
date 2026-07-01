@@ -388,13 +388,19 @@ export interface ServerSettings {
 export interface WebDavSyncLast {
   ok?: boolean;
   status?: "running" | "success" | "failed" | string;
+  phase?: string | null;
   started_at?: string | null;
   finished_at?: string | null;
   snapshot_id?: string | null;
   remote_path?: string | null;
   latest_snapshot?: string | null;
+  selected_entries?: number;
+  selected_files?: number;
+  total_blobs?: number;
+  processed_blobs?: number;
   uploaded_blobs?: number;
   skipped_blobs?: number;
+  total_metadata_files?: number;
   uploaded_metadata_files?: number;
   entry_count?: number;
   blob_count?: number;
@@ -501,8 +507,11 @@ export interface WebDavPublishSelectedResult {
   latest_snapshot?: string | null;
   selected_entries?: number;
   selected_files?: number;
+  total_blobs?: number;
+  processed_blobs?: number;
   uploaded_blobs?: number;
   skipped_blobs?: number;
+  total_metadata_files?: number;
   uploaded_metadata_files?: number;
   entry_count?: number;
   blob_count?: number;

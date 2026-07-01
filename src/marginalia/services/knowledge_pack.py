@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 import json
 import platform
+import secrets
 from typing import Any
 
 from sqlalchemy import select
@@ -57,9 +58,14 @@ class KnowledgePack:
     blobs: list[BlobSource]
 
 
-def new_snapshot_id(now: datetime | None = None) -> str:
-    now = now or datetime.now(timezone.utc)
-    return now.astimezone(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
+def new_snapshot_id(_now: datetime | None = None) -> str:
+    """Return a short, path-safe snapshot identifier.
+
+    Timestamps live in manifest.created_at/latest.updated_at. The snapshot id is
+    intentionally Git-like so it works as a stable directory/key identifier
+    without looking like the user-facing time.
+    """
+    return secrets.token_hex(8)
 
 
 def blob_path(sha256: str) -> str:

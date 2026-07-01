@@ -572,9 +572,31 @@ async def publish_selected(
     snapshot_root = _join_remote(root, "snapshots", snapshot_id)
     storage = get_storage()
     client = WebDavClient(s)
+    progress_base = {
+        "ok": None,
+        "status": "running",
+        "started_at": started_at,
+        "finished_at": None,
+        "snapshot_id": snapshot_id,
+        "remote_path": root,
+        "selected_entries": len(selected),
+        "uploaded_blobs": 0,
+        "skipped_blobs": 0,
+        "uploaded_metadata_files": 0,
+        "error": None,
+    }
+
+    def write_progress(phase: str, **extra: Any) -> None:
+        _write_status(s, {**progress_base, "phase": phase, **extra})
+
+    uploaded_blobs = 0
+    skipped_blobs = 0
+    uploaded_metadata_files = 0
     try:
+        write_progress("reading_remote")
         remote = await _read_remote_snapshot(client, root, allow_missing=True)
 
+        write_progress("building_snapshot")
         async with session_scope() as session:
             local_pack = await build_knowledge_pack(
                 session,
@@ -609,16 +631,29 @@ async def publish_selected(
             )
         ]
 
+        write_progress(
+            "preparing_remote",
+            selected_entries=len(local_entries),
+            selected_files=len(selected_file_ids),
+            total_blobs=len(local_blobs),
+        )
         await client.ensure_dir(root)
         await client.ensure_dir(_join_remote(root, "blobs"))
         await client.ensure_dir(snapshot_root)
 
-        uploaded_blobs = 0
-        skipped_blobs = 0
-        for blob in local_blobs:
+        for index, blob in enumerate(local_blobs, start=1):
             remote_blob = _join_remote(root, blob.remote_path)
             if await client.exists(remote_blob):
                 skipped_blobs += 1
+                write_progress(
+                    "uploading_blobs",
+                    selected_entries=len(local_entries),
+                    selected_files=len(selected_file_ids),
+                    total_blobs=len(local_blobs),
+                    processed_blobs=index,
+                    uploaded_blobs=uploaded_blobs,
+                    skipped_blobs=skipped_blobs,
+                )
                 continue
             await client.put_stream(
                 remote_blob,
@@ -626,7 +661,25 @@ async def publish_selected(
                 content_type=blob.mime_type,
             )
             uploaded_blobs += 1
+            write_progress(
+                "uploading_blobs",
+                selected_entries=len(local_entries),
+                selected_files=len(selected_file_ids),
+                total_blobs=len(local_blobs),
+                processed_blobs=index,
+                uploaded_blobs=uploaded_blobs,
+                skipped_blobs=skipped_blobs,
+            )
 
+        write_progress(
+            "merging_metadata",
+            selected_entries=len(local_entries),
+            selected_files=len(selected_file_ids),
+            total_blobs=len(local_blobs),
+            processed_blobs=len(local_blobs),
+            uploaded_blobs=uploaded_blobs,
+            skipped_blobs=skipped_blobs,
+        )
         combined_rows = _merge_snapshot_rows(
             remote_rows=remote_rows,
             local_rows=local_rows,
@@ -638,7 +691,6 @@ async def publish_selected(
             rows=combined_rows,
         )
         metadata_files = _metadata_files_for_rows(manifest, combined_rows)
-        uploaded_metadata_files = 0
         for name, body in metadata_files.items():
             await client.put_bytes(
                 _join_remote(snapshot_root, name),
@@ -646,6 +698,17 @@ async def publish_selected(
                 content_type=_metadata_content_type(name),
             )
             uploaded_metadata_files += 1
+            write_progress(
+                "writing_metadata",
+                selected_entries=len(local_entries),
+                selected_files=len(selected_file_ids),
+                total_blobs=len(local_blobs),
+                processed_blobs=len(local_blobs),
+                uploaded_blobs=uploaded_blobs,
+                skipped_blobs=skipped_blobs,
+                total_metadata_files=len(metadata_files),
+                uploaded_metadata_files=uploaded_metadata_files,
+            )
 
         latest = {
             "format": "marginalia-webdav-latest",
@@ -656,6 +719,17 @@ async def publish_selected(
             "updated_at": _now_iso(),
             "app_version": __version__,
         }
+        write_progress(
+            "publishing_latest",
+            selected_entries=len(local_entries),
+            selected_files=len(selected_file_ids),
+            total_blobs=len(local_blobs),
+            processed_blobs=len(local_blobs),
+            uploaded_blobs=uploaded_blobs,
+            skipped_blobs=skipped_blobs,
+            total_metadata_files=len(metadata_files),
+            uploaded_metadata_files=uploaded_metadata_files,
+        )
         await client.put_bytes(
             _join_remote(root, "latest.json"),
             _json_bytes(latest, indent=2),
@@ -676,6 +750,9 @@ async def publish_selected(
             "uploaded_blobs": uploaded_blobs,
             "skipped_blobs": skipped_blobs,
             "uploaded_metadata_files": uploaded_metadata_files,
+            "total_blobs": len(local_blobs),
+            "processed_blobs": len(local_blobs),
+            "total_metadata_files": len(metadata_files),
             "entry_count": manifest["counts"]["entries"],
             "blob_count": manifest["counts"]["blobs"],
             "blob_bytes": manifest["counts"]["blob_bytes"],
@@ -692,6 +769,9 @@ async def publish_selected(
             "snapshot_id": snapshot_id,
             "remote_path": root,
             "selected_entries": len(selected),
+            "uploaded_blobs": uploaded_blobs,
+            "skipped_blobs": skipped_blobs,
+            "uploaded_metadata_files": uploaded_metadata_files,
             "error": str(exc),
         }
         _write_status(s, failed)
