@@ -185,12 +185,41 @@ async def test_resume_replays_history() -> None:
     answer = next((d for ev, d in events if ev == "answer"), None)
     assert answer and "raft" in answer, answer
 
-    # The plan request must carry just the new user message — plan stays
-    # history-free.
+    # The plan request gets lightweight prior-turn context so short follow-ups
+    # such as "continue" can be scoped before execute. It should not replay
+    # full tool-use blocks; that remains execute-only.
     plan_req = chat.requests[0]
-    assert len(plan_req.messages) == 3, len(plan_req.messages)
     assert plan_req.cache_breakpoints == [0]
     assert plan_req.messages[-1].content == "第三轮：再总结一下要点。"
+    plan_contents = [m.content for m in plan_req.messages]
+    assert any(
+        isinstance(c, str) and "raft" in c
+        for c in plan_contents
+    ), "plan request should include prior session context"
+    assert any(
+        isinstance(c, str) and "leader election" in c
+        for c in plan_contents
+    ), "plan request should include prior assistant answer"
+    boundary_idx_plan = next(
+        (
+            i for i, content in enumerate(plan_contents)
+            if isinstance(content, str)
+            and "lightweight prior turns from this same session" in content
+        ),
+        None,
+    )
+    assert boundary_idx_plan is not None, "plan request missed history boundary"
+    assert any(
+        isinstance(content, str)
+        and "第三轮：再总结一下要点。" in content
+        for content in plan_contents[boundary_idx_plan + 1:]
+    ), "live follow-up must appear after planner history"
+    assert not any(
+        isinstance(blk, (ToolUseBlock, ToolResultBlock))
+        for message in plan_req.messages
+        if isinstance(message.content, list)
+        for blk in message.content
+    ), "plan history should not replay tool blocks"
 
     # The execute request must contain replayed history + boundary note +
     # current user message + plan-echo assistant.

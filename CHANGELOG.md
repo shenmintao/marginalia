@@ -15,6 +15,9 @@
 
 ### Fixed
 
+- Follow-up chat turns now give the planner lightweight same-session context,
+  so terse requests like "continue" or "expand that" stay on the prior topic
+  instead of being mistaken for standalone small talk.
 - WebDAV JSONL metadata parsing now preserves Unicode line separators inside
   JSON strings and reports the affected metadata file and line on parse errors.
 

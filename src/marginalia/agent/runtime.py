@@ -56,6 +56,7 @@ from typing import Any, AsyncIterator, Literal
 
 from marginalia.agent.compression_adapter import maybe_compress_tool_result_for_model
 from marginalia.agent.stable_context import (
+    build_plan_history_messages,
     build_resumed_messages,
     build_stable_snapshot,
     build_snapshot_messages,
@@ -414,13 +415,16 @@ async def run_turn(
     plan_system = render_phase_system_prompt(phase="plan")
     execute_system = render_phase_system_prompt(phase="execute")
     snapshot_messages = build_snapshot_messages(snapshot)
+    plan_history = await build_plan_history_messages(
+        session_id, current_conversation_id=conversation_id,
+    )
     chat = get_chat_client("chat")
 
     yield AgentEvent(event_type="planning")
     plan_text = await _run_plan_phase(
         chat=chat,
         system_prompt=plan_system,
-        prefix_messages=snapshot_messages,
+        prefix_messages=snapshot_messages + plan_history,
         user_message=user_message,
         conversation_id=conversation_id,
         mode=options.mode,
@@ -454,8 +458,8 @@ async def run_turn(
     else:
         # Resume: replay every prior turn into the executor's message
         # tape so it sees the full session arc, not just the current
-        # question. Plan phase stays history-free — it's about scoping
-        # this turn, not remembering past ones.
+        # question. The planner already saw a lighter transcript to
+        # resolve terse follow-ups without carrying full tool results.
         resumed_history = await build_resumed_messages(
             session_id, current_conversation_id=conversation_id,
         )

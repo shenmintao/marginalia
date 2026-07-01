@@ -154,6 +154,10 @@ Output exactly one form, ending with a session title line:
    PDF/image, ask about knowledge-base contents, request troubleshooting, or
    request any current/realtime/external fact. Those require a normal plan,
    even if the likely answer is that the knowledge base has no evidence.
+   If earlier messages from this session are present, use them to resolve
+   short follow-ups such as "continue", "expand that", or "what about the
+   second point". Do not use `NO_PLAN` merely because the latest user message
+   is not standalone.
    A `NO_PLAN` answer must not contain factual claims beyond the social reply.
    Do not include citations, footnotes, headings, tables, or `entry_id=`.
 
@@ -308,6 +312,65 @@ RESUME_BOUNDARY_NOTE = (
 # Cap for tool result text when replaying history — prevents a single
 # massive result from blowing out the resumed prefix.
 RESUME_MAX_TOOL_RESULT_LEN = 50_000
+PLAN_HISTORY_MAX_TURNS = 6
+PLAN_HISTORY_MAX_TEXT_LEN = 8_000
+
+PLAN_HISTORY_BOUNDARY_NOTE = (
+    "(The messages above are lightweight prior turns from this same session. "
+    "Use them only to resolve the live follow-up and choose a plan. The next "
+    "user message is the live new turn.)"
+)
+
+
+def _truncate_history_text(text: str, *, max_len: int, marker: str) -> str:
+    if len(text) <= max_len:
+        return text
+    return text[:max_len].rstrip() + f"\n[{marker}]"
+
+
+async def build_plan_history_messages(
+    session_id: str, *, current_conversation_id: str,
+) -> list[ChatMessage]:
+    """Return lightweight prior-turn context for the planner.
+
+    The execute phase gets full replay, including tool_use/tool_result pairs.
+    The planner only needs enough session context to interpret terse follow-ups
+    and choose an investigation shape, so replay just prior user messages and
+    final assistant answers with bounded text.
+    """
+    async with session_scope() as db:
+        rows = await session_service.list_for_session_ordered(db, session_id)
+
+    prior_rows = [
+        conv for conv in rows
+        if conv.id != current_conversation_id
+        and conv.user_message
+        and (conv.ended_at is not None or conv.agent_response)
+    ][-PLAN_HISTORY_MAX_TURNS:]
+
+    history: list[ChatMessage] = []
+    for conv in prior_rows:
+        history.append(ChatMessage(
+            role="user",
+            content=_truncate_history_text(
+                conv.user_message,
+                max_len=PLAN_HISTORY_MAX_TEXT_LEN,
+                marker="truncated for planner",
+            ),
+        ))
+        if conv.agent_response:
+            history.append(ChatMessage(
+                role="assistant",
+                content=_truncate_history_text(
+                    conv.agent_response,
+                    max_len=PLAN_HISTORY_MAX_TEXT_LEN,
+                    marker="truncated for planner",
+                ),
+            ))
+
+    if history:
+        history.append(ChatMessage(role="user", content=PLAN_HISTORY_BOUNDARY_NOTE))
+    return history
 
 
 async def build_resumed_messages(
