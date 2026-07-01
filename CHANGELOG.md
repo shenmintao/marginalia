@@ -2,13 +2,6 @@
 
 ## Unreleased
 
-## 0.3.1 - 2026-07-01
-
-### Fixed
-
-- WebDAV JSONL metadata parsing now preserves Unicode line separators inside
-  JSON strings and reports the affected metadata file and line on parse errors.
-
 ## 0.3.0 - 2026-07-01
 
 ### Added
@@ -19,6 +12,11 @@
   flows that list changed files and let users choose which entries to sync.
 - Desktop Settings can save WebDAV connection details and sync lightweight
   remote status, showing the remote snapshot time and id.
+
+### Fixed
+
+- WebDAV JSONL metadata parsing now preserves Unicode line separators inside
+  JSON strings and reports the affected metadata file and line on parse errors.
 
 ## 0.2.11 - 2026-06-30
 
