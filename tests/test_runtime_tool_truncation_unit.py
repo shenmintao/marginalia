@@ -129,3 +129,17 @@ def test_overlay_accepts_unified_compression_fields() -> None:
         except OverlayValidationError:
             continue
         raise AssertionError(f"expected validation error for {bad!r}")
+
+
+def test_read_overlay_drops_invalid_persisted_values(tmp_path) -> None:
+    from marginalia.services.config_overlay import read_overlay
+
+    (tmp_path / "config_overlay.json").write_text(
+        '{"embedding_batch_size": 20, "semantic_recall_limit": "42"}',
+        encoding="utf-8",
+    )
+
+    overlay = read_overlay(tmp_path)
+
+    assert "embedding_batch_size" not in overlay
+    assert overlay["semantic_recall_limit"] == 42

@@ -47,7 +47,8 @@ type ServerNumberField =
 type ServerBooleanField =
   | "compression_enabled"
   | "semantic_recall_enabled"
-  | "rerank_enabled";
+  | "rerank_enabled"
+  | "document_vision_enabled";
 
 type ServerStringField =
   | "embedding_provider"
@@ -824,7 +825,7 @@ function RetrievalSection({ ctx }: { ctx: ServerCtx }) {
             <NumberInput
               value={server.embedding_batch_size}
               min={1}
-              max={100}
+              max={10}
               step={1}
               className="w-16"
               onCommit={(v) => setServerNumber("embedding_batch_size", v)}
@@ -874,6 +875,21 @@ function RetrievalSection({ ctx }: { ctx: ServerCtx }) {
               {rebuildMessage && <p className="text-xs text-fg-muted">{rebuildMessage}</p>}
               {rebuildError && <p className="text-xs text-danger">{rebuildError}</p>}
             </div>
+          </Row>
+        </div>
+
+        <div className="space-y-4 border-t border-border pt-5">
+          <div className="text-xs font-semibold text-fg-muted">
+            {t.settings.documentVisionGroup}
+          </div>
+
+          <Row label={t.settings.documentVisionEnabled} hint={t.settings.documentVisionEnabledHint}>
+            <input
+              type="checkbox"
+              checked={server.document_vision_enabled}
+              onChange={(e) => setServerBoolean("document_vision_enabled", e.target.checked)}
+              className="h-4 w-4 accent-accent"
+            />
           </Row>
         </div>
 
@@ -1026,6 +1042,10 @@ function ServerSection({ ctx }: { ctx: ServerCtx }) {
             v={capabilityStatus(server.rerank_enabled, server.rerank_api_key_set, t)}
           />
           <Kv k={t.settings.kv.evidenceSelection} v={server.evidence_selection} />
+          <Kv
+            k={t.settings.kv.documentVision}
+            v={server.document_vision_enabled ? t.common.enabled : t.common.disabled}
+          />
           <Kv
             k={t.settings.kv.vision}
             v={visionConfigured(llm) ? t.settings.visionConfigured : t.settings.visionMissing}

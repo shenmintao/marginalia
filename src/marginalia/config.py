@@ -91,6 +91,7 @@ class Settings(BaseSettings):
     llm_default_api_key: str | None = None
     llm_default_base_url: str | None = None
     llm_default_model: str = "gpt-4o-mini"
+    llm_default_tps: int = Field(default=10, ge=1, le=10_000)
 
     # --- Per-profile overrides (chat / reflect / ingest / vision / audio) ---
     # Any field left blank inherits the corresponding `llm_default_*` value.
@@ -100,26 +101,31 @@ class Settings(BaseSettings):
     llm_chat_api_key: str | None = None
     llm_chat_base_url: str | None = None
     llm_chat_model: str | None = None
+    llm_chat_tps: int = Field(default=10, ge=1, le=10_000)
 
     llm_reflect_provider: LlmProvider | None = None
     llm_reflect_api_key: str | None = None
     llm_reflect_base_url: str | None = None
     llm_reflect_model: str | None = None
+    llm_reflect_tps: int = Field(default=10, ge=1, le=10_000)
 
     llm_ingest_provider: LlmProvider | None = None
     llm_ingest_api_key: str | None = None
     llm_ingest_base_url: str | None = None
     llm_ingest_model: str | None = None
+    llm_ingest_tps: int = Field(default=10, ge=1, le=10_000)
 
     llm_vision_provider: LlmProvider | None = None
     llm_vision_api_key: str | None = None
     llm_vision_base_url: str | None = None
     llm_vision_model: str | None = None
+    llm_vision_tps: int = Field(default=10, ge=1, le=10_000)
 
     llm_audio_provider: LlmProvider | None = None  # only "openai" makes sense
     llm_audio_api_key: str | None = None
     llm_audio_base_url: str | None = None
     llm_audio_model: str | None = None
+    llm_audio_tps: int = Field(default=10, ge=1, le=10_000)
 
     # --- Agent token budgets ------------------------------------------------
     # Per-call max_tokens for the planner / executor.
@@ -156,7 +162,8 @@ class Settings(BaseSettings):
     embedding_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     embedding_model: str = "text-embedding-v4"
     embedding_dimensions: int = 1024
-    embedding_batch_size: int = 10
+    embedding_tps: int = Field(default=10, ge=1, le=10_000)
+    embedding_batch_size: int = Field(default=10, ge=1, le=10)
     semantic_index_backend: Literal["auto", "file", "sqlite-vec"] = "auto"
     semantic_recall_enabled: bool = False
     semantic_recall_limit: int = 100
@@ -169,10 +176,20 @@ class Settings(BaseSettings):
     rerank_api_key: str | None = None
     rerank_base_url: str = "https://dashscope.aliyuncs.com/compatible-api/v1"
     rerank_model: str = "qwen3-rerank"
+    rerank_tps: int = Field(default=10, ge=1, le=10_000)
+    rerank_batch_size: int = Field(default=100, ge=1, le=10_000)
     rerank_top_n: int = 80
     rerank_max_doc_chars: int = 1800
     rerank_concurrency: int = 10
     evidence_selection: Literal["quota", "rerank"] = "quota"
+
+    # --- Embedded document image vision -----------------------------------
+    document_vision_enabled: bool = True
+    document_vision_max_images: int = Field(default=20, ge=0, le=500)
+    document_vision_question_max_images: int = Field(default=5, ge=1, le=50)
+    document_vision_min_image_bytes: int = Field(default=2_048, ge=0, le=100_000_000)
+    document_vision_min_image_dimension: int = Field(default=32, ge=0, le=100_000)
+    document_vision_min_image_area: int = Field(default=4_096, ge=0, le=100_000_000)
 
     @property
     def database_url(self) -> str:
@@ -200,6 +217,7 @@ class LlmProfile:
     api_key: str | None
     base_url: str | None
     model: str
+    tps: int = 10
 
 
 LLM_PROFILES: tuple[str, ...] = ("chat", "reflect", "ingest", "vision", "audio")
@@ -229,12 +247,71 @@ def resolve_profile(settings: Settings, profile: str) -> LlmProfile:
     overrides, falling back to `LLM_DEFAULT_*` per-field."""
     if profile not in LLM_PROFILES:
         raise ValueError(f"unknown LLM profile: {profile!r}")
+    provider = _profile_field(settings, profile, "provider")  # type: ignore[assignment]
+    base_url = _profile_field(settings, profile, "base_url")  # type: ignore[assignment]
+    model = _profile_field(settings, profile, "model")  # type: ignore[assignment]
     return LlmProfile(
         name=profile,
-        provider=_profile_field(settings, profile, "provider"),  # type: ignore[arg-type]
+        provider=provider,  # type: ignore[arg-type]
         api_key=_profile_field(settings, profile, "api_key"),  # type: ignore[arg-type]
-        base_url=_profile_field(settings, profile, "base_url"),  # type: ignore[arg-type]
-        model=_profile_field(settings, profile, "model"),  # type: ignore[arg-type]
+        base_url=base_url,  # type: ignore[arg-type]
+        model=model,  # type: ignore[arg-type]
+        tps=_effective_llm_tps(
+            settings,
+            provider=str(provider or ""),
+            base_url=base_url if isinstance(base_url, str) else None,
+            model=str(model or ""),
+        ),
+    )
+
+
+def _effective_llm_tps(
+    settings: Settings,
+    *,
+    provider: str,
+    base_url: str | None,
+    model: str,
+) -> int:
+    rates: list[int] = []
+    if _same_model(
+        provider,
+        base_url,
+        model,
+        settings.llm_default_provider,
+        settings.llm_default_base_url,
+        settings.llm_default_model,
+    ):
+        rates.append(settings.llm_default_tps)
+    for profile in LLM_PROFILES:
+        profile_provider = _profile_field(settings, profile, "provider")
+        profile_base_url = _profile_field(settings, profile, "base_url")
+        profile_model = _profile_field(settings, profile, "model")
+        if _same_model(
+            provider,
+            base_url,
+            model,
+            str(profile_provider or ""),
+            profile_base_url if isinstance(profile_base_url, str) else None,
+            str(profile_model or ""),
+        ):
+            rates.append(int(getattr(settings, f"llm_{profile}_tps") or 1))
+    return max(1, min(rates)) if rates else 1
+
+
+def _same_model(
+    left_provider: str,
+    left_base_url: str | None,
+    left_model: str,
+    right_provider: str,
+    right_base_url: str | None,
+    right_model: str,
+) -> bool:
+    return (
+        str(left_provider or "").strip().lower()
+        == str(right_provider or "").strip().lower()
+        and str(left_base_url or "").strip().rstrip("/").lower()
+        == str(right_base_url or "").strip().rstrip("/").lower()
+        and str(left_model or "").strip() == str(right_model or "").strip()
     )
 
 

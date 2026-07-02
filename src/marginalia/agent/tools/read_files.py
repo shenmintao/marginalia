@@ -61,6 +61,7 @@ _LOCATOR_VALUE_KEYS = {
     "section_id",
     "page_label",
     "question",
+    "image_id",
 }
 
 
@@ -143,6 +144,23 @@ SCHEMA: dict[str, Any] = {
                                         "PPTX only: last 1-indexed slide to read."
                                     ),
                                 },
+                                # Embedded images in document-shaped files
+                                "image_id": {
+                                    "type": "string",
+                                    "description": (
+                                        "DOCX/PPTX image question mode: exact "
+                                        "embedded image id from a prior read, "
+                                        "such as docx-img-1 or pptx-img-2."
+                                    ),
+                                },
+                                "image_index": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "description": (
+                                        "DOCX/PPTX image question mode: "
+                                        "1-indexed embedded image number."
+                                    ),
+                                },
                                 # pattern search
                                 "pattern": {"type": "string"},
                                 "patterns": {
@@ -173,23 +191,25 @@ SCHEMA: dict[str, Any] = {
                                 # container
                                 "member_path": {"type": "string"},
                                 # VLM-on-read: required for image entries.
-                                # Optional for OCR-indexed PDFs; without it
-                                # the PDF pipeline reads stored OCR text,
-                                # with it the pipeline re-checks rendered
-                                # pages through the vision model.
+                                # Optional for OCR-indexed PDFs and for
+                                # DOCX/PPTX embedded images. Without it,
+                                # the pipeline reads stored extracted text;
+                                # with it, the pipeline sends scoped pixels
+                                # to the vision model.
                                 "question": {
                                     "type": "string",
                                     "minLength": 1,
                                     "description": (
                                         "REQUIRED for image entries. Optional "
-                                        "for OCR-indexed PDFs: omit it to read "
-                                        "stored OCR text, or include it to "
-                                        "send rendered pages to the vision "
-                                        "model for a targeted re-check. "
-                                        "Combine with `page_start`/`page_end` "
-                                        "to scope the question to specific "
-                                        "pages. For text-layer files this "
-                                        "field is ignored."
+                                        "for OCR-indexed PDFs and DOCX/PPTX "
+                                        "embedded images: omit it to read "
+                                        "stored extracted text, or include it "
+                                        "to send scoped pixels to the vision "
+                                        "model. Combine with `page_start`/"
+                                        "`page_end`, `slide_start`/`slide_end`, "
+                                        "`paragraph_start`/`paragraph_end`, "
+                                        "`image_id`, or `image_index` to scope "
+                                        "the question."
                                     ),
                                 },
                             },
@@ -219,10 +239,10 @@ SCHEMA: dict[str, Any] = {
         "PPTX `pattern` can be combined with slide_start/slide_end. "
         "Pattern hits are paginated via `match_offset` (use the "
         "`next_match_offset` from a previous response). Pass `question` "
-        "for image entries. For OCR-indexed PDFs, omit it to read "
-        "stored OCR text, or pass it to send rendered pages to the vision "
-        "model for a targeted re-check. Use AFTER read_entries_metadata "
-        "identified relevant sections."
+        "for image entries, OCR-indexed PDFs, or DOCX/PPTX embedded images. "
+        "For OCR-indexed PDFs, omit it to read stored OCR text, or pass it "
+        "to send rendered pages to the vision model for a targeted re-check. "
+        "Use AFTER read_entries_metadata identified relevant sections."
     ),
     schema=SCHEMA,
 )
@@ -417,6 +437,7 @@ def _locator_diagnostic(args: Mapping[str, Any]) -> dict[str, Any]:
         "paragraph_end",
         "slide_start",
         "slide_end",
+        "image_index",
         "context_lines",
         "max_matches",
         "match_offset",
@@ -451,6 +472,7 @@ def _segment_diagnostic(extras: Mapping[str, Any]) -> dict[str, Any]:
         "total_paragraphs",
         "slide_start",
         "slide_end",
+        "image_index",
         "total_slides",
         "match_count",
         "total_matches",

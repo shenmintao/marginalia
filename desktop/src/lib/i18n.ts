@@ -455,7 +455,7 @@ const en = {
       embeddingDimensionsMeaning: "Vector size produced by the embedding model.",
       embeddingDimensionsRecommended: "Must match the model. Default 1024 for text-embedding-v4.",
       embeddingBatchSizeMeaning: "Number of documents embedded per request batch.",
-      embeddingBatchSizeRecommended: "10 for cloud APIs; 2-5 for weak local embedding servers.",
+      embeddingBatchSizeRecommended: "Maximum 10. Use 10 for cloud APIs; 2-5 for weak local embedding servers.",
       semanticRecallLimitMeaning: "How many vector candidates are added before final evidence selection.",
       semanticRecallLimitRecommended: "100.",
       semanticIndexBackendMeaning: "Where the semantic index is stored.",
@@ -613,7 +613,7 @@ const en = {
     ingestLlmConcurrencyHint:
       "Parallel LLM calls for long text/PDF chunks and scanned-PDF OCR pages. Lower it if your provider rate-limits.",
     retrievalTitle: "Retrieval",
-    retrievalSubtitle: "Embedding recall and rerank settings.",
+    retrievalSubtitle: "Embedding recall, document image scanning, and rerank settings.",
     embeddingGroup: "Embedding recall",
     semanticRecall: "Semantic recall",
     semanticRecallHint:
@@ -635,6 +635,10 @@ const en = {
     semanticRebuildQueued: (taskId: string) =>
       taskId ? `rebuild queued: ${taskId}` : "rebuild queued",
     semanticRebuildNoKey: "Set an embedding API key before rebuilding.",
+    documentVisionGroup: "Document images",
+    documentVisionEnabled: "Scan embedded document images",
+    documentVisionEnabledHint:
+      "Describe images embedded in DOCX/PPTX during ingest when a vision profile is configured.",
     rerankGroup: "Rerank",
     rerankEnabled: "Rerank",
     rerankEnabledHint:
@@ -678,6 +682,7 @@ const en = {
       embedding: "Embedding model",
       rerank: "Rerank",
       evidenceSelection: "Evidence selection",
+      documentVision: "Document image scanning",
       vision: "Vision profile",
     },
     visionConfigured: "configured",
@@ -1148,7 +1153,7 @@ const zh: I18nStrings = {
       embeddingDimensionsMeaning: "Embedding 模型输出的向量维度。",
       embeddingDimensionsRecommended: "必须和模型匹配。text-embedding-v4 默认 1024。",
       embeddingBatchSizeMeaning: "每批请求处理多少条文档向量。",
-      embeddingBatchSizeRecommended: "云 API 用 10；较弱本地 embedding 服务用 2-5。",
+      embeddingBatchSizeRecommended: "最多 10。云 API 用 10；较弱本地 embedding 服务用 2-5。",
       semanticRecallLimitMeaning: "进入最终证据筛选前加入多少条向量候选。",
       semanticRecallLimitRecommended: "100。",
       semanticIndexBackendMeaning: "语义索引存储方式。",
@@ -1298,7 +1303,7 @@ const zh: I18nStrings = {
     ingestLlmConcurrency: "Ingest LLM 并发",
     ingestLlmConcurrencyHint: "长文本/PDF 分块和扫描 PDF OCR 页面的并行 LLM 调用数。遇到服务商限流时可调低。",
     retrievalTitle: "检索",
-    retrievalSubtitle: "Embedding 召回和 rerank 设置。",
+    retrievalSubtitle: "Embedding 召回、文档图片扫描和 rerank 设置。",
     embeddingGroup: "Embedding 召回",
     semanticRecall: "语义召回",
     semanticRecallHint: "构建语义索引后，在 recall_knowledge 中加入 embedding 候选。",
@@ -1319,6 +1324,10 @@ const zh: I18nStrings = {
     semanticRebuildQueued: (taskId: string) =>
       taskId ? `重建已排队：${taskId}` : "重建已排队",
     semanticRebuildNoKey: "请先设置 Embedding API key。",
+    documentVisionGroup: "文档图片",
+    documentVisionEnabled: "扫描文档内图片",
+    documentVisionEnabledHint:
+      "配置 vision profile 后，在导入 DOCX/PPTX 时描述文档中嵌入的图片。",
     rerankGroup: "Rerank",
     rerankEnabled: "Rerank",
     rerankEnabledHint: "对已召回候选做二阶段排序，再进入证据选择。",
@@ -1360,6 +1369,7 @@ const zh: I18nStrings = {
       embedding: "Embedding 模型",
       rerank: "Rerank",
       evidenceSelection: "证据选择",
+      documentVision: "文档图片扫描",
       vision: "Vision profile",
     },
     visionConfigured: "已配置",

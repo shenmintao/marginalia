@@ -59,11 +59,16 @@ _ALLOWED_FIELDS: frozenset[str] = frozenset({
     "llm_default_api_key",
     "llm_default_base_url",
     "llm_default_model",
+    "llm_default_tps",
     # Per-profile overrides
     "llm_chat_provider", "llm_chat_api_key", "llm_chat_base_url", "llm_chat_model",
+    "llm_chat_tps",
     "llm_reflect_provider", "llm_reflect_api_key", "llm_reflect_base_url", "llm_reflect_model",
+    "llm_reflect_tps",
     "llm_ingest_provider", "llm_ingest_api_key", "llm_ingest_base_url", "llm_ingest_model",
+    "llm_ingest_tps",
     "llm_vision_provider", "llm_vision_api_key", "llm_vision_base_url", "llm_vision_model",
+    "llm_vision_tps",
     # llm_audio_* fields are intentionally NOT in the allowlist: no
     # pipeline consumes the audio profile yet, so accepting writes
     # would just persist dead config that misleads the user when
@@ -74,6 +79,7 @@ _ALLOWED_FIELDS: frozenset[str] = frozenset({
     "embedding_base_url",
     "embedding_model",
     "embedding_dimensions",
+    "embedding_tps",
     "embedding_batch_size",
     "semantic_index_backend",
     "semantic_recall_enabled",
@@ -82,10 +88,19 @@ _ALLOWED_FIELDS: frozenset[str] = frozenset({
     "rerank_api_key",
     "rerank_base_url",
     "rerank_model",
+    "rerank_tps",
+    "rerank_batch_size",
     "rerank_top_n",
     "rerank_max_doc_chars",
     "rerank_concurrency",
     "evidence_selection",
+    # Embedded document image vision
+    "document_vision_enabled",
+    "document_vision_max_images",
+    "document_vision_question_max_images",
+    "document_vision_min_image_bytes",
+    "document_vision_min_image_dimension",
+    "document_vision_min_image_area",
 })
 
 _VALID_PROVIDERS: frozenset[str] = frozenset({"openai", "openai-compatible", "anthropic"})
@@ -117,7 +132,15 @@ def read_overlay(home: str | os.PathLike[str]) -> dict[str, Any]:
 
 
 def _canonical_overlay(raw: dict[str, Any]) -> dict[str, Any]:
-    return {k: v for k, v in raw.items() if k in _ALLOWED_FIELDS}
+    out: dict[str, Any] = {}
+    for k, v in raw.items():
+        if k not in _ALLOWED_FIELDS:
+            continue
+        try:
+            out.update(validate_and_normalize({k: v}))
+        except OverlayValidationError:
+            continue
+    return out
 
 
 def write_overlay(home: str | os.PathLike[str], values: dict[str, Any]) -> None:
@@ -206,12 +229,25 @@ def validate_and_normalize(patch: dict[str, Any]) -> dict[str, Any]:
             "worker_batch_size",
             "maintenance_daily_token_budget",
             "webdav_auto_sync_interval_minutes",
+            "llm_default_tps",
+            "llm_chat_tps",
+            "llm_reflect_tps",
+            "llm_ingest_tps",
+            "llm_vision_tps",
             "embedding_dimensions",
+            "embedding_tps",
             "embedding_batch_size",
             "semantic_recall_limit",
+            "rerank_tps",
+            "rerank_batch_size",
             "rerank_top_n",
             "rerank_max_doc_chars",
             "rerank_concurrency",
+            "document_vision_max_images",
+            "document_vision_question_max_images",
+            "document_vision_min_image_bytes",
+            "document_vision_min_image_dimension",
+            "document_vision_min_image_area",
         ):
             try:
                 v = int(v)
@@ -230,7 +266,18 @@ def validate_and_normalize(patch: dict[str, Any]) -> dict[str, Any]:
             elif k == "embedding_dimensions":
                 upper = 8192
             elif k == "embedding_batch_size":
-                upper = 100
+                upper = 10
+            elif k in (
+                "embedding_tps",
+                "rerank_tps",
+                "rerank_batch_size",
+                "llm_default_tps",
+                "llm_chat_tps",
+                "llm_reflect_tps",
+                "llm_ingest_tps",
+                "llm_vision_tps",
+            ):
+                upper = 10_000
             elif k == "semantic_recall_limit":
                 upper = 1000
             elif k == "rerank_top_n":
@@ -239,6 +286,16 @@ def validate_and_normalize(patch: dict[str, Any]) -> dict[str, Any]:
                 upper = 200000
             elif k == "rerank_concurrency":
                 upper = 64
+            elif k == "document_vision_max_images":
+                lower, upper = 0, 500
+            elif k == "document_vision_question_max_images":
+                upper = 50
+            elif k == "document_vision_min_image_bytes":
+                lower, upper = 0, 100_000_000
+            elif k == "document_vision_min_image_dimension":
+                lower, upper = 0, 100_000
+            elif k == "document_vision_min_image_area":
+                lower, upper = 0, 100_000_000
             else:
                 upper = 200000
             if v < lower or v > upper:
@@ -263,6 +320,7 @@ def validate_and_normalize(patch: dict[str, Any]) -> dict[str, Any]:
             "rerank_enabled",
             "relation_background_vetting_enabled",
             "webdav_auto_sync_enabled",
+            "document_vision_enabled",
         ):
             if isinstance(v, str):
                 v = v.strip().lower() in {"1", "true", "yes", "on"}

@@ -19,6 +19,7 @@ from marginalia.llm.model_controls import (
 )
 from marginalia.llm.openai_adapter import OpenAIAudioClient, OpenAIChatClient
 from marginalia.llm.types import ChatRequest, ChatResponse
+from marginalia.model_rate_limit import acquire_model_call_slot
 
 
 class _UsageRecordingChatClient:
@@ -34,17 +35,27 @@ class _UsageRecordingChatClient:
         self,
         inner: ChatClient,
         *,
+        profile: LlmProfile | None = None,
         disable_thinking_by_default: bool = False,
     ) -> None:
         self._inner = inner
         self.profile_name = inner.profile_name
         self.provider = inner.provider
         self.model = inner.model
+        self._base_url = profile.base_url if profile is not None else getattr(inner, "base_url", None)
+        self._tps = profile.tps if profile is not None else 10
         self._disable_thinking_by_default = disable_thinking_by_default
 
     async def complete(self, request: ChatRequest) -> ChatResponse:
         if self._disable_thinking_by_default:
             request = with_disabled_thinking(request)
+        await acquire_model_call_slot(
+            kind="chat",
+            provider=self.provider,
+            base_url=self._base_url,
+            model=self.model,
+            tps=self._tps,
+        )
         # Import here to avoid a circular dep at module import time
         # (tasks.usage doesn't import llm, but tasks.runner does, and
         # tasks.runner imports through this factory).
@@ -63,6 +74,7 @@ def _build_chat(profile: LlmProfile) -> ChatClient:
         raise ValueError(f"unknown provider for profile {profile.name}: {profile.provider}")
     return _UsageRecordingChatClient(
         inner,
+        profile=profile,
         disable_thinking_by_default=should_disable_thinking_by_default(profile),
     )
 

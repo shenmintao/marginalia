@@ -57,14 +57,16 @@ _Settings.model_config["env_file"] = None
 # os.environ (python-dotenv may have loaded them via app startup),
 # so the profiles really do fall back to LLM_DEFAULT_*.
 for _opt in ("CHAT", "INGEST", "REFLECT", "VISION", "AUDIO"):
-    for _field in ("PROVIDER", "API_KEY", "BASE_URL", "MODEL"):
+    for _field in ("PROVIDER", "API_KEY", "BASE_URL", "MODEL", "TPS"):
         os.environ.pop(f"LLM_{_opt}_{_field}", None)
 for _var in (
+    "LLM_DEFAULT_TPS",
     "EMBEDDING_PROVIDER",
     "EMBEDDING_API_KEY",
     "EMBEDDING_BASE_URL",
     "EMBEDDING_MODEL",
     "EMBEDDING_DIMENSIONS",
+    "EMBEDDING_TPS",
     "EMBEDDING_BATCH_SIZE",
     "SEMANTIC_INDEX_BACKEND",
     "SEMANTIC_RECALL_ENABLED",
@@ -73,10 +75,18 @@ for _var in (
     "RERANK_API_KEY",
     "RERANK_BASE_URL",
     "RERANK_MODEL",
+    "RERANK_TPS",
+    "RERANK_BATCH_SIZE",
     "RERANK_TOP_N",
     "RERANK_MAX_DOC_CHARS",
     "RERANK_CONCURRENCY",
     "EVIDENCE_SELECTION",
+    "DOCUMENT_VISION_ENABLED",
+    "DOCUMENT_VISION_MAX_IMAGES",
+    "DOCUMENT_VISION_QUESTION_MAX_IMAGES",
+    "DOCUMENT_VISION_MIN_IMAGE_BYTES",
+    "DOCUMENT_VISION_MIN_IMAGE_DIMENSION",
+    "DOCUMENT_VISION_MIN_IMAGE_AREA",
 ):
     os.environ.pop(_var, None)
 
@@ -118,6 +128,7 @@ def _ensure_test_env() -> None:
         "EMBEDDING_BASE_URL",
         "EMBEDDING_MODEL",
         "EMBEDDING_DIMENSIONS",
+        "EMBEDDING_TPS",
         "EMBEDDING_BATCH_SIZE",
         "SEMANTIC_INDEX_BACKEND",
         "SEMANTIC_RECALL_ENABLED",
@@ -126,10 +137,18 @@ def _ensure_test_env() -> None:
         "RERANK_API_KEY",
         "RERANK_BASE_URL",
         "RERANK_MODEL",
+        "RERANK_TPS",
+        "RERANK_BATCH_SIZE",
         "RERANK_TOP_N",
         "RERANK_MAX_DOC_CHARS",
         "RERANK_CONCURRENCY",
         "EVIDENCE_SELECTION",
+        "DOCUMENT_VISION_ENABLED",
+        "DOCUMENT_VISION_MAX_IMAGES",
+        "DOCUMENT_VISION_QUESTION_MAX_IMAGES",
+        "DOCUMENT_VISION_MIN_IMAGE_BYTES",
+        "DOCUMENT_VISION_MIN_IMAGE_DIMENSION",
+        "DOCUMENT_VISION_MIN_IMAGE_AREA",
     ):
         os.environ.pop(var, None)
     get_settings.cache_clear()  # type: ignore[attr-defined]
@@ -212,15 +231,21 @@ async def test_server_snapshot_no_secrets() -> None:
             assert body["default_on_conflict"] in ("rename", "error", "skip")
             assert body["worker_batch_size"] >= 1
             assert body["llm_ingest_concurrency"] >= 1
+            assert body["llm_default_tps"] >= 1
             assert body["agent_turn_timeout_seconds"] >= 0
             assert body["embedding_api_key_set"] is False
             assert body["embedding_provider"] in ("dashscope", "openai-compatible")
+            assert body["embedding_tps"] >= 1
+            assert 1 <= body["embedding_batch_size"] <= 10
             assert body["semantic_recall_enabled"] is False
             assert body["semantic_recall_configured"] is False
             assert body["rerank_enabled"] is False
             assert body["rerank_api_key_set"] is False
             assert body["rerank_configured"] is False
+            assert body["rerank_tps"] >= 1
+            assert body["rerank_batch_size"] >= 1
             assert body["evidence_selection"] in ("quota", "rerank")
+            assert body["document_vision_enabled"] is True
             # Sanity: no secret keys / DSN-shaped fields snuck in.
             for k, v in body.items():
                 if isinstance(v, str):
@@ -269,6 +294,7 @@ async def test_put_writes_overlay_and_invalidates_cache() -> None:
                     "patch": {
                         "llm_chat_model": "gpt-4o-2026",
                         "llm_chat_base_url": "https://example.test/v1",
+                        "llm_chat_tps": 7,
                         "agent_final_answer_continue_turns": 5,
                         "agent_final_answer_max_chars": 180000,
                         "agent_turn_timeout_seconds": 2400,
@@ -281,6 +307,7 @@ async def test_put_writes_overlay_and_invalidates_cache() -> None:
                         "embedding_base_url": "https://emb.example.test/v1",
                         "embedding_model": "embed-model",
                         "embedding_dimensions": 512,
+                        "embedding_tps": 9,
                         "embedding_batch_size": 8,
                         "semantic_index_backend": "file",
                         "semantic_recall_enabled": True,
@@ -289,10 +316,18 @@ async def test_put_writes_overlay_and_invalidates_cache() -> None:
                         "rerank_api_key": "rerank-secret-XXXX",
                         "rerank_base_url": "https://rerank.example.test/v1",
                         "rerank_model": "rerank-model",
+                        "rerank_tps": 3,
+                        "rerank_batch_size": 24,
                         "rerank_top_n": 12,
                         "rerank_max_doc_chars": 1600,
                         "rerank_concurrency": 4,
                         "evidence_selection": "rerank",
+                        "document_vision_enabled": False,
+                        "document_vision_max_images": 6,
+                        "document_vision_question_max_images": 2,
+                        "document_vision_min_image_bytes": 1024,
+                        "document_vision_min_image_dimension": 16,
+                        "document_vision_min_image_area": 512,
                     },
                 },
             )
@@ -300,6 +335,7 @@ async def test_put_writes_overlay_and_invalidates_cache() -> None:
             body = r.json()
             assert body["profiles"]["chat"]["model"] == "gpt-4o-2026"
             assert body["profiles"]["chat"]["base_url"] == "https://example.test/v1"
+            assert body["profiles"]["chat"]["tps"] == 7
             assert body["overlay"]["agent_final_answer_continue_turns"] == 5
             assert body["overlay"]["agent_final_answer_max_chars"] == 180000
             assert body["overlay"]["agent_turn_timeout_seconds"] == 2400.0
@@ -311,13 +347,17 @@ async def test_put_writes_overlay_and_invalidates_cache() -> None:
             assert body["overlay"]["embedding_api_key"] != "emb-secret-XXXX"
             assert "***" in body["overlay"]["embedding_api_key"]
             assert body["overlay"]["embedding_model"] == "embed-model"
+            assert body["overlay"]["embedding_tps"] == 9
             assert body["overlay"]["semantic_recall_enabled"] is True
             assert body["overlay"]["semantic_recall_limit"] == 42
             assert body["overlay"]["rerank_enabled"] is True
             assert body["overlay"]["rerank_api_key"] != "rerank-secret-XXXX"
             assert "***" in body["overlay"]["rerank_api_key"]
             assert body["overlay"]["rerank_model"] == "rerank-model"
+            assert body["overlay"]["rerank_tps"] == 3
+            assert body["overlay"]["rerank_batch_size"] == 24
             assert body["overlay"]["evidence_selection"] == "rerank"
+            assert body["overlay"]["document_vision_enabled"] is False
             # Other profiles are not overwritten by the chat override.
             assert body["profiles"]["ingest"]["model"] != "gpt-4o-2026"
 
@@ -335,6 +375,7 @@ async def test_put_writes_overlay_and_invalidates_cache() -> None:
             # And get_settings() now sees the new model.
             s = get_settings()
             assert s.llm_chat_model == "gpt-4o-2026"
+            assert s.llm_chat_tps == 7
             assert s.agent_final_answer_continue_turns == 5
             assert s.agent_final_answer_max_chars == 180000
             assert s.agent_turn_timeout_seconds == 2400.0
@@ -347,6 +388,7 @@ async def test_put_writes_overlay_and_invalidates_cache() -> None:
             assert s.embedding_base_url == "https://emb.example.test/v1"
             assert s.embedding_model == "embed-model"
             assert s.embedding_dimensions == 512
+            assert s.embedding_tps == 9
             assert s.embedding_batch_size == 8
             assert s.semantic_index_backend == "file"
             assert s.semantic_recall_enabled is True
@@ -355,10 +397,18 @@ async def test_put_writes_overlay_and_invalidates_cache() -> None:
             assert s.rerank_api_key == "rerank-secret-XXXX"
             assert s.rerank_base_url == "https://rerank.example.test/v1"
             assert s.rerank_model == "rerank-model"
+            assert s.rerank_tps == 3
+            assert s.rerank_batch_size == 24
             assert s.rerank_top_n == 12
             assert s.rerank_max_doc_chars == 1600
             assert s.rerank_concurrency == 4
             assert s.evidence_selection == "rerank"
+            assert s.document_vision_enabled is False
+            assert s.document_vision_max_images == 6
+            assert s.document_vision_question_max_images == 2
+            assert s.document_vision_min_image_bytes == 1024
+            assert s.document_vision_min_image_dimension == 16
+            assert s.document_vision_min_image_area == 512
 
             r = await c.get("/v1/settings/server")
             assert r.status_code == 200, r.text
@@ -434,6 +484,20 @@ async def test_put_rejects_bad_provider() -> None:
             print("[6] PUT rejects unknown provider with 422")
 
 
+async def test_put_rejects_embedding_batch_above_ten() -> None:
+    _ensure_test_env()
+    transport = ASGITransport(app=app)
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+            r = await c.put(
+                "/v1/settings/llm",
+                json={"patch": {"embedding_batch_size": 11}},
+            )
+            assert r.status_code == 422, r.text
+            assert "embedding_batch_size" in r.text
+            print("[7] PUT rejects embedding_batch_size above 10")
+
+
 async def main() -> None:
     await _create_schema()
     await test_server_snapshot_no_secrets()
@@ -442,6 +506,7 @@ async def main() -> None:
     await test_put_clear_with_none()
     await test_put_rejects_unknown_field()
     await test_put_rejects_bad_provider()
+    await test_put_rejects_embedding_batch_above_ten()
     print("\nALL SETTINGS-ROUTES TESTS PASSED")
 
 

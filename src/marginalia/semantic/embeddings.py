@@ -8,6 +8,8 @@ import httpx
 from openai import AsyncOpenAI
 
 from marginalia.config import Settings, get_settings
+from marginalia.model_rate_limit import acquire_model_call_slot
+from marginalia.provider_http import raise_for_provider_status
 
 
 TextType = Literal["query", "document"]
@@ -54,6 +56,20 @@ class DashScopeEmbeddingClient:
         clean = [str(text or "").strip() for text in texts]
         if not clean:
             return EmbeddingResult(vectors=[])
+        vectors: list[list[float]] = []
+        total_tokens = 0
+        for batch in _chunked(clean, self.settings.embedding_batch_size):
+            result = await self._embed_batch(batch, text_type=text_type)
+            vectors.extend(result.vectors)
+            total_tokens += result.total_tokens
+        return EmbeddingResult(vectors=vectors, total_tokens=total_tokens)
+
+    async def _embed_batch(
+        self,
+        clean: list[str],
+        *,
+        text_type: TextType,
+    ) -> EmbeddingResult:
         payload = {
             "model": self.model,
             "input": {
@@ -69,9 +85,16 @@ class DashScopeEmbeddingClient:
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
+        await acquire_model_call_slot(
+            kind="embedding",
+            provider=self.settings.embedding_provider,
+            base_url=self.settings.embedding_base_url,
+            model=self.model,
+            tps=self.settings.embedding_tps,
+        )
         async with httpx.AsyncClient(timeout=60.0) as client:
             resp = await client.post(self.base_url, headers=headers, json=payload)
-            resp.raise_for_status()
+            raise_for_provider_status(resp, "embedding")
         obj = resp.json()
         output = obj.get("output") if isinstance(obj, dict) else None
         embeddings = output.get("embeddings") if isinstance(output, dict) else None
@@ -115,12 +138,28 @@ class OpenAICompatibleEmbeddingClient:
         clean = [str(text or "").strip() for text in texts]
         if not clean:
             return EmbeddingResult(vectors=[])
+        vectors: list[list[float]] = []
+        total_tokens = 0
+        for batch in _chunked(clean, self.settings.embedding_batch_size):
+            result = await self._embed_batch(batch)
+            vectors.extend(result.vectors)
+            total_tokens += result.total_tokens
+        return EmbeddingResult(vectors=vectors, total_tokens=total_tokens)
+
+    async def _embed_batch(self, clean: list[str]) -> EmbeddingResult:
         kwargs = {
             "model": self.model,
             "input": clean,
             "dimensions": self.dimensions,
             "encoding_format": "float",
         }
+        await acquire_model_call_slot(
+            kind="embedding",
+            provider=self.settings.embedding_provider,
+            base_url=self.settings.embedding_base_url,
+            model=self.model,
+            tps=self.settings.embedding_tps,
+        )
         resp = await self._client.embeddings.create(**kwargs)
         ordered: list[list[float] | None] = [None] * len(clean)
         for idx, item in enumerate(resp.data):
@@ -149,3 +188,8 @@ def _normalize(vector: list[float]) -> list[float]:
     if norm <= 0:
         return vector
     return [v / norm for v in vector]
+
+
+def _chunked(values: list[str], size: int) -> list[list[str]]:
+    chunk_size = max(1, int(size or 1))
+    return [values[index:index + chunk_size] for index in range(0, len(values), chunk_size)]

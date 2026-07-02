@@ -361,11 +361,17 @@ export interface ServerSettings {
   compression_context_chars: number;
   compression_max_ratio: number;
   llm_ingest_concurrency: number;
+  llm_default_tps: number;
+  llm_chat_tps: number;
+  llm_reflect_tps: number;
+  llm_ingest_tps: number;
+  llm_vision_tps: number;
   embedding_provider: "dashscope" | "openai-compatible";
   embedding_api_key_set: boolean;
   embedding_base_url: string;
   embedding_model: string;
   embedding_dimensions: number;
+  embedding_tps: number;
   embedding_batch_size: number;
   semantic_index_backend: "auto" | "file" | "sqlite-vec";
   semantic_recall_enabled: boolean;
@@ -376,12 +382,20 @@ export interface ServerSettings {
   rerank_api_key_set: boolean;
   rerank_base_url: string;
   rerank_model: string;
+  rerank_tps: number;
+  rerank_batch_size: number;
   rerank_top_n: number;
   rerank_max_doc_chars: number;
   rerank_concurrency: number;
   rerank_configured: boolean;
   evidence_selection: "quota" | "rerank";
   vision_profile_configured: boolean;
+  document_vision_enabled: boolean;
+  document_vision_max_images: number;
+  document_vision_question_max_images: number;
+  document_vision_min_image_bytes: number;
+  document_vision_min_image_dimension: number;
+  document_vision_min_image_area: number;
   webdav?: WebDavStatus;
 }
 
@@ -558,6 +572,7 @@ export interface LlmProfileResolved {
   api_key_set: boolean;
   base_url: string | null;
   model: string | null;
+  tps: number;
 }
 
 export interface LlmSettings {
@@ -569,6 +584,7 @@ export interface LlmSettings {
     base_url: string | null;
     api_key: string | null;
     api_key_set: boolean;
+    tps: number;
   };
 }
 

@@ -12,17 +12,29 @@ Legacy binary .ppt is not supported; users should resave to .pptx or PDF.
 """
 from __future__ import annotations
 
+import asyncio
 import io
 import logging
 import re
 from typing import Any
 
+from marginalia.config import get_settings
 from marginalia.pipelines._text_indexer import index_extracted_text
 from marginalia.pipelines.base import (
     Pipeline,
     PipelineContext,
     PipelineResult,
     SegmentResult,
+)
+from marginalia.pipelines.document_vision import (
+    DocumentImage,
+    answer_document_image_question,
+    attach_document_vision_description,
+    describe_document_images,
+    document_vision_coverage,
+    inline_document_image_vision_text,
+    persisted_document_image_payload,
+    persisted_document_image_segment,
 )
 from marginalia.pipelines.registry import register_pipeline
 from marginalia.storage.base import StorageBackend
@@ -52,8 +64,28 @@ class PptxPipeline(Pipeline):
         ctx: PipelineContext,
         storage: StorageBackend,
     ) -> PipelineResult:
-        slides, coverage = await self._extract_slides_with_coverage(
-            storage, ctx.storage_key, max_slides=MAX_PPTX_SLIDES,
+        body_bytes = await self._read_bytes(storage, ctx.storage_key)
+        slides, coverage = self._render_from_bytes_with_coverage(
+            body_bytes,
+            max_slides=MAX_PPTX_SLIDES,
+        )
+        coverage["total_bytes"] = len(body_bytes)
+        coverage["indexed_bytes"] = len(body_bytes)
+        images = await asyncio.to_thread(
+            _extract_pptx_images,
+            body_bytes,
+            len(slides),
+        )
+        vision_payload = await describe_document_images(
+            settings=get_settings(),
+            images=images,
+            document_name=ctx.display_name or ctx.storage_key,
+            document_kind="pptx",
+        )
+        slides = inline_document_image_vision_text(
+            slides,
+            vision_payload,
+            anchor_key="slide",
         )
         full_body = "\n\n".join(slides)
         indexed_chars = min(len(full_body), MAX_OUTPUT_CHARS)
@@ -71,9 +103,17 @@ class PptxPipeline(Pipeline):
             "max_index_slides": MAX_PPTX_SLIDES,
             "text_truncated": bool(partial_reasons),
         })
-        return await index_extracted_text(
+        vision_coverage = document_vision_coverage(vision_payload)
+        if vision_coverage is not None:
+            coverage["document_vision"] = vision_coverage
+        result = await index_extracted_text(
             body, ctx, kind="text", coverage=coverage,
         )
+        result.description = attach_document_vision_description(
+            result.description,
+            vision_payload,
+        )
+        return result
 
     async def read_segment(
         self,
@@ -82,10 +122,54 @@ class PptxPipeline(Pipeline):
         args: dict[str, Any],
         storage: StorageBackend,
     ) -> SegmentResult:
+        question = str(args.get("question") or "").strip()
+        if question:
+            settings = get_settings()
+            body = await self._read_bytes(storage, file_row.storage_key)
+            images = await asyncio.to_thread(_extract_pptx_images, body)
+            segment = await answer_document_image_question(
+                settings=settings,
+                images=images,
+                args=args,
+                document_name=str(getattr(file_row, "storage_key", "") or ""),
+                document_kind="pptx",
+                mode="pptx_image_question",
+            )
+            if segment.error is None:
+                return segment
+            fallback = persisted_document_image_segment(
+                file_row,
+                args,
+                mode="pptx_image_question",
+                warning=segment.error,
+            )
+            if fallback.error is None:
+                return fallback
+            return segment
+
         slides, _coverage = await self._extract_slides_with_coverage(
             storage, file_row.storage_key,
         )
-        return self._slice(slides, args, file_row=file_row)
+        slides = inline_document_image_vision_text(
+            slides,
+            persisted_document_image_payload(file_row),
+            anchor_key="slide",
+        )
+        source_result = self._slice(slides, args, file_row=file_row)
+        if (
+            source_result.error is None
+            and source_result.text.strip()
+            and "(no extractable text)" not in source_result.text
+        ):
+            return source_result
+        fallback = persisted_document_image_segment(
+            file_row,
+            args,
+            mode="pptx_image_vision",
+        )
+        if fallback.error is None:
+            return fallback
+        return source_result
 
     async def read_segment_from_bytes(
         self,
@@ -95,6 +179,18 @@ class PptxPipeline(Pipeline):
         filename: str | None = None,
     ) -> SegmentResult:
         """Bytes-first variant used by ArchivePipeline for member peeks."""
+        question = str(args.get("question") or "").strip()
+        if question:
+            settings = get_settings()
+            images = await asyncio.to_thread(_extract_pptx_images, body)
+            return await answer_document_image_question(
+                settings=settings,
+                images=images,
+                args=args,
+                document_name=filename or "archive member",
+                document_kind="pptx",
+                mode="pptx_image_question",
+            )
         try:
             slides, _coverage = self._render_from_bytes_with_coverage(body)
         except Exception as exc:  # noqa: BLE001
@@ -197,6 +293,13 @@ class PptxPipeline(Pipeline):
         return slides, coverage
 
     @staticmethod
+    async def _read_bytes(storage: StorageBackend, key: str) -> bytes:
+        buf = bytearray()
+        async for chunk in storage.get(key):
+            buf.extend(chunk)
+        return bytes(buf)
+
+    @staticmethod
     def _render_from_bytes_with_coverage(
         body: bytes,
         *,
@@ -248,6 +351,53 @@ class PptxPipeline(Pipeline):
         if slide_limit is not None:
             coverage["max_index_slides"] = slide_limit
         return slides, coverage
+
+
+def _extract_pptx_images(body: bytes, max_slides: int | None = None) -> list[DocumentImage]:
+    try:
+        from pptx import Presentation  # type: ignore
+    except ImportError as exc:
+        raise RuntimeError(
+            "pptx pipeline needs python-pptx; `pip install python-pptx`"
+        ) from exc
+
+    presentation = Presentation(io.BytesIO(body))
+    images: list[DocumentImage] = []
+    for slide_no, slide in enumerate(presentation.slides, start=1):
+        if max_slides is not None and slide_no > max_slides:
+            break
+        context, _stats = _render_slide(slide, slide_no)
+        for shape in _iter_picture_shapes(slide.shapes):
+            picture = getattr(shape, "image", None)
+            blob = getattr(picture, "blob", None)
+            if not isinstance(blob, bytes) or not blob:
+                continue
+            image_no = len(images) + 1
+            images.append(
+                DocumentImage(
+                    image_id=f"pptx-img-{image_no}",
+                    label=f"PPTX slide {slide_no} image {image_no}",
+                    image_bytes=blob,
+                    media_type=getattr(picture, "content_type", None),
+                    anchor={
+                        "unit": "slides",
+                        "slide": slide_no,
+                        "shape_id": getattr(shape, "shape_id", None),
+                    },
+                    context=context,
+                    filename=getattr(picture, "filename", None),
+                )
+            )
+    return images
+
+
+def _iter_picture_shapes(shapes: Any):
+    for shape in shapes:
+        if hasattr(shape, "shapes"):
+            yield from _iter_picture_shapes(shape.shapes)
+            continue
+        if getattr(shape, "image", None) is not None:
+            yield shape
 
 
 def _render_slide(slide: Any, slide_no: int) -> tuple[str, dict[str, int]]:

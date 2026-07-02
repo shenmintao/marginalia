@@ -9,23 +9,34 @@ read_segment supports paragraph_start / paragraph_end ranges (1-indexed,
 inclusive — only counting non-empty rendered blocks), regex pattern
 search, and the generic offset/max_chars chunking over the full body.
 
-Images, embedded objects, and footnotes are skipped — for image-heavy
-decks the user is better served by exporting to PDF and using the
-pdf-with-figures pipeline.
+Embedded images can be described by the vision profile and inlined near
+their source block. Embedded objects and footnotes are skipped.
 """
 from __future__ import annotations
 
+import asyncio
 import io
 import logging
 import re
 from typing import Any
 
+from marginalia.config import get_settings
 from marginalia.pipelines._text_indexer import index_extracted_text
 from marginalia.pipelines.base import (
     Pipeline,
     PipelineContext,
     PipelineResult,
     SegmentResult,
+)
+from marginalia.pipelines.document_vision import (
+    DocumentImage,
+    answer_document_image_question,
+    attach_document_vision_description,
+    describe_document_images,
+    document_vision_coverage,
+    inline_document_image_vision_text,
+    persisted_document_image_payload,
+    persisted_document_image_segment,
 )
 from marginalia.pipelines.registry import register_pipeline
 from marginalia.storage.base import StorageBackend
@@ -37,6 +48,7 @@ log = logging.getLogger(__name__)
 # is still bounded by paragraph and prompt budgets.
 MAX_OUTPUT_CHARS = 80_000  # plenty for the LLM prompt
 DEFAULT_MAX_CHARS = 8000
+_REL_EMBED = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed"
 
 
 @register_pipeline(
@@ -54,7 +66,20 @@ class DocxPipeline(Pipeline):
         ctx: PipelineContext,
         storage: StorageBackend,
     ) -> PipelineResult:
-        paragraphs = await self._extract_paragraphs(storage, ctx.storage_key)
+        body_bytes = await self._read_bytes(storage, ctx.storage_key)
+        paragraphs = self._parse_paragraphs_from_bytes(body_bytes)
+        images = await asyncio.to_thread(_extract_docx_images, body_bytes)
+        vision_payload = await describe_document_images(
+            settings=get_settings(),
+            images=images,
+            document_name=ctx.display_name or ctx.storage_key,
+            document_kind="docx",
+        )
+        paragraphs = inline_document_image_vision_text(
+            paragraphs,
+            vision_payload,
+            anchor_key="block",
+        )
         full_body = "\n".join(paragraphs)
         indexed_chars = min(len(full_body), MAX_OUTPUT_CHARS)
         body = full_body
@@ -65,9 +90,17 @@ class DocxPipeline(Pipeline):
             indexed_chars=indexed_chars,
             total_paragraphs=len(paragraphs),
         )
-        return await index_extracted_text(
+        vision_coverage = document_vision_coverage(vision_payload)
+        if vision_coverage is not None:
+            coverage["document_vision"] = vision_coverage
+        result = await index_extracted_text(
             body, ctx, kind="text", coverage=coverage,
         )
+        result.description = attach_document_vision_description(
+            result.description,
+            vision_payload,
+        )
+        return result
 
     async def read_segment(
         self,
@@ -76,8 +109,48 @@ class DocxPipeline(Pipeline):
         args: dict[str, Any],
         storage: StorageBackend,
     ) -> SegmentResult:
+        question = str(args.get("question") or "").strip()
+        if question:
+            settings = get_settings()
+            body = await self._read_bytes(storage, file_row.storage_key)
+            images = await asyncio.to_thread(_extract_docx_images, body)
+            segment = await answer_document_image_question(
+                settings=settings,
+                images=images,
+                args=args,
+                document_name=str(getattr(file_row, "storage_key", "") or ""),
+                document_kind="docx",
+                mode="docx_image_question",
+            )
+            if segment.error is None:
+                return segment
+            fallback = persisted_document_image_segment(
+                file_row,
+                args,
+                mode="docx_image_question",
+                warning=segment.error,
+            )
+            if fallback.error is None:
+                return fallback
+            return segment
+
         paragraphs = await self._extract_paragraphs(storage, file_row.storage_key)
-        return self._slice(paragraphs, args, file_row=file_row)
+        paragraphs = inline_document_image_vision_text(
+            paragraphs,
+            persisted_document_image_payload(file_row),
+            anchor_key="block",
+        )
+        source_result = self._slice(paragraphs, args, file_row=file_row)
+        if source_result.error is None and source_result.text.strip():
+            return source_result
+        fallback = persisted_document_image_segment(
+            file_row,
+            args,
+            mode="docx_image_vision",
+        )
+        if fallback.error is None:
+            return fallback
+        return source_result
 
     async def read_segment_from_bytes(
         self,
@@ -87,6 +160,18 @@ class DocxPipeline(Pipeline):
         filename: str | None = None,
     ) -> SegmentResult:
         """Bytes-first variant — used by ArchivePipeline for member peeks."""
+        question = str(args.get("question") or "").strip()
+        if question:
+            settings = get_settings()
+            images = await asyncio.to_thread(_extract_docx_images, body)
+            return await answer_document_image_question(
+                settings=settings,
+                images=images,
+                args=args,
+                document_name=filename or "archive member",
+                document_kind="docx",
+                mode="docx_image_question",
+            )
         try:
             paragraphs = self._parse_paragraphs_from_bytes(body)
         except Exception as exc:  # noqa: BLE001 — python-docx surfaces many
@@ -206,6 +291,13 @@ class DocxPipeline(Pipeline):
         return cls._parse_paragraphs_from_bytes(bytes(buf))
 
     @staticmethod
+    async def _read_bytes(storage: StorageBackend, key: str) -> bytes:
+        buf = bytearray()
+        async for chunk in storage.get(key):
+            buf.extend(chunk)
+        return bytes(buf)
+
+    @staticmethod
     def _parse_paragraphs_from_bytes(body: bytes) -> list[str]:
         try:
             from docx import Document  # type: ignore
@@ -221,6 +313,66 @@ class DocxPipeline(Pipeline):
             if line:
                 out.append(line)
         return out
+
+
+def _extract_docx_images(body: bytes) -> list[DocumentImage]:
+    try:
+        from docx import Document  # type: ignore
+    except ImportError as exc:
+        raise RuntimeError(
+            "docx pipeline needs python-docx; `pip install python-docx`"
+        ) from exc
+
+    doc = Document(io.BytesIO(body))
+    images: list[DocumentImage] = []
+    seen: set[tuple[int, str]] = set()
+    rendered_block_no = 0
+    for block_no, block in enumerate(_iter_block_items(doc), start=1):
+        context = _render_block(block)
+        if context:
+            rendered_block_no += 1
+        element = getattr(block, "_element", None)
+        if element is None:
+            continue
+        anchor_block = max(1, rendered_block_no)
+        for rid in _embedded_image_rids(element):
+            key = (block_no, rid)
+            if key in seen:
+                continue
+            seen.add(key)
+            part = doc.part.related_parts.get(rid)
+            blob = getattr(part, "blob", None)
+            if not isinstance(blob, bytes) or not blob:
+                continue
+            image_no = len(images) + 1
+            images.append(
+                DocumentImage(
+                    image_id=f"docx-img-{image_no}",
+                    label=f"DOCX image {image_no}",
+                    image_bytes=blob,
+                    media_type=getattr(part, "content_type", None),
+                    anchor={
+                        "unit": "blocks",
+                        "block": anchor_block,
+                        "source_block": block_no,
+                        "relationship_id": rid,
+                    },
+                    context=context,
+                    filename=str(getattr(part, "partname", "") or ""),
+                )
+            )
+    return images
+
+
+def _embedded_image_rids(element: Any) -> list[str]:
+    rids: list[str] = []
+    for child in element.iter():
+        if not str(getattr(child, "tag", "")).endswith("}blip"):
+            continue
+        rid = child.get(_REL_EMBED)
+        if rid:
+            rids.append(str(rid))
+    return rids
 
 
 def _iter_block_items(doc: Any):

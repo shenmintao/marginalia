@@ -24,14 +24,31 @@ class _FakeStorage:
 
 
 def _build_text_pdf(page_count: int) -> bytes:
-    from fpdf import FPDF
+    from pypdf import PdfWriter
+    from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
-    pdf = FPDF()
+    writer = PdfWriter()
     for i in range(1, page_count + 1):
-        pdf.add_page()
-        pdf.set_font("Helvetica", size=12)
-        pdf.multi_cell(0, 8, text=f"Physical page {i}\nUnique token p{i:03d}")
-    return bytes(pdf.output())
+        page = writer.add_blank_page(width=400, height=300)
+        font = DictionaryObject({
+            NameObject("/Type"): NameObject("/Font"),
+            NameObject("/Subtype"): NameObject("/Type1"),
+            NameObject("/BaseFont"): NameObject("/Helvetica"),
+        })
+        page[NameObject("/Resources")] = DictionaryObject({
+            NameObject("/Font"): DictionaryObject({NameObject("/F1"): font}),
+        })
+        stream = DecodedStreamObject()
+        stream.set_data(
+            (
+                f"BT /F1 12 Tf 1 0 0 1 40 240 Tm (Physical page {i}) Tj ET\n"
+                f"BT /F1 12 Tf 1 0 0 1 40 220 Tm (Unique token p{i:03d}) Tj ET"
+            ).encode("ascii")
+        )
+        page.replace_contents(stream)
+    out = io.BytesIO()
+    writer.write(out)
+    return out.getvalue()
 
 
 def _with_labels(pdf_bytes: bytes) -> bytes:
@@ -121,6 +138,32 @@ def test_pdf_page_window_extracts_only_requested_pages() -> None:
     assert seg.error is None
     assert "Unique token p025" in seg.text
     assert "Unique token p001" not in seg.text
+
+
+def test_pdf_read_inlines_persisted_figure_descriptions() -> None:
+    pdf_bytes = _build_text_pdf(3)
+    file_row = SimpleNamespace(
+        description={
+            "figures": [
+                {
+                    "page": 2,
+                    "figure": 1,
+                    "label": "Figure 2.1",
+                    "text": "Architecture diagram with ingest and recall stages.",
+                }
+            ]
+        }
+    )
+
+    seg = PdfPipeline()._slice(
+        pdf_bytes,
+        {"page_start": 2, "page_end": 2},
+        file_row=file_row,
+    )
+
+    assert seg.error is None
+    assert "[Figure 2.1] Architecture diagram" in seg.text
+    assert "Unique token p002" in seg.text
 
 
 def test_pdf_layout_extraction_keeps_table_row_headers_with_cells() -> None:

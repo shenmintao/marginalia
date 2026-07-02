@@ -80,11 +80,17 @@ def server_settings() -> dict[str, Any]:
         "compression_context_chars": s.compression_context_chars,
         "compression_max_ratio": s.compression_max_ratio,
         "llm_ingest_concurrency": s.llm_ingest_concurrency,
+        "llm_default_tps": s.llm_default_tps,
+        "llm_chat_tps": s.llm_chat_tps,
+        "llm_reflect_tps": s.llm_reflect_tps,
+        "llm_ingest_tps": s.llm_ingest_tps,
+        "llm_vision_tps": s.llm_vision_tps,
         "embedding_provider": s.embedding_provider,
         "embedding_api_key_set": bool(s.embedding_api_key),
         "embedding_base_url": s.embedding_base_url,
         "embedding_model": s.embedding_model,
         "embedding_dimensions": s.embedding_dimensions,
+        "embedding_tps": s.embedding_tps,
         "embedding_batch_size": s.embedding_batch_size,
         "semantic_index_backend": s.semantic_index_backend,
         "semantic_recall_enabled": s.semantic_recall_enabled,
@@ -97,12 +103,20 @@ def server_settings() -> dict[str, Any]:
         "rerank_api_key_set": bool(s.rerank_api_key),
         "rerank_base_url": s.rerank_base_url,
         "rerank_model": s.rerank_model,
+        "rerank_tps": s.rerank_tps,
+        "rerank_batch_size": s.rerank_batch_size,
         "rerank_top_n": s.rerank_top_n,
         "rerank_max_doc_chars": s.rerank_max_doc_chars,
         "rerank_concurrency": s.rerank_concurrency,
         "rerank_configured": bool(s.rerank_enabled and s.rerank_api_key),
         "evidence_selection": s.evidence_selection,
         "vision_profile_configured": has_vision_profile(s),
+        "document_vision_enabled": s.document_vision_enabled,
+        "document_vision_max_images": s.document_vision_max_images,
+        "document_vision_question_max_images": s.document_vision_question_max_images,
+        "document_vision_min_image_bytes": s.document_vision_min_image_bytes,
+        "document_vision_min_image_dimension": s.document_vision_min_image_dimension,
+        "document_vision_min_image_area": s.document_vision_min_image_area,
         "webdav": read_webdav_status(s),
     }
 
@@ -130,6 +144,7 @@ def llm_settings() -> dict[str, Any]:
                 "api_key_set": bool(api_key),
                 "base_url": getattr(s, f"llm_{p}_base_url"),
                 "model": getattr(s, f"llm_{p}_model"),
+                "tps": getattr(s, f"llm_{p}_tps"),
             }
             continue
         prof = resolve_profile(s, p)
@@ -139,6 +154,7 @@ def llm_settings() -> dict[str, Any]:
             "api_key_set": bool(prof.api_key),
             "base_url": prof.base_url,
             "model": prof.model,
+            "tps": prof.tps,
         }
 
     overlay = read_overlay(s.marginalia_home)
@@ -158,6 +174,7 @@ def llm_settings() -> dict[str, Any]:
             "base_url": s.llm_default_base_url,
             "api_key": _mask(s.llm_default_api_key),
             "api_key_set": bool(s.llm_default_api_key),
+            "tps": s.llm_default_tps,
         },
     }
 

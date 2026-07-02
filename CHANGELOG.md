@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+## 0.3.1 - 2026-07-02
+
+### Added
+
+- Added provider call TPS limiting for LLM, embedding, and rerank requests,
+  with runtime settings overlay support.
+- DOCX and PPTX embedded images can now be described by the vision profile,
+  queried with `read_files(question=...)`, and persisted for fallback reads.
+
+### Changed
+
+- PDF, PPTX, and DOCX image descriptions are inserted back into native document
+  positions before indexing: PDF figures per page, PPTX images per slide, and
+  DOCX images near their source block.
+- Embedding request batch size is capped at 10 for desktop and backend
+  settings.
+
+### Fixed
+
+- Text-layer PDF readback now includes persisted figure descriptions for
+  targeted page reads and pattern searches.
+- Existing invalid overlay values such as `embedding_batch_size > 10` are
+  ignored instead of overriding safe defaults.
+
 ## 0.3.0 - 2026-07-01
 
 ### Added

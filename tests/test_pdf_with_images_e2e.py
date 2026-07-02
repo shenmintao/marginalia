@@ -20,7 +20,6 @@ from uuid import uuid4
 import asyncio
 import io
 import sys
-import tempfile
 import zlib
 from datetime import datetime, timezone
 from pathlib import Path
@@ -66,34 +65,17 @@ def _request_text(request: ChatRequest) -> str:
     return "\n".join(p for p in parts if p)
 
 
-def _make_solid_png(w: int = 200, h: int = 150,
-                    rgb: tuple[int, int, int] = (40, 90, 200),
-                    noisy: bool = True) -> bytes:
-    """Build a PNG of given size using only stdlib zlib.
-
-    By default `noisy=True` introduces per-pixel jitter so the PNG
-    compresses to tens of KB (typical of real photos / charts) rather
-    than the few-hundred bytes a flat-color PNG produces. This matters
-    for production filters that reject sub-5KB images as icons; the test
-    needs fixtures that survive those filters."""
-    sig = b"\x89PNG\r\n\x1a\n"
-
-    def _chunk(typ: bytes, data: bytes) -> bytes:
-        return (
-            len(data).to_bytes(4, "big")
-            + typ + data
-            + zlib.crc32(typ + data).to_bytes(4, "big")
-        )
-
-    ihdr = _chunk(b"IHDR",
-                  w.to_bytes(4, "big") + h.to_bytes(4, "big") +
-                  b"\x08\x02\x00\x00\x00")
+def _rgb_image_data(
+    w: int,
+    h: int,
+    rgb: tuple[int, int, int] = (40, 90, 200),
+    noisy: bool = True,
+) -> bytes:
     raw = bytearray()
     if noisy:
         # deterministic pseudo-random per pixel
         seed = (rgb[0] * 31 + rgb[1] * 53 + rgb[2] * 97) & 0xFFFFFFFF
         for y in range(h):
-            raw.append(0)  # filter byte
             for x in range(w):
                 seed = (seed * 1103515245 + 12345) & 0x7FFFFFFF
                 jitter = (seed % 64) - 32
@@ -105,58 +87,132 @@ def _make_solid_png(w: int = 200, h: int = 150,
                 jitter = (seed % 64) - 32
                 raw.append(max(0, min(255, rgb[2] + jitter)))
     else:
-        row = b"\x00" + bytes(rgb) * w
-        for _ in range(h):
-            raw += row
-    idat = _chunk(b"IDAT", zlib.compress(bytes(raw)))
-    iend = _chunk(b"IEND", b"")
-    return sig + ihdr + idat + iend
+        raw = bytearray(bytes(rgb) * w * h)
+    return bytes(raw)
+
+
+def _pdf_text(text: str) -> str:
+    return text.replace("\\", "\\\\").replace("(", r"\(").replace(")", r"\)")
+
+
+def _image_xobject(
+    writer,
+    *,
+    w: int,
+    h: int,
+    rgb: tuple[int, int, int],
+    noisy: bool = True,
+):
+    from pypdf.generic import EncodedStreamObject, NameObject, NumberObject
+
+    image = EncodedStreamObject()
+    image._data = zlib.compress(_rgb_image_data(w, h, rgb, noisy=noisy))
+    image.update({
+        NameObject("/Filter"): NameObject("/FlateDecode"),
+        NameObject("/Type"): NameObject("/XObject"),
+        NameObject("/Subtype"): NameObject("/Image"),
+        NameObject("/Width"): NumberObject(w),
+        NameObject("/Height"): NumberObject(h),
+        NameObject("/ColorSpace"): NameObject("/DeviceRGB"),
+        NameObject("/BitsPerComponent"): NumberObject(8),
+    })
+    return writer._add_object(image)
+
+
+def _add_pdf_page(writer, *, text: str, images: list[dict[str, object]]) -> None:
+    from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
+
+    page = writer.add_blank_page(width=400, height=300)
+    font = DictionaryObject({
+        NameObject("/Type"): NameObject("/Font"),
+        NameObject("/Subtype"): NameObject("/Type1"),
+        NameObject("/BaseFont"): NameObject("/Helvetica"),
+    })
+    xobjects = DictionaryObject()
+    ops = [f"BT /F1 11 Tf 1 0 0 1 40 250 Tm ({_pdf_text(text)}) Tj ET"]
+    for idx, spec in enumerate(images, start=1):
+        name = NameObject(f"/Im{idx}")
+        xobjects[name] = _image_xobject(
+            writer,
+            w=int(spec["pixels_w"]),
+            h=int(spec["pixels_h"]),
+            rgb=spec["rgb"],  # type: ignore[arg-type]
+            noisy=bool(spec.get("noisy", True)),
+        )
+        ops.append(
+            f"q {spec['draw_w']} 0 0 {spec['draw_h']} "
+            f"{spec['x']} {spec['y']} cm {name} Do Q"
+        )
+    page[NameObject("/Resources")] = DictionaryObject({
+        NameObject("/Font"): DictionaryObject({NameObject("/F1"): font}),
+        NameObject("/XObject"): xobjects,
+    })
+    stream = DecodedStreamObject()
+    stream.set_data("\n".join(ops).encode("ascii"))
+    page.replace_contents(stream)
 
 
 def _build_pdf_with_images() -> bytes:
-    from fpdf import FPDF
+    from pypdf import PdfWriter
 
-    big = _make_solid_png(220, 160, (200, 80, 50))     # significant (noisy)
-    big2 = _make_solid_png(180, 120, (50, 180, 100))   # significant (noisy)
-    icon = _make_solid_png(20, 20, (255, 255, 255), noisy=False)  # too small
-
-    paths = []
-    for png in (big, big2, icon):
-        f = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-        f.write(png)
-        f.close()
-        paths.append(f.name)
-
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_font("Helvetica", size=11)
-    pdf.multi_cell(0, 6, text=(
-        "Page 1: Introduction. This section discusses Raft consensus, "
-        "leader election, log replication, and the safety properties "
-        "that make Raft easier to understand than Paxos. The figure "
-        "below illustrates the leader election timing diagram."
-    ))
-    pdf.image(paths[0], x=10, y=70, w=80, h=60)        # fig 1.1 (big)
-    pdf.image(paths[2], x=100, y=70, w=8, h=8)         # icon (filtered)
-
-    pdf.add_page()
-    pdf.set_font("Helvetica", size=11)
-    pdf.multi_cell(0, 6, text=(
-        "Page 2: Pipeline. We now describe Paxos, a classical "
-        "majority-quorum consensus algorithm. Acceptors, proposers, "
-        "and learners coordinate through phase 1 prepare and phase 2 "
-        "accept messages. The figure shows the message flow."
-    ))
-    pdf.image(paths[1], x=10, y=70, w=70, h=50)        # fig 2.1 (big)
-
-    pdf.add_page()
-    pdf.set_font("Helvetica", size=11)
-    pdf.multi_cell(0, 6, text=(
-        "Page 3: Conclusion. We compared Raft and Paxos across "
-        "ergonomics, performance, and pedagogical clarity. Future work "
-        "includes Byzantine extensions and geo-replication considerations."
-    ))
-    return bytes(pdf.output())
+    writer = PdfWriter()
+    _add_pdf_page(
+        writer,
+        text=(
+            "Page 1 Introduction discusses Raft consensus leader election "
+            "log replication and safety properties with a timing diagram."
+        ),
+        images=[
+            {
+                "pixels_w": 220,
+                "pixels_h": 160,
+                "rgb": (200, 80, 50),
+                "x": 10,
+                "y": 70,
+                "draw_w": 80,
+                "draw_h": 60,
+            },
+            {
+                "pixels_w": 20,
+                "pixels_h": 20,
+                "rgb": (255, 255, 255),
+                "x": 100,
+                "y": 70,
+                "draw_w": 8,
+                "draw_h": 8,
+                "noisy": False,
+            },
+        ],
+    )
+    _add_pdf_page(
+        writer,
+        text=(
+            "Page 2 Pipeline describes Paxos majority quorum consensus "
+            "with proposers acceptors learners prepare and accept messages."
+        ),
+        images=[
+            {
+                "pixels_w": 180,
+                "pixels_h": 120,
+                "rgb": (50, 180, 100),
+                "x": 10,
+                "y": 70,
+                "draw_w": 70,
+                "draw_h": 50,
+            },
+        ],
+    )
+    _add_pdf_page(
+        writer,
+        text=(
+            "Page 3 Conclusion compares Raft and Paxos across ergonomics "
+            "performance and pedagogical clarity."
+        ),
+        images=[],
+    )
+    out = io.BytesIO()
+    writer.write(out)
+    return out.getvalue()
 
 
 # ---- fake clients ----------------------------------------------------------
@@ -332,6 +388,10 @@ async def main():
         assert len(sections) == 3
         for sec in sections:
             assert sec["anchor"]["unit"] == "pages"
+        figures = f.description.get("figures") or []
+        assert len(figures) == 2
+        assert figures[0]["label"].startswith("Figure ")
+        assert "Synthetic figure description for" in figures[0]["text"]
         print("[3] DB description.sections has 3 page-anchored sections")
 
     print("\nALL PDF_WITH_IMAGES E2E CHECKS PASSED")

@@ -63,7 +63,6 @@ from marginalia.pipelines.pdf_text import (
     extract_pdf_page_labels,
     extract_pdf_text_range,
     pdf_page_count,
-    render_pdf_text_pages,
     resolve_page_label,
 )
 from marginalia.pipelines.registry import register_pipeline
@@ -400,6 +399,7 @@ class PdfPipeline(Pipeline):
             coverage=coverage,
             ocr_used=ocr_used,
             ocr_pages_done=ocr_pages_done,
+            described=described,
             ocr_pages=ocr_pages,
             ocr_document_type=ocr_document_type,
         )
@@ -567,6 +567,7 @@ class PdfPipeline(Pipeline):
             coverage=coverage,
             ocr_used=ocr_used,
             ocr_pages_done=ocr_pages_done,
+            described=described,
             ocr_pages=ocr_pages,
             ocr_document_type=ocr_document_type,
         )
@@ -607,6 +608,7 @@ class PdfPipeline(Pipeline):
         coverage: dict[str, Any],
         ocr_used: bool,
         ocr_pages_done: int,
+        described: list["DescribedImage"],
         ocr_pages: list[str] | None = None,
         ocr_document_type: str | None = None,
     ) -> PipelineResult:
@@ -616,6 +618,9 @@ class PdfPipeline(Pipeline):
         }
         if fields.description_text:
             description["text"] = fields.description_text
+        figures = _pdf_figures_payload(described)
+        if figures:
+            description["figures"] = figures
         if ocr_used:
             stored_pages, block_count = _build_ocr_pages_payload(ocr_pages or [])
             description["ocr"] = {
@@ -714,7 +719,7 @@ class PdfPipeline(Pipeline):
                 file_row=file_row, question=question, args=args, storage=storage,
             )
         pdf_bytes = await self._read_bytes(storage, file_row.storage_key)
-        return self._slice(pdf_bytes, args)
+        return self._slice(pdf_bytes, args, file_row=file_row)
 
     async def _answer_with_vlm(
         self,
@@ -961,7 +966,7 @@ class PdfPipeline(Pipeline):
         return self._slice(body, args)
 
     def _slice(
-        self, pdf_bytes: bytes, args: dict[str, Any],
+        self, pdf_bytes: bytes, args: dict[str, Any], *, file_row: Any | None = None,
     ) -> SegmentResult:
         """Resolve args against a PDF's text body.
 
@@ -977,10 +982,14 @@ class PdfPipeline(Pipeline):
         returns an actionable error suggesting `question` for VLM-based
         reading instead of the opaque "empty result".
         """
-        return self._slice_text_layer(pdf_bytes, args)
+        return self._slice_text_layer(pdf_bytes, args, file_row=file_row)
 
     def _slice_text_layer(
-        self, pdf_bytes: bytes, args: dict[str, Any],
+        self,
+        pdf_bytes: bytes,
+        args: dict[str, Any],
+        *,
+        file_row: Any | None = None,
     ) -> SegmentResult:
         try:
             labels = extract_pdf_page_labels(pdf_bytes)
@@ -989,6 +998,7 @@ class PdfPipeline(Pipeline):
             return SegmentResult(error=f"PDF parse failed: {exc}")
         if total_pages == 0:
             return SegmentResult(error="PDF has no pages")
+        figures = _pdf_figures_from_file(file_row)
 
         offset = _int_arg(args.get("offset"), default=0, minimum=0)
         max_chars = _int_arg(
@@ -1021,7 +1031,12 @@ class PdfPipeline(Pipeline):
                 page_start=resolved.page_start,
                 page_end=resolved.page_end,
             )
-            if all(not page.strip() for page in doc.pages):
+            pages = _inline_pdf_figures(
+                doc.pages,
+                start_page=doc.page_start,
+                figures=figures,
+            )
+            if all(not page.strip() for page in pages):
                 return SegmentResult(
                     error=_NO_TEXT_LAYER_ERROR,
                     extras={
@@ -1032,7 +1047,7 @@ class PdfPipeline(Pipeline):
                     },
                 )
             result = _pdf_pattern_search(
-                pages=doc.pages,
+                pages=pages,
                 pattern=pattern,
                 context_lines=int(args.get("context_lines") or 2),
                 max_matches=int(args.get("max_matches") or 20),
@@ -1065,7 +1080,12 @@ class PdfPipeline(Pipeline):
                 page_start=resolved.page_start,
                 page_end=resolved.page_end,
             )
-            if all(not page.strip() for page in doc.pages):
+            pages = _inline_pdf_figures(
+                doc.pages,
+                start_page=doc.page_start,
+                figures=figures,
+            )
+            if all(not page.strip() for page in pages):
                 return SegmentResult(
                     error=_NO_TEXT_LAYER_ERROR,
                     extras={
@@ -1076,7 +1096,7 @@ class PdfPipeline(Pipeline):
                     },
                 )
             result = _clamp_pdf(
-                render_pdf_text_pages(doc),
+                _render_pdf_text_pages(doc, pages),
                 offset,
                 max_chars,
                 extras={"total_pages": total_pages},
@@ -1086,12 +1106,17 @@ class PdfPipeline(Pipeline):
 
         end = min(total_pages, PDF_DEFAULT_READ_PAGES)
         doc = extract_pdf_text_range(pdf_bytes, page_start=1, page_end=end)
-        if all(not page.strip() for page in doc.pages):
+        pages = _inline_pdf_figures(
+            doc.pages,
+            start_page=doc.page_start,
+            figures=figures,
+        )
+        if all(not page.strip() for page in pages):
             return SegmentResult(
                 error=_NO_TEXT_LAYER_ERROR,
                 extras={"total_pages": total_pages, "page_end": end},
             )
-        body = render_pdf_text_pages(doc)
+        body = _render_pdf_text_pages(doc, pages)
         if offset >= len(body) and end < total_pages:
             return SegmentResult(
                 error=(
@@ -1767,6 +1792,94 @@ def render_pages_with_figures(
             ]
             body = body + "\n\n" + "\n".join(fig_lines)
         chunks.append(f"### Page {i}\n{body}")
+    return "\n\n".join(chunks)
+
+
+def _pdf_figures_payload(described: list[DescribedImage]) -> list[dict[str, Any]]:
+    figures: list[dict[str, Any]] = []
+    for item in described:
+        text = (item.description or "").strip()
+        if not text:
+            continue
+        figure: dict[str, Any] = {
+            "page": item.page_num,
+            "figure": item.fig_index,
+            "label": f"Figure {item.page_num}.{item.fig_index}",
+            "text": text,
+        }
+        if item.error:
+            figure["error"] = item.error
+        figures.append(figure)
+    return figures
+
+
+def _pdf_figures_from_file(file_row: Any | None) -> list[dict[str, Any]]:
+    description = getattr(file_row, "description", None) if file_row is not None else None
+    if not isinstance(description, dict):
+        return []
+    raw = description.get("figures")
+    if not isinstance(raw, list):
+        return []
+    figures: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        try:
+            page = int(item.get("page") or 0)
+            figure = int(item.get("figure") or 0)
+        except (TypeError, ValueError):
+            continue
+        text = str(item.get("text") or item.get("description") or "").strip()
+        if page <= 0 or figure <= 0 or not text:
+            continue
+        figures.append({
+            "page": page,
+            "figure": figure,
+            "label": str(item.get("label") or f"Figure {page}.{figure}"),
+            "text": text,
+        })
+    return figures
+
+
+def _inline_pdf_figures(
+    pages: list[str],
+    *,
+    start_page: int,
+    figures: list[dict[str, Any]],
+) -> list[str]:
+    if not figures:
+        return pages
+    out = list(pages)
+    end_page = start_page + len(out) - 1
+    by_page: dict[int, list[str]] = {}
+    for item in figures:
+        try:
+            page = int(item.get("page") or 0)
+        except (TypeError, ValueError):
+            continue
+        if page < start_page or page > end_page:
+            continue
+        label = str(item.get("label") or f"Figure {page}.{item.get('figure') or 1}")
+        text = str(item.get("text") or "").strip()
+        if not text:
+            continue
+        clean_label = label.strip().removeprefix("[").removesuffix("]")
+        by_page.setdefault(page, []).append(f"[{clean_label}] {text}")
+    for page, lines in by_page.items():
+        idx = page - start_page
+        body = (out[idx] or "").rstrip()
+        figure_text = "\n".join(lines)
+        out[idx] = f"{body}\n\n{figure_text}" if body else figure_text
+    return out
+
+
+def _render_pdf_text_pages(doc: Any, pages: list[str]) -> str:
+    chunks: list[str] = []
+    for offset, txt in enumerate(pages):
+        page = doc.page_start + offset
+        label = doc.page_labels[offset] if offset < len(doc.page_labels) else str(page)
+        label_line = "" if label == str(page) else f"\n[Page label: {label}]"
+        chunks.append(f"[Page {page}]{label_line}\n{txt}")
     return "\n\n".join(chunks)
 
 

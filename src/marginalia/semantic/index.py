@@ -131,7 +131,7 @@ async def build_semantic_index(
 ) -> SemanticIndexBuildResult:
     settings = get_settings()
     client = client or get_embedding_client(settings)
-    batch_size = max(1, min(10, int(batch_size or settings.embedding_batch_size or 10)))
+    batch_size = max(1, int(batch_size or settings.embedding_batch_size or 10))
     concurrency = max(1, int(concurrency or 1))
     started = time.monotonic()
     pairs = await _load_indexable_entries(session, list(entry_ids) if entry_ids else None)
@@ -350,7 +350,7 @@ async def refresh_semantic_index_for_file(
     refreshed_vectors = bytearray()
     total_tokens = 0
     client = client or get_embedding_client(settings)
-    batch_size = max(1, min(10, int(settings.embedding_batch_size or 10)))
+    batch_size = max(1, int(settings.embedding_batch_size or 10))
     for start in range(0, len(pairs), batch_size):
         batch = pairs[start:start + batch_size]
         embedded_batch, texts, result = await _embed_batch(client, batch)
@@ -494,7 +494,7 @@ async def search_semantic_index_many(
         return [[] for _query in clean]
     if client is None and not settings.embedding_api_key:
         return [[] for _query in clean]
-    batch_size = max(1, min(10, int(batch_size or settings.embedding_batch_size or 10)))
+    batch_size = max(1, int(batch_size or settings.embedding_batch_size or 10))
     client = client or get_embedding_client(settings)
     query_vectors = await _embed_queries_cached(
         client,
