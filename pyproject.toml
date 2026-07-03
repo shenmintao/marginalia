@@ -146,4 +146,8 @@ ignore = [
     "F401",
     "F541",
     "F841",
+    # Tests poll external async state (in-flight tasks, received frames) with a
+    # sleep loop; a real asyncio.Event rarely maps cleanly onto that, and the
+    # loops are bounded by asyncio.wait_for timeouts.
+    "ASYNC110",
 ]
