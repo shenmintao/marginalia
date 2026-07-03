@@ -85,4 +85,13 @@ EXPOSE 8000
 # Schema bootstrap runs on app startup (marginalia.db.bootstrap), so the
 # container just needs to exec uvicorn. Worker service overrides command
 # to `marginalia-worker`.
+#
+# SECURITY: this binds 0.0.0.0 *inside the container*. If you publish the
+# port beyond loopback (e.g. `docker run -p 8000:8000`, or editing the
+# compose file's `127.0.0.1:8000:8000` bind for LAN exposure), you MUST
+# set MARGINALIA_API_TOKEN — without it every endpoint is unauthenticated.
+# MARGINALIA_API_HOST mirrors the uvicorn --host flag below so the app's
+# startup checks (the unauthenticated-bind warning) see the real bind
+# address rather than the 127.0.0.1 default.
+ENV MARGINALIA_API_HOST=0.0.0.0
 CMD ["uvicorn", "marginalia.main:app", "--host", "0.0.0.0", "--port", "8000"]

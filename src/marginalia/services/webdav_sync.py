@@ -11,8 +11,10 @@ from datetime import datetime, timezone
 from decimal import Decimal
 import hashlib
 import json
+import logging
 import os
 import platform
+import re
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -20,7 +22,7 @@ from urllib.parse import quote
 import uuid
 
 import httpx
-from sqlalchemy import delete, null, select
+from sqlalchemy import null, select
 
 from marginalia import __version__
 from marginalia.config import Settings, get_settings
@@ -46,6 +48,8 @@ from marginalia.services.knowledge_pack import (
 from marginalia.storage import get_storage
 from marginalia.storage.mirror import MirrorStorage
 from marginalia.utils.ids import storage_prefix
+
+log = logging.getLogger(__name__)
 
 _STATUS_REL = Path("sync") / "webdav_status.json"
 _LIBRARY_ID_REL = Path("sync") / "library_id"
@@ -380,12 +384,41 @@ async def publish_snapshot(settings: Settings | None = None) -> dict[str, Any]:
     storage = get_storage()
     client = WebDavClient(s)
     try:
+        remote = await _read_remote_snapshot(
+            client, root, allow_missing=True, recover=True
+        )
+        _require_same_library(remote["latest"], library_id)
+
         async with session_scope() as session:
             pack = await build_knowledge_pack(
                 session,
                 snapshot_id=snapshot_id,
                 library_id=library_id,
             )
+
+        # Merge remote-only rows so a full publish from a machine that never
+        # pulled does not silently drop entries other machines published.
+        local_rows = {
+            name: _parse_jsonl(body, source=f"local {name}")
+            for name, body in pack.metadata_files.items()
+            if name.endswith(".jsonl")
+        }
+        local_entry_ids = {
+            str(row.get("entry_id") or "")
+            for row in local_rows.get("entries.jsonl", [])
+            if row.get("entry_id")
+        }
+        combined_rows = _merge_snapshot_rows(
+            remote_rows=remote["rows"],
+            local_rows=local_rows,
+            selected_entry_ids=local_entry_ids,
+        )
+        manifest = _manifest_for_rows(
+            snapshot_id=snapshot_id,
+            library_id=library_id,
+            rows=combined_rows,
+        )
+        metadata_files = _metadata_files_for_rows(manifest, combined_rows)
 
         await client.ensure_dir(root)
         await client.ensure_dir(_join_remote(root, "blobs"))
@@ -403,18 +436,11 @@ async def publish_snapshot(settings: Settings | None = None) -> dict[str, Any]:
             )
             uploaded_blobs += 1
 
-        for name, body in pack.metadata_files.items():
-            content_type = (
-                "application/json; charset=utf-8"
-                if name.endswith(".json")
-                else "application/x-ndjson; charset=utf-8"
-                if name.endswith(".jsonl")
-                else "text/markdown; charset=utf-8"
-            )
+        for name, body in metadata_files.items():
             await client.put_bytes(
                 _join_remote(snapshot_root, name),
                 body,
-                content_type=content_type,
+                content_type=_metadata_content_type(name),
             )
             uploaded_metadata_files += 1
 
@@ -445,9 +471,9 @@ async def publish_snapshot(settings: Settings | None = None) -> dict[str, Any]:
             "uploaded_blobs": uploaded_blobs,
             "skipped_blobs": skipped_blobs,
             "uploaded_metadata_files": uploaded_metadata_files,
-            "entry_count": pack.manifest["counts"]["entries"],
-            "blob_count": pack.manifest["counts"]["blobs"],
-            "blob_bytes": pack.manifest["counts"]["blob_bytes"],
+            "entry_count": manifest["counts"]["entries"],
+            "blob_count": manifest["counts"]["blobs"],
+            "blob_bytes": manifest["counts"]["blob_bytes"],
             "error": None,
         }
         _write_status(s, result)
@@ -594,7 +620,10 @@ async def publish_selected(
     uploaded_metadata_files = 0
     try:
         write_progress("reading_remote")
-        remote = await _read_remote_snapshot(client, root, allow_missing=True)
+        remote = await _read_remote_snapshot(
+            client, root, allow_missing=True, recover=True
+        )
+        _require_same_library(remote["latest"], library_id)
 
         write_progress("building_snapshot")
         async with session_scope() as session:
@@ -880,9 +909,9 @@ async def download_selected(
         try:
             result = await hydrate_entry(entry_id, s)
         except Exception as exc:
-            errors.append({"entry_id": entry_id, "error": str(exc)})
+            errors.append({"entry_id": entry_id, "error": _redact_error(exc)})
             continue
-        if result.get("hydrated"):
+        if result.get("hydrated") and not result.get("already_local"):
             downloaded_files += 1
 
     finished_at = _now_iso()
@@ -926,6 +955,13 @@ async def pull_latest_metadata(settings: Settings | None = None) -> dict[str, An
         if manifest is None:
             raise WebDavConfigError("remote manifest not found")
 
+        # Refuse to merge an unrelated remote library into a machine that
+        # already belongs to a different one, before touching the DB.
+        remote_library_id = str(
+            manifest.get("library_id") or latest.get("library_id") or ""
+        )
+        _guard_pull_library(s, remote_library_id)
+
         files: dict[str, list[dict[str, Any]]] = {}
         optional_files = {"sessions.jsonl", "conversations.jsonl", "journals.jsonl"}
         manifest_files = set(manifest.get("metadata_files") or [])
@@ -959,6 +995,11 @@ async def pull_latest_metadata(settings: Settings | None = None) -> dict[str, An
                 rows=files,
             )
             await session.commit()
+
+        # A successful pull joins this machine to the remote library, so
+        # later publishes pass the library_id ownership check. The guard above
+        # already ensured the local id is empty or equal to the remote one.
+        _adopt_library_id(s, remote_library_id)
 
         status = read_status(s)
         last = dict(status.get("last") or {})
@@ -1006,13 +1047,18 @@ async def hydrate_entry(entry_id: str, settings: Settings | None = None) -> dict
                 "already_local": True,
             }
         if marker.get("hydrated"):
-            return {
-                "ok": True,
-                "entry_id": entry.id,
-                "file_id": file_row.id,
-                "hydrated": True,
-                "already_local": True,
-            }
+            marker_sha = str(marker.get("sha256") or "").lower()
+            local_sha = str(file_row.sha256 or "").lower()
+            # A hydrated marker is only trustworthy while it still describes
+            # the content the DB row expects; on mismatch re-download.
+            if not marker_sha or marker_sha == local_sha:
+                return {
+                    "ok": True,
+                    "entry_id": entry.id,
+                    "file_id": file_row.id,
+                    "hydrated": True,
+                    "already_local": True,
+                }
         remote_root = str(marker.get("remote_root") or _remote_root(s))
         blob_path = str(marker.get("blob_path") or "")
         if not blob_path:
@@ -1093,9 +1139,9 @@ async def download_latest(settings: Settings | None = None) -> dict[str, Any]:
         try:
             result = await hydrate_entry(entry_id, s)
         except Exception as exc:
-            errors.append({"entry_id": entry_id, "error": str(exc)})
+            errors.append({"entry_id": entry_id, "error": _redact_error(exc)})
             continue
-        if result.get("hydrated"):
+        if result.get("hydrated") and not result.get("already_local"):
             downloaded_files += 1
 
     finished_at = _now_iso()
@@ -1151,41 +1197,61 @@ def read_status(settings: Settings | None = None) -> dict[str, Any]:
     }
 
 
+def _empty_snapshot() -> dict[str, Any]:
+    return {
+        "latest": {},
+        "manifest": {},
+        "rows": {name: [] for name in _METADATA_JSONL},
+    }
+
+
 async def _read_remote_snapshot(
     client: WebDavClient,
     root: str,
     *,
     allow_missing: bool,
+    recover: bool = False,
 ) -> dict[str, Any]:
-    latest = await client.read_json(_join_remote(root, "latest.json"))
-    if latest is None:
-        if allow_missing:
-            return {
-                "latest": {},
-                "manifest": {},
-                "rows": {name: [] for name in _METADATA_JSONL},
-            }
-        raise WebDavConfigError("remote latest.json not found")
-    latest_snapshot = str(latest.get("latest_snapshot") or "")
-    if not latest_snapshot:
-        raise WebDavConfigError("remote latest.json has no latest_snapshot")
-    snapshot_root = _parent_path(_join_remote(root, latest_snapshot))
-    manifest = await client.read_json(_join_remote(root, latest_snapshot))
-    if manifest is None:
-        raise WebDavConfigError("remote manifest not found")
+    try:
+        latest = await client.read_json(_join_remote(root, "latest.json"))
+        if latest is None:
+            if allow_missing:
+                return _empty_snapshot()
+            raise WebDavConfigError("remote latest.json not found")
+        latest_snapshot = str(latest.get("latest_snapshot") or "")
+        if not latest_snapshot:
+            raise WebDavConfigError("remote latest.json has no latest_snapshot")
+        snapshot_root = _parent_path(_join_remote(root, latest_snapshot))
+        manifest = await client.read_json(_join_remote(root, latest_snapshot))
+        if manifest is None:
+            raise WebDavConfigError("remote manifest not found")
 
-    manifest_files = set(manifest.get("metadata_files") or [])
-    rows: dict[str, list[dict[str, Any]]] = {}
-    for name in _METADATA_JSONL:
-        if name in _OPTIONAL_METADATA_JSONL and name not in manifest_files:
-            rows[name] = []
-            continue
-        body = await client.read_bytes(_join_remote(snapshot_root, name))
-        rows[name] = _parse_jsonl(
-            body,
-            source=_join_remote(snapshot_root, name),
-        )
-    return {"latest": latest, "manifest": manifest, "rows": rows}
+        manifest_files = set(manifest.get("metadata_files") or [])
+        rows: dict[str, list[dict[str, Any]]] = {}
+        for name in _METADATA_JSONL:
+            if name in _OPTIONAL_METADATA_JSONL and name not in manifest_files:
+                rows[name] = []
+                continue
+            body = await client.read_bytes(_join_remote(snapshot_root, name))
+            rows[name] = _parse_jsonl(
+                body,
+                source=_join_remote(snapshot_root, name),
+            )
+        return {"latest": latest, "manifest": manifest, "rows": rows}
+    except WebDavConfigError:
+        # Publish is the recovery path: an interrupted PUT (or external
+        # corruption) can leave latest.json/manifest unreadable. Rather than
+        # bricking publish too, warn loudly and publish a fresh full snapshot.
+        # Pull keeps `recover=False` and still fails loudly.
+        if recover:
+            log.warning(
+                "remote snapshot under %s is unreadable/corrupt; publishing a "
+                "fresh full snapshot instead of merging remote rows",
+                root,
+                exc_info=True,
+            )
+            return _empty_snapshot()
+        raise
 
 
 def _merge_snapshot_rows(
@@ -1410,6 +1476,9 @@ async def _import_metadata(
     rows: dict[str, list[dict[str, Any]]],
 ) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
+    snapshot_created_at = _parse_dt(manifest.get("created_at")) or _parse_dt(
+        latest.get("updated_at")
+    )
     imported = {
         "folders": 0,
         "catalogs": 0,
@@ -1423,33 +1492,84 @@ async def _import_metadata(
         "conversations": 0,
         "journals": 0,
         "remote_files": 0,
+        "conflicts": 0,
     }
     storage = get_storage()
-    for item in rows.get("folders.jsonl", []):
+
+    all_folder_rows = (await session.execute(select(Folder))).scalars().all()
+    # (parent_id, name) index so same-named folders created independently on
+    # two machines reconcile instead of violating uq_folders_parent_name. The
+    # unique constraint spans soft-deleted rows too, so a collision with a
+    # locally soft-deleted folder must reconcile (resurrect/reuse), not crash.
+    folders_by_key: dict[tuple[str | None, str], Folder] = {
+        (row.parent_id, row.name): row for row in all_folder_rows
+    }
+    folder_id_map: dict[str, str] = {}
+    # Parents before children: remote parent_id keys resolve through
+    # folder_id_map and fresh inserts satisfy the parent_id self-FK.
+    for item in _order_by_parent_chain(rows.get("folders.jsonl", []), id_key="folder_id"):
         folder_id = str(item.get("folder_id") or "")
         if not folder_id:
             continue
+        name = _sanitize_import_name(item.get("name"), "Untitled")
+        raw_parent = str(item.get("parent_id") or "") or None
+        parent_id = folder_id_map.get(raw_parent, raw_parent) if raw_parent else None
+        # Re-home under the nearest live ancestor (or root): a missing parent
+        # would FK-fail, and a soft-deleted parent would make this live child
+        # unreachable through the folder tree.
+        parent_id = await _nearest_live_folder_id(session, parent_id)
         row = await session.get(Folder, folder_id)
-        if row is None:
+        key_row = folders_by_key.get((parent_id, name))
+        if key_row is not None and (row is None or key_row.id != row.id):
+            row = key_row
+        if row is not None:
+            folder_id_map[folder_id] = str(row.id)
+            if _local_row_wins(
+                row.updated_at,
+                row.deleted_at,
+                _parse_dt(item.get("updated_at")),
+                snapshot_created_at,
+            ):
+                imported["conflicts"] += 1
+                continue
+        else:
             row = Folder(id=folder_id, created_at=_parse_dt(item.get("created_at")) or now)
             session.add(row)
-        row.parent_id = item.get("parent_id")
-        row.name = str(item.get("name") or "Untitled")
+            folder_id_map[folder_id] = folder_id
+        old_key = (row.parent_id, row.name)
+        if folders_by_key.get(old_key) is row:
+            folders_by_key.pop(old_key, None)
+        row.parent_id = parent_id
+        row.name = name
         row.updated_at = _parse_dt(item.get("updated_at")) or now
         row.deleted_at = None
+        folders_by_key[(parent_id, name)] = row
         imported["folders"] += 1
         await session.flush()
 
-    for item in rows.get("catalogs.jsonl", []):
+    # Same parents-before-children ordering: catalogs share the self-FK
+    # per-row-flush pattern that made reparented rows fail on import.
+    for item in _order_by_parent_chain(rows.get("catalogs.jsonl", []), id_key="catalog_id"):
         catalog_id = str(item.get("catalog_id") or "")
         if not catalog_id:
             continue
+        parent_id = str(item.get("parent_id") or "") or None
+        if parent_id is not None and await session.get(Catalog, parent_id) is None:
+            parent_id = None
         row = await session.get(Catalog, catalog_id)
+        if row is not None and _local_row_wins(
+            row.updated_at,
+            row.deleted_at,
+            _parse_dt(item.get("updated_at")),
+            snapshot_created_at,
+        ):
+            imported["conflicts"] += 1
+            continue
         if row is None:
             row = Catalog(id=catalog_id, created_at=_parse_dt(item.get("created_at")) or now)
             session.add(row)
-        row.parent_id = item.get("parent_id")
-        row.name = str(item.get("name") or "Untitled")
+        row.parent_id = parent_id
+        row.name = _sanitize_import_name(item.get("name"), "Untitled")
         row.summary = item.get("summary")
         row.description = item.get("description")
         row.extra = item.get("extra")
@@ -1465,6 +1585,14 @@ async def _import_metadata(
         if not view_id:
             continue
         row = await session.get(View, view_id)
+        if row is not None and _local_row_wins(
+            row.updated_at,
+            row.deleted_at,
+            _parse_dt(item.get("updated_at")),
+            snapshot_created_at,
+        ):
+            imported["conflicts"] += 1
+            continue
         if row is None:
             row = View(id=view_id, created_at=_parse_dt(item.get("created_at")) or now)
             session.add(row)
@@ -1570,13 +1698,48 @@ async def _import_metadata(
         entry_id = str(item.get("entry_id") or "")
         if not file_id or not entry_id:
             continue
+        # Remote ids become DB PKs and placeholder storage keys; reject
+        # anything that is not a canonical UUID (no path-shaped ids).
+        if not _is_canonical_uuid(file_id) or not _is_canonical_uuid(entry_id):
+            continue
+        display_name = _sanitize_import_name(item.get("display_name"), "Untitled")
+
+        entry_row = await session.get(FileEntry, entry_id)
+        entry_meta_wins = entry_row is not None and _local_row_wins(
+            entry_row.updated_at,
+            entry_row.deleted_at,
+            _parse_dt(item.get("updated_at")),
+            snapshot_created_at,
+        )
+        # A newer local *delete* wins outright: do not re-download bytes for,
+        # or resurrect, an entry the user removed locally.
+        if entry_meta_wins and entry_row.deleted_at is not None:
+            imported["conflicts"] += 1
+            continue
+
         file_row = await session.get(File, file_id)
         created_at = _parse_dt(file_meta.get("created_at")) or now
         existing_marker = _remote_marker(file_row.description) if file_row is not None else None
+        remote_sha = str(file_meta.get("sha256") or "")
         hydrated = False
         if file_row is not None:
-            hydrated = bool(existing_marker and existing_marker.get("hydrated"))
-            if not hydrated:
+            local_sha = str(file_row.sha256 or "")
+            if remote_sha and local_sha and remote_sha.lower() != local_sha.lower():
+                # Remote bytes changed: whatever exists locally is stale, so
+                # keep hydrated=False and let hydrate_entry re-download.
+                hydrated = False
+            elif existing_marker is not None:
+                # The marker's `hydrated` flag is authoritative once set: a
+                # hydrated=False marker is an explicit "the on-disk bytes are
+                # stale/absent" assertion. Never let bare disk existence flip
+                # it back to True — on the pull-then-download path files.sha256
+                # was already advanced to the new remote sha, so a plain
+                # exists() check would re-poison the stale local blob.
+                hydrated = bool(existing_marker.get("hydrated"))
+            else:
+                # First time a remote marker is attached to a locally-present
+                # file: the on-disk bytes already match files.sha256, so adopt
+                # them as hydrated.
                 try:
                     hydrated = await storage.exists(file_row.storage_key)
                 except Exception:
@@ -1599,7 +1762,7 @@ async def _import_metadata(
         if file_row is None:
             storage_key = _placeholder_storage_key(
                 file_id=file_id,
-                display_name=str(item.get("display_name") or file_id),
+                display_name=display_name,
                 folder_path=None,
             )
             file_row = File(
@@ -1625,24 +1788,47 @@ async def _import_metadata(
         file_row.deleted_at = None
         await session.flush()
 
-        entry_row = await session.get(FileEntry, entry_id)
         if entry_row is None:
             entry_row = FileEntry(id=entry_id, created_at=_parse_dt(item.get("created_at")) or now)
             session.add(entry_row)
-        entry_row.folder_id = item.get("folder_id")
-        entry_row.file_id = file_id
-        entry_row.display_name = str(item.get("display_name") or "Untitled")
-        entry_row.lifecycle = str(item.get("lifecycle") or "active")
-        entry_row.catalog_id = item.get("catalog_id")
-        entry_row.extra = item.get("extra")
-        entry_row.deleted_at = None
-        entry_row.purge_after = None
-        entry_row.updated_at = _parse_dt(item.get("updated_at")) or now
-        imported["entries"] += 1
+        if entry_meta_wins:
+            # A newer local metadata edit (e.g. a rename) wins: keep the entry
+            # row's own fields untouched. The file-row sha/hydration-marker
+            # logic above still ran, so genuinely changed remote bytes are
+            # still flagged for re-download; only entry metadata is preserved.
+            imported["conflicts"] += 1
+        else:
+            raw_folder_id = str(item.get("folder_id") or "") or None
+            mapped_folder_id = (
+                folder_id_map.get(raw_folder_id, raw_folder_id)
+                if raw_folder_id
+                else None
+            )
+            # Re-home under the nearest live ancestor: an entry attached to a
+            # soft-deleted folder is unreachable (tree queries filter it out).
+            entry_row.folder_id = await _nearest_live_folder_id(
+                session, mapped_folder_id
+            )
+            entry_row.file_id = file_id
+            entry_row.display_name = display_name
+            entry_row.lifecycle = str(item.get("lifecycle") or "active")
+            entry_row.catalog_id = item.get("catalog_id")
+            entry_row.extra = item.get("extra")
+            entry_row.deleted_at = None
+            entry_row.purge_after = None
+            entry_row.updated_at = _parse_dt(item.get("updated_at")) or now
+            imported["entries"] += 1
         await session.flush()
 
-        await session.execute(delete(EntryTag).where(EntryTag.entry_id == entry_id))
-        attached_tag_ids: set[str] = set()
+        # Merge tags: keep local-only assignments, add remote-only ones.
+        attached_tag_ids: set[str] = {
+            str(tag_id)
+            for tag_id in (
+                await session.execute(
+                    select(EntryTag.tag_id).where(EntryTag.entry_id == entry_id)
+                )
+            ).scalars()
+        }
         for tag in item.get("tags") or []:
             if not isinstance(tag, dict) or not tag.get("tag_id"):
                 continue
@@ -1830,6 +2016,68 @@ def _ensure_library_id(settings: Settings) -> str:
     return value
 
 
+def _read_library_id(settings: Settings) -> str:
+    """Read the local library id without minting one (unlike _ensure_...)."""
+    path = _library_id_path(settings)
+    if path.exists():
+        return path.read_text(encoding="utf-8").strip()
+    return ""
+
+
+def _adopt_library_id(settings: Settings, value: str) -> None:
+    if not value:
+        return
+    path = _library_id_path(settings)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(value + "\n", encoding="utf-8")
+
+
+def _guard_pull_library(settings: Settings, remote_library_id: str) -> None:
+    """A pull (also reached implicitly via download/download-selected) must not
+    silently join two unrelated libraries. Adopt the remote id only on a fresh
+    / never-published local library; if a different local id already exists,
+    refuse exactly like the publish guard does."""
+    if not remote_library_id:
+        return
+    local_library_id = _read_library_id(settings)
+    if local_library_id and local_library_id != remote_library_id:
+        raise WebDavConfigError(
+            "remote latest.json belongs to a different library "
+            f"(remote {remote_library_id}, local {local_library_id}); refusing "
+            "to pull. This remote is a different library. To deliberately join "
+            "it, reset this machine's library id first, or point this machine "
+            "at a different remote path."
+        )
+
+
+_URL_RE = re.compile(r"\b[a-zA-Z][a-zA-Z0-9+.\-]*://[^\s'\"<>]+")
+_USERINFO_RE = re.compile(r"\S+:\S+@\S+")
+
+
+def _redact_error(exc: Exception) -> str:
+    """Per-entry error text is returned to clients and written to the status
+    file; raw exception messages (e.g. httpx) can embed the WebDAV URL with
+    userinfo credentials. Reduce to the class name plus a URL-free reason."""
+    text = str(exc)
+    text = _URL_RE.sub("<url>", text)
+    text = _USERINFO_RE.sub("<redacted>", text)
+    text = " ".join(text.split())[:200]
+    name = exc.__class__.__name__
+    return f"{name}: {text}" if text else name
+
+
+def _require_same_library(remote_latest: dict[str, Any], library_id: str) -> None:
+    """Refuse to publish over a remote owned by an unrelated library."""
+    remote_library_id = str((remote_latest or {}).get("library_id") or "")
+    if remote_library_id and remote_library_id != library_id:
+        raise WebDavConfigError(
+            "remote latest.json belongs to a different library "
+            f"(remote {remote_library_id}, local {library_id}); refusing to "
+            "publish over it. Pull from this remote first to join its "
+            "library, or point this machine at a different remote path."
+        )
+
+
 def _write_status(settings: Settings, value: dict[str, Any]) -> None:
     path = _status_path(settings)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1929,6 +2177,98 @@ def _max_dt(a: datetime | None, b: datetime | None) -> datetime | None:
 
 def _tag_import_key(name: str, facet: str) -> tuple[str, str]:
     return (str(name).strip().casefold(), str(facet).strip())
+
+
+_CANONICAL_UUID_RE = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+    re.IGNORECASE,
+)
+
+
+def _is_canonical_uuid(value: str) -> bool:
+    return bool(_CANONICAL_UUID_RE.fullmatch(value))
+
+
+def _sanitize_import_name(value: Any, fallback: str) -> str:
+    """Neutralize traversal-shaped names from remote manifests: they flow
+    into zip member paths and mirror disk paths downstream."""
+    text = "".join(
+        "_" if ch in ("/", "\\") or ord(ch) < 32 or ch == "\x7f" else ch
+        for ch in str(value or "")
+    ).strip()
+    # Dot-only names ('.', '..', ...) would still act as path segments.
+    if not text.strip("."):
+        return fallback
+    return text
+
+
+def _local_row_wins(
+    local_updated_at: datetime | None,
+    local_deleted_at: datetime | None,
+    remote_updated_at: datetime | None,
+    snapshot_created_at: datetime | None,
+) -> bool:
+    """Minimal conflict guard: a strictly newer local edit — or a local
+    delete newer than the remote row/snapshot — must not be clobbered."""
+    if local_deleted_at is not None:
+        reference = remote_updated_at or snapshot_created_at
+        if reference is None or local_deleted_at > reference:
+            return True
+    if local_updated_at is not None and remote_updated_at is not None:
+        return local_updated_at > remote_updated_at
+    return False
+
+
+async def _nearest_live_folder_id(session: Any, folder_id: str | None) -> str | None:
+    """Resolve to the nearest non-deleted ancestor folder id (or None = root).
+
+    A live entry or folder attached to a soft-deleted folder is unreachable,
+    because every folder-tree query filters ``deleted_at IS NULL``. Walk up
+    the parent chain (cycle-guarded) until a live folder or the root is hit."""
+    seen: set[str] = set()
+    cur = folder_id
+    while cur and cur not in seen:
+        seen.add(cur)
+        folder = await session.get(Folder, cur)
+        if folder is None:
+            return None
+        if folder.deleted_at is None:
+            return str(folder.id)
+        cur = folder.parent_id
+    return None
+
+
+def _order_by_parent_chain(
+    items: list[dict[str, Any]],
+    *,
+    id_key: str,
+) -> list[dict[str, Any]]:
+    """Order rows so parents come before children (self-FK safety). Walks
+    each row's parent chain within the batch; cycles emit in chain order
+    and rely on the caller's parent-existence check."""
+    by_id: dict[str, dict[str, Any]] = {}
+    for item in items:
+        item_id = str(item.get(id_key) or "")
+        if item_id:
+            by_id.setdefault(item_id, item)
+    ordered: list[dict[str, Any]] = []
+    placed: set[str] = set()
+    for item in items:
+        item_id = str(item.get(id_key) or "")
+        if not item_id or item_id in placed:
+            continue
+        chain: list[str] = []
+        on_chain: set[str] = set()
+        cur: str | None = item_id
+        while cur and cur in by_id and cur not in placed and cur not in on_chain:
+            chain.append(cur)
+            on_chain.add(cur)
+            parent = str(by_id[cur].get("parent_id") or "")
+            cur = parent or None
+        for chain_id in reversed(chain):
+            ordered.append(by_id[chain_id])
+            placed.add(chain_id)
+    return ordered
 
 
 def _as_int(value: Any, default: int = 0) -> int:

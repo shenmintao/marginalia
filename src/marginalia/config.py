@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from functools import lru_cache
@@ -7,6 +8,8 @@ from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+log = logging.getLogger(__name__)
 
 
 LlmProvider = Literal["openai", "openai-compatible", "anthropic"]
@@ -85,6 +88,13 @@ class Settings(BaseSettings):
     # `error` raises 409, `skip` returns the existing entry. Per-call
     # overrides on `/v1/upload` and the file-entry endpoints win when set.
     default_on_conflict: Literal["rename", "error", "skip"] = "rename"
+
+    # Max accepted size in bytes for a single POST /v1/upload body.
+    # 0 (default) = unlimited, preserving historical behavior; set
+    # MARGINALIA_UPLOAD_MAX_BYTES to cap per-request disk consumption.
+    upload_max_bytes: int = Field(
+        default=0, ge=0, validation_alias="MARGINALIA_UPLOAD_MAX_BYTES",
+    )
 
     # --- LLM defaults (used when a profile leaves a field blank) ------------
     llm_default_provider: LlmProvider = "openai"
@@ -400,9 +410,21 @@ def _settings_env_file() -> str:
     return ".env"
 
 
-def _resolve_paths(settings: "Settings") -> None:
+def _resolve_paths(settings: "Settings", env_file: str | None = None) -> None:
     """In-place: resolve `marginalia_home` to an absolute path and ensure
     it exists.
+
+    A relative home (e.g. `MARGINALIA_HOME=./data` written by older
+    `marginalia init`) is anchored to the directory containing the .env
+    that was loaded, falling back to cwd — otherwise CLI / server / worker
+    processes started from different working directories silently resolve
+    different homes and operate on different databases.
+
+    We only anchor to the .env directory when the relative value actually
+    came from that .env file. A value coming from the *process* environment
+    is relative to the process cwd; anchoring it to a .env that happens to
+    live under the home (the starter `.env` is written to MARGINALIA_HOME)
+    would double-nest it to `<cwd>/<home>/<home>`.
 
     Without the mkdir, an unset / fresh-install MARGINALIA_HOME blows up at
     the first sqlite connect with `unable to open database file` because
@@ -413,14 +435,24 @@ def _resolve_paths(settings: "Settings") -> None:
     from pathlib import Path
     home = settings.marginalia_home or _default_home()
     home_path = Path(home).expanduser()
+    if not home_path.is_absolute():
+        anchor = Path.cwd()
+        # A process-env MARGINALIA_HOME is relative to the process cwd; only a
+        # value that came from the .env file is anchored to that file's dir.
+        from_process_env = os.environ.get("MARGINALIA_HOME") is not None
+        if not from_process_env and env_file and Path(env_file).is_file():
+            anchor = Path(env_file).resolve().parent
+        home_path = (anchor / home_path).resolve()
     settings.marginalia_home = str(home_path)
     home_path.mkdir(parents=True, exist_ok=True)
+    log.info("marginalia home resolved to %s", settings.marginalia_home)
 
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    s = Settings(_env_file=_settings_env_file())
-    _resolve_paths(s)
+    env_file = _settings_env_file()
+    s = Settings(_env_file=env_file)
+    _resolve_paths(s, env_file=env_file)
     # Merge the GUI-writable overlay (config_overlay.json under
     # MARGINALIA_HOME) so its values take precedence over .env. Imported
     # lazily to avoid an import cycle (services -> config -> services).

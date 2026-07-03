@@ -70,6 +70,14 @@ async def _mirror_sync_disk_path(
     file_row = await db.get(File, entry.file_id)
     if file_row is None or file_row.deleted_at is not None:
         return
+    # Non-hydrated WebDAV imports carry a placeholder storage_key with no
+    # file on disk — renaming that would raise FileNotFoundError. The
+    # db-side rename is still valid; hydrate_entry recomputes the disk
+    # path from folder + display_name when it downloads.
+    from marginalia.services.webdav_sync import webdav_remote_marker
+    marker = webdav_remote_marker(file_row.description)
+    if marker and not marker.get("hydrated"):
+        return
     folder_path = await _build_folder_display_path(db, entry.folder_id)
     new_rel = (
         f"{folder_path}/{entry.display_name}".lstrip("/")
@@ -156,17 +164,19 @@ async def move_entry(
     db: AsyncSession,
     *,
     entry_id: str,
-    new_folder_id: str,
+    new_folder_id: str | None,
     on_conflict: Literal["rename", "error", "skip"] | None = None,
 ) -> FileEntry:
+    """Move an entry to `new_folder_id`; None means the vault root."""
     entry = await _get_live_entry(db, entry_id)
     on_conflict = resolve_on_conflict(on_conflict)
     if entry.folder_id == new_folder_id:
         return entry
 
-    target = await db.get(Folder, new_folder_id)
-    if target is None or target.deleted_at is not None:
-        raise ValueError(f"target folder not found: {new_folder_id}")
+    if new_folder_id is not None:
+        target = await db.get(Folder, new_folder_id)
+        if target is None or target.deleted_at is not None:
+            raise ValueError(f"target folder not found: {new_folder_id}")
 
     desired = entry.display_name
     if on_conflict == "error":

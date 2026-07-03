@@ -18,7 +18,19 @@ class LocalStorage(StorageBackend):
         self.root.mkdir(parents=True, exist_ok=True)
 
     def _path(self, key: str) -> Path:
-        return self.root / key
+        # Defence-in-depth: refuse keys that escape the object root. A
+        # storage_key is normally a UUID we minted, but WebDAV metadata
+        # import builds keys from a remote-supplied `file_id`, so a hostile
+        # snapshot could otherwise smuggle '../' segments and turn hydrate
+        # into an arbitrary local file write. Mirror MirrorStorage._abs.
+        candidate = (self.root / key).resolve()
+        try:
+            candidate.relative_to(self.root.resolve())
+        except ValueError as exc:
+            raise ValueError(
+                f"storage_key {key!r} escapes object root"
+            ) from exc
+        return candidate
 
     async def put(
         self,

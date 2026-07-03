@@ -61,16 +61,24 @@ async def _arun(settings: Settings) -> int:
         stop_event.set()
 
     loop = asyncio.get_running_loop()
-    for sig_name in ("SIGINT", "SIGTERM"):
+    for sig_name in ("SIGINT", "SIGTERM", "SIGBREAK"):
         sig = getattr(signal, sig_name, None)
         if sig is None:
             continue
         try:
             loop.add_signal_handler(sig, _on_signal, sig_name)
         except NotImplementedError:
-            # Windows doesn't implement add_signal_handler for SIGTERM;
-            # KeyboardInterrupt below covers SIGINT (Ctrl-C).
-            pass
+            # Windows doesn't implement add_signal_handler. Under
+            # asyncio.run a raw Ctrl-C would propagate KeyboardInterrupt
+            # out of run_forever and skip runner.stop() entirely, so fall
+            # back to signal.signal with a handler that hops onto the
+            # loop — keeping the graceful drain path below reachable.
+            def _sync_handler(signum, frame, _name=sig_name):
+                loop.call_soon_threadsafe(_on_signal, _name)
+            try:
+                signal.signal(sig, _sync_handler)
+            except (ValueError, OSError):
+                pass  # not on the main thread / signal unsupported
 
     try:
         await stop_event.wait()

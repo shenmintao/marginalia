@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import signal
 import sys
 from pathlib import Path
 from typing import AsyncIterator, Optional
@@ -199,6 +200,16 @@ def _build_pt_session(prompt_fn, ctx: CliContext | None = None, *, toolbar_fn=No
         """Alt+Enter inserts a newline (so users can submit multi-line text)."""
         event.app.current_buffer.newline()
 
+    @bindings.add("c-c")
+    def _(event):
+        """Ctrl-C cancels the current line if any input typed; at an
+        empty prompt it signals exit (matches the module docstring)."""
+        buf = event.app.current_buffer
+        if buf.text:
+            buf.reset()
+        else:
+            event.app.exit(exception=KeyboardInterrupt, style="class:aborting")
+
     history_path = HISTORY_PATH
     try:
         history_path.parent.mkdir(parents=True, exist_ok=True)
@@ -336,6 +347,7 @@ async def run_repl(
     api_token: str | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
     mode: str = "remote",
+    remote_explicit: bool = False,
 ) -> int:
     """Run the REPL.
 
@@ -349,10 +361,20 @@ async def run_repl(
         Optional httpx transport. Set when embedded mode prepares an
         ASGITransport in advance, or when tests inject a fake.
     mode
-        ``"embedded"`` or ``"remote"`` — affects only the banner.
+        ``"embedded"`` or ``"remote"`` — shown in the banner, and remote
+        mode disables commands that would touch the local DB/vault.
+    remote_explicit
+        True only when the URL came from ``--server`` / ``MARGINALIA_SERVER``
+        (a truly different box). Left False for a server found via local
+        discovery, which shares this machine's vault — so vault-membership
+        guards (the /upload check) still apply.
     """
     client = MarginaliaClient(base_url=base_url, api_token=api_token, transport=transport)
-    ctx = CliContext(client=client)
+    ctx = CliContext(
+        client=client,
+        remote=(mode != EMBEDDED_MARKER),
+        remote_explicit=remote_explicit,
+    )
     pending_count = 0
 
     use_pt = sys.stdin.isatty() and sys.stdout.isatty()
@@ -376,8 +398,16 @@ async def run_repl(
 
         _print_banner(ctx, mode)
 
+        loop = asyncio.get_running_loop()
+
         while True:
             pending_count = await _refresh_pending_count(client)
+            # At the prompt (idle) the default SIGINT handler is in effect,
+            # so Ctrl-C interrupts the read and exits the REPL — the same
+            # behaviour as before cancellation was added. This matters most
+            # in non-TTY fallback mode, where prompt_toolkit's own c-c
+            # binding is absent; in pt mode the terminal is in raw mode and
+            # Ctrl-C arrives as a key event handled by the c-c binding above.
             if pt_session is not None:
                 line = await _read_with_pt(pt_session)
                 if line is None:
@@ -391,21 +421,44 @@ async def run_repl(
                     print()
                     break
 
+            # Buffer the user's input from subsequent output (session
+            # creation, spinner, answer) — gives every turn a clean
+            # opening line.
+            print()
+            dispatch_task = asyncio.ensure_future(dispatch(ctx, line))
+
+            # A chat turn / command may be long. Install a loop SIGINT
+            # handler for the DURATION OF THE DISPATCH ONLY so Ctrl-C
+            # cancels just that turn; outside this window (at the prompt)
+            # the default handler is restored so Ctrl-C still exits the
+            # REPL. cancel() on an already-finished task is a safe no-op.
+            sigint_installed = False
             try:
-                # Buffer the user's input from subsequent output (session
-                # creation, spinner, answer) — gives every turn a clean
-                # opening line.
-                print()
-                await dispatch(ctx, line)
+                loop.add_signal_handler(signal.SIGINT, dispatch_task.cancel)
+                sigint_installed = True
+            except (NotImplementedError, RuntimeError):
+                pass  # Windows event loops — Ctrl-C stays a KeyboardInterrupt
+
+            try:
+                await dispatch_task
             except _ExitREPL:
                 break
+            except asyncio.CancelledError:
+                if dispatch_task.cancelled():
+                    print("\n(interrupted)")
+                else:
+                    raise  # outer cancellation — not ours to swallow
             except KeyboardInterrupt:
                 print("\n(interrupted)")
-                continue
             except CliHttpError as e:
                 print(f"server error: HTTP {e.status} {e.payload}")
             except Exception as e:  # noqa: BLE001
                 print(f"client error: {e!r}")
+            finally:
+                # Restore default Ctrl-C before the next prompt so idle
+                # interrupts exit the REPL rather than being swallowed.
+                if sigint_installed:
+                    loop.remove_signal_handler(signal.SIGINT)
 
         if ctx.session_id is not None:
             try:
@@ -502,7 +555,12 @@ def main() -> int:
     try:
         if server_url:
             return asyncio.run(
-                run_repl(base_url=server_url, api_token=api_token, mode="remote")
+                run_repl(
+                    base_url=server_url,
+                    api_token=api_token,
+                    mode="remote",
+                    remote_explicit=True,
+                )
             )
         return asyncio.run(_run_discovered_or_embedded(api_token))
     except KeyboardInterrupt:

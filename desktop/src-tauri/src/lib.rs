@@ -39,11 +39,11 @@ use std::os::windows::process::CommandExt;
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Manager, RunEvent, State, WindowEvent,
+    AppHandle, Manager, RunEvent, State, WindowEvent, Wry,
 };
 
 fn home_dir() -> PathBuf {
@@ -95,11 +95,33 @@ fn resolve_bundled_python(app: &AppHandle) -> Option<(PathBuf, PathBuf)> {
     Some((backend_dir, python))
 }
 
+/// Startup outcome exposed to the frontend via `backend_status`, so
+/// BackendGate can tell "still warming up" apart from "doomed, show an
+/// error screen": `starting` (child spawned, waiting on /health),
+/// `external` (attached to an already-running backend or autostart is
+/// off), `error` (spawn failed / configured port occupied), `exited`
+/// (child died after spawn).
+#[derive(Clone, Serialize)]
+struct BackendStatusInfo {
+    state: String,
+    message: Option<String>,
+}
+
+impl Default for BackendStatusInfo {
+    fn default() -> Self {
+        Self {
+            state: "starting".to_string(),
+            message: None,
+        }
+    }
+}
+
 #[derive(Default)]
 struct BackendState {
     child: Mutex<Option<Child>>,
     port: Mutex<Option<u16>>,
     base_url: Mutex<Option<String>>,
+    status: Mutex<BackendStatusInfo>,
 }
 
 /// Pick an ephemeral port the OS marks as currently free. There's a small
@@ -110,6 +132,23 @@ fn pick_free_port() -> std::io::Result<u16> {
     let port = listener.local_addr()?.port();
     drop(listener);
     Ok(port)
+}
+
+/// Best-effort probe that a configured fixed port is still free before
+/// handing it to the sidecar. uvicorn exits immediately on
+/// "address already in use" and nothing used to notice — the UI just
+/// spun on the health poll forever.
+fn port_in_use(host: &str, port: u16) -> bool {
+    let mut bind_host = host.trim();
+    if bind_host.is_empty() {
+        bind_host = "127.0.0.1";
+    }
+    let addr = if bind_host.contains(':') && !bind_host.starts_with('[') {
+        format!("[{}]:{}", bind_host, port)
+    } else {
+        format!("{}:{}", bind_host, port)
+    };
+    std::net::TcpListener::bind(addr.as_str()).is_err()
 }
 
 #[derive(Debug, Deserialize)]
@@ -268,6 +307,42 @@ fn backend_base_url(state: State<'_, BackendState>) -> Option<String> {
 }
 
 #[tauri::command]
+fn backend_status(state: State<'_, BackendState>) -> BackendStatusInfo {
+    // A dead child trumps whatever was recorded at spawn time.
+    let mut child_guard = state.child.lock().unwrap();
+    if let Some(child) = child_guard.as_mut() {
+        if let Ok(Some(exit)) = child.try_wait() {
+            let message = format!("backend process exited ({})", exit);
+            append_launcher_log(&marginalia_home(), "error", &message);
+            *child_guard = None;
+            let info = BackendStatusInfo {
+                state: "exited".to_string(),
+                message: Some(message),
+            };
+            *state.status.lock().unwrap() = info.clone();
+            return info;
+        }
+    }
+    drop(child_guard);
+    state.status.lock().unwrap().clone()
+}
+
+#[tauri::command]
+fn restart_backend(app: AppHandle, state: State<'_, BackendState>) {
+    append_launcher_log(&marginalia_home(), "info", "backend restart requested from frontend");
+    state.kill();
+    state.spawn(&app);
+}
+
+#[tauri::command]
+fn quit_app(app: AppHandle) {
+    if let Some(state) = app.try_state::<BackendState>() {
+        state.kill();
+    }
+    app.exit(0);
+}
+
+#[tauri::command]
 fn logs_dir() -> String {
     marginalia_home().join("logs").display().to_string()
 }
@@ -279,7 +354,15 @@ fn append_frontend_log(level: String, message: String) -> Result<(), String> {
 }
 
 impl BackendState {
+    fn set_status(&self, state: &str, message: Option<String>) {
+        *self.status.lock().unwrap() = BackendStatusInfo {
+            state: state.to_string(),
+            message,
+        };
+    }
+
     fn spawn(&self, app: &AppHandle) {
+        self.set_status("starting", None);
         let home = marginalia_home();
         if let Err(e) = std::fs::create_dir_all(&home) {
             log::warn!("could not create MARGINALIA_HOME {}: {}", home.display(), e);
@@ -305,6 +388,7 @@ impl BackendState {
                     &format!("using backend from MARGINALIA_SERVER: {}", server),
                 );
                 *self.base_url.lock().unwrap() = Some(server);
+                self.set_status("external", None);
                 return;
             }
         }
@@ -320,6 +404,7 @@ impl BackendState {
                 ),
             );
             *self.base_url.lock().unwrap() = Some(discovered);
+            self.set_status("external", None);
             return;
         }
 
@@ -333,25 +418,62 @@ impl BackendState {
                 "info",
                 "MARGINALIA_AUTOSTART_BACKEND=0, skipping backend spawn",
             );
+            self.set_status("external", None);
             return;
         }
 
         let host = configured_api_host(&home);
-        let port = match configured_api_port(&home) {
-            Some(p) => p,
+        let (port, port_is_configured) = match configured_api_port(&home) {
+            Some(p) => (p, true),
             None => match pick_free_port() {
-                Ok(p) => p,
+                Ok(p) => (p, false),
                 Err(e) => {
-                    log::error!("failed to allocate ephemeral backend port: {}", e);
-                    append_launcher_log(
-                        &home,
-                        "error",
-                        &format!("failed to allocate ephemeral backend port: {}", e),
-                    );
+                    let message = format!("failed to allocate ephemeral backend port: {}", e);
+                    log::error!("{}", message);
+                    append_launcher_log(&home, "error", &message);
+                    self.set_status("error", Some(message));
                     return;
                 }
             },
         };
+        // A fixed MARGINALIA_API_PORT is by-design (predictable port for
+        // pure-backend deploys) — never fall back to an ephemeral one.
+        // But if something else already owns it, uvicorn would exit
+        // instantly with "address already in use". If the occupant is a
+        // healthy Marginalia backend (the pure-backend deploy the fixed
+        // port exists for), attach to it like discover_backend does;
+        // only fail loudly when the port holder does not answer /health.
+        if port_is_configured && port_in_use(&host, port) {
+            let base_url = client_base_url(&host, port);
+            if local_backend_health_ok(&base_url, port) {
+                log::info!(
+                    "attaching to existing backend on configured port: {}",
+                    base_url
+                );
+                append_launcher_log(
+                    &home,
+                    "info",
+                    &format!(
+                        "configured port {} already serves a healthy backend; attaching to {}",
+                        port, base_url
+                    ),
+                );
+                *self.base_url.lock().unwrap() = Some(base_url);
+                self.set_status("external", None);
+                return;
+            }
+            let message = format!(
+                "configured port {} is already in use by another process \
+                 that is not a Marginalia backend; \
+                 stop that service or change MARGINALIA_API_PORT in {}",
+                port,
+                home.join(".env").display()
+            );
+            log::error!("{}", message);
+            append_launcher_log(&home, "error", &message);
+            self.set_status("error", Some(message));
+            return;
+        }
         let base_url = client_base_url(&host, port);
         *self.port.lock().unwrap() = Some(port);
         *self.base_url.lock().unwrap() = Some(base_url.clone());
@@ -363,6 +485,7 @@ impl BackendState {
             let Some(program) = parts.next() else {
                 log::error!("MARGINALIA_BACKEND_CMD is empty");
                 append_launcher_log(&home, "error", "MARGINALIA_BACKEND_CMD is empty");
+                self.set_status("error", Some("MARGINALIA_BACKEND_CMD is empty".to_string()));
                 return;
             };
             let args: Vec<String> = parts.map(|s| s.to_string()).collect();
@@ -385,6 +508,10 @@ impl BackendState {
                     &home,
                     "error",
                     "no bundled backend found and MARGINALIA_BACKEND_CMD not set",
+                );
+                self.set_status(
+                    "error",
+                    Some("no bundled backend found and MARGINALIA_BACKEND_CMD not set".to_string()),
                 );
                 return;
             };
@@ -449,6 +576,7 @@ impl BackendState {
             Err(e) => {
                 log::error!("failed to spawn backend: {}", e);
                 append_launcher_log(&home, "error", &format!("failed to spawn backend: {}", e));
+                self.set_status("error", Some(format!("failed to spawn backend: {}", e)));
             }
         }
     }
@@ -655,10 +783,49 @@ fn hide_main_window(app: &AppHandle) {
     }
 }
 
+/// Handles to the tray menu items so `set_ui_language` can relabel them
+/// once the frontend has resolved the user's UI language — the Rust
+/// shell itself has no locale machinery.
+#[derive(Default)]
+struct TrayMenuState {
+    items: Mutex<Option<TrayMenuItems>>,
+}
+
+struct TrayMenuItems {
+    show: MenuItem<Wry>,
+    hide: MenuItem<Wry>,
+    quit: MenuItem<Wry>,
+}
+
+fn tray_labels(lang: &str) -> (&'static str, &'static str, &'static str) {
+    if lang.to_ascii_lowercase().starts_with("zh") {
+        ("显示 Marginalia", "隐藏窗口", "退出")
+    } else {
+        ("Show Marginalia", "Hide window", "Quit")
+    }
+}
+
+#[tauri::command]
+fn set_ui_language(state: State<'_, TrayMenuState>, lang: String) {
+    let (show, hide, quit) = tray_labels(&lang);
+    if let Some(items) = state.items.lock().unwrap().as_ref() {
+        let _ = items.show.set_text(show);
+        let _ = items.hide.set_text(hide);
+        let _ = items.quit.set_text(quit);
+    }
+}
+
 fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let show_i = MenuItem::with_id(app, "show", "Show Marginalia", true, None::<&str>)?;
     let hide_i = MenuItem::with_id(app, "hide", "Hide window", true, None::<&str>)?;
     let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+    if let Some(state) = app.try_state::<TrayMenuState>() {
+        *state.items.lock().unwrap() = Some(TrayMenuItems {
+            show: show_i.clone(),
+            hide: hide_i.clone(),
+            quit: quit_i.clone(),
+        });
+    }
     let menu = Menu::with_items(app, &[&show_i, &hide_i, &quit_i])?;
 
     let _tray = TrayIconBuilder::with_id("main-tray")
@@ -712,10 +879,16 @@ pub fn run() {
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             show_main_window(app);
         }))
+        .plugin(tauri_plugin_opener::init())
         .manage(BackendState::default())
+        .manage(TrayMenuState::default())
         .invoke_handler(tauri::generate_handler![
             backend_port,
             backend_base_url,
+            backend_status,
+            restart_backend,
+            quit_app,
+            set_ui_language,
             logs_dir,
             append_frontend_log
         ])

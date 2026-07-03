@@ -252,11 +252,11 @@ async def apply_moved(
                 ) != live.folder_id
                 name_changed = live.display_name != new_name
                 if folder_changed:
+                    # new_folder is None when the disk file now sits at
+                    # the vault root — move_entry treats None as root.
                     await move_entry(
                         session, entry_id=live.id,
-                        new_folder_id=(
-                            new_folder.id if new_folder else live.folder_id
-                        ),
+                        new_folder_id=new_folder.id if new_folder else None,
                     )
                     if name_changed:
                         await rename_entry(

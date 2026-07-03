@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import sys
 
 
@@ -109,7 +110,7 @@ async def _run_migrate(
         rows = await files_repo.list_live_storage_keys(session)
 
     print(f"[migrate] {len(rows)} files to consider ({src} → {dst})")
-    for file_id, storage_key, _sha256 in rows:
+    for file_id, storage_key, sha256 in rows:
         # Skip rows already in the target shape (resumability). Local
         # UUID-flat keys have the form 'aa/bb/<uuid>'; mirror keys end
         # with a real filename including an extension and don't begin
@@ -127,6 +128,7 @@ async def _run_migrate(
                 session_factory=factory,
                 file_id=file_id,
                 old_key=storage_key,
+                sha256=sha256,
                 src_storage=src_storage,
                 dst_storage=dst_storage,
                 dst_kind=dst,
@@ -150,6 +152,7 @@ async def _migrate_one(
     session_factory,
     file_id: str,
     old_key: str,
+    sha256: str | None,
     src_storage,
     dst_storage,
     dst_kind: str,
@@ -169,9 +172,14 @@ async def _migrate_one(
             from marginalia.services.entries import _build_folder_display_path
             folder_path = await _build_folder_display_path(session, folder_id)
 
-    # Stream-read from src
+    # Stream-read from src, tallying bytes so the verify step can
+    # compare sizes (0-byte files are legitimate).
+    copied = 0
+
     async def _stream():
+        nonlocal copied
         async for chunk in src_storage.get(old_key):
+            copied += len(chunk)
             yield chunk
 
     if dry_run:
@@ -198,12 +206,23 @@ async def _migrate_one(
             folder_path=folder_path,
         )
 
-    # Verify read back
-    chunks = []
+    # Verify read back: byte count must match what we copied, and
+    # sha256 must match the files row when one is recorded.
+    hasher = hashlib.sha256()
+    read_back = 0
     async for chunk in dst_storage.get(result_key):
-        chunks.append(chunk)
-    if not chunks:
-        raise RuntimeError("post-migrate read returned no bytes")
+        read_back += len(chunk)
+        hasher.update(chunk)
+    if read_back != copied:
+        raise RuntimeError(
+            f"post-migrate size mismatch: wrote {copied} bytes, "
+            f"read back {read_back}"
+        )
+    if sha256 and hasher.hexdigest() != sha256:
+        raise RuntimeError(
+            f"post-migrate sha256 mismatch: expected {sha256}, "
+            f"got {hasher.hexdigest()}"
+        )
 
     # Update db
     async with session_factory() as session:

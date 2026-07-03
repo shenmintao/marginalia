@@ -13,17 +13,29 @@ creating it (which they did, by naming it in the path).
 """
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from marginalia.db.models import Folder
+from marginalia.db.models import File, Folder
 from marginalia.repositories import audit_events as audit_events_repo
+from marginalia.repositories import entries as entries_repo
 from marginalia.repositories import folders as folders_repo
+from marginalia.storage import MirrorStorage, get_storage
 from marginalia.utils.ids import new_id
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+def _validate_folder_name(name: str) -> str:
+    """Shared create/rename validation: non-empty, no path separators."""
+    name = name.strip()
+    if not name:
+        raise ValueError("folder name cannot be empty")
+    if "/" in name or "\\" in name:
+        raise ValueError("folder name may not contain '/' or '\\'")
+    return name
 
 class AmbiguousRemotePathError(ValueError):
     """Raised when a remote path's intent (file vs folder) is unresolvable.
@@ -149,11 +161,7 @@ async def create_folder(
     event records `auto_created=False` to distinguish from upload-driven
     folder creation.
     """
-    name = name.strip()
-    if not name:
-        raise ValueError("folder name cannot be empty")
-    if "/" in name or "\\" in name:
-        raise ValueError("folder name may not contain '/' or '\\'")
+    name = _validate_folder_name(name)
     if parent_id is not None:
         parent = await folders_repo.get_live(db, parent_id)
         if parent is None:
@@ -231,12 +239,81 @@ async def _would_cycle(
         cur = f.parent_id
     return False
 
+async def _mirror_sync_folder_subtree(
+    db: AsyncSession, folder_id: str,
+) -> None:
+    """After a folder rename/move, relocate the on-disk file of every
+    live entry in the subtree so the mirror vault follows the folder
+    tree. No-op for local + s3 backends.
+
+    The Folder row must already carry its new name / parent_id.
+
+    Two properties this guarantees (audit findings):
+      - Failure tolerance: a missing source file (the user deleted it in
+        Finder — a first-class mirror state) or an already-relocated
+        destination is not fatal; those entries are skipped/adopted and
+        every entry is attempted before any unexpected error is raised,
+        so a partial run is safe to retry instead of failing forever.
+      - The per-entry disk work (stat/mkdir/os.replace, none of which
+        await) runs in a single worker thread so a large relocation does
+        not stall the API/SSE loop or embedded TaskRunner heartbeats.
+    """
+    storage = get_storage()
+    if not isinstance(storage, MirrorStorage):
+        return
+    # Lazy: folders is imported by upload which entries depends on.
+    from marginalia.services.entries import _build_folder_display_path
+    from marginalia.services.webdav_sync import webdav_remote_marker
+
+    folder_ids = await folders_repo.list_live_descendant_ids(db, folder_id)
+    rows = await entries_repo.list_live_with_file_in_folders(db, folder_ids)
+    path_cache: dict[str | None, str] = {}
+    # Build the relocation plan on the loop (DB reads only), then do all
+    # the disk moves off the loop in one to_thread hop.
+    plan: list[tuple[File, str]] = []
+    for entry, file_row in rows:
+        # Non-hydrated WebDAV placeholders have no file on disk;
+        # hydrate_entry recomputes their path from folder + name later.
+        marker = webdav_remote_marker(file_row.description)
+        if marker and not marker.get("hydrated"):
+            continue
+        if entry.folder_id not in path_cache:
+            path_cache[entry.folder_id] = await _build_folder_display_path(
+                db, entry.folder_id,
+            )
+        folder_path = path_cache[entry.folder_id]
+        new_rel = (
+            f"{folder_path}/{entry.display_name}".lstrip("/")
+            if folder_path else entry.display_name
+        )
+        plan.append((file_row, new_rel))
+
+    if not plan:
+        return
+
+    pairs = [(fr.storage_key, new_rel) for fr, new_rel in plan]
+    results, errors = await asyncio.to_thread(
+        storage.relocate_subtree_sync, pairs,
+    )
+
+    for file_row, _new_rel in plan:
+        new_key = results.get(file_row.storage_key)
+        if new_key is not None and new_key != file_row.storage_key:
+            file_row.storage_key = new_key
+            file_row.updated_at = _utcnow()
+
+    if errors:
+        # Some entries hit an unexpected failure (not a tolerated missing
+        # source). Surface it now that every entry has been attempted;
+        # the caller's rollback un-does the folder change and the
+        # storage_key updates. Already-moved files are adopted on the
+        # next rename and reconciled by scan_vault.
+        raise next(iter(errors.values()))
+
 async def rename_folder(
     db: AsyncSession, *, folder_id: str, new_name: str,
 ) -> Folder:
-    new_name = new_name.strip()
-    if not new_name:
-        raise ValueError("folder name cannot be empty")
+    new_name = _validate_folder_name(new_name)
     f = await folders_repo.get_live(db, folder_id)
     if f is None:
         raise FolderNotFoundError(folder_id)
@@ -252,6 +329,7 @@ async def rename_folder(
     old = f.name
     f.name = new_name
     f.updated_at = _utcnow()
+    await _mirror_sync_folder_subtree(db, f.id)
     await audit_events_repo.append(db, kind="folder_renamed", payload={
         "folder_id": f.id, "parent_id": f.parent_id,
         "old_name": old, "new_name": new_name,
@@ -282,6 +360,7 @@ async def move_folder(
     old_parent = f.parent_id
     f.parent_id = new_parent_id
     f.updated_at = _utcnow()
+    await _mirror_sync_folder_subtree(db, f.id)
     await audit_events_repo.append(db, kind="folder_moved", payload={
         "folder_id": f.id, "old_parent": old_parent, "new_parent": new_parent_id,
     })

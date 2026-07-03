@@ -1,16 +1,20 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
+import { authHeaders } from "@/api/client";
+import { useI18n, type I18nStrings } from "@/lib/i18n";
 import {
   ViewerError,
   ViewerLoading,
   applyVisualPageScale,
   refreshVisualPageBase,
+  useAuthObjectUrl,
   useViewportWheelZoom,
 } from "./ViewerShared";
 const CLIENT_IMAGE_DECODE_MAX_BYTES = 50 * 1024 * 1024;
 const CLIENT_IMAGE_DECODE_MAX_PIXELS = 80_000_000;
 
 type ClientImageDecodeKind = "native" | "tiff" | "heic";
+type ViewerStrings = I18nStrings["viewer"];
 
 type DecodedImageState =
   | { status: "idle" | "loading"; src: null; error: null }
@@ -29,7 +33,12 @@ export function ImageView({ url, name, sizeBytes }: { url: string; name: string;
   const pageRefs = useRef<(HTMLDivElement | null)[]>([]);
   const decodeKind = useMemo(() => imageDecodeKind(name), [name]);
   const decoded = useClientDecodedImage(url, decodeKind, sizeBytes);
-  const imageSrc = decodeKind === "native" ? url : decoded.src;
+  // Token-protected backends reject the <img>'s bare GET; route native
+  // formats through an object URL in that case (direct URL otherwise).
+  // Disabled for tiff/heic: useClientDecodedImage does its own authed
+  // fetch there, and this blob would just be a second full download.
+  const authed = useAuthObjectUrl(url, decodeKind === "native");
+  const imageSrc = decodeKind === "native" ? authed.src : decoded.src;
   const zoom = useViewportWheelZoom(scrollRef, pageRefs, {
     resetKey: `${url}:${decodeKind}:${imageSrc || "pending"}`,
     applyZoom: (value) => applyVisualPageScale(pageRefs.current, value),
@@ -48,6 +57,8 @@ export function ImageView({ url, name, sizeBytes }: { url: string; name: string;
         <span className="min-w-16 text-center tabular-nums">{Math.round(zoom.zoom * 100)}%</span>
       </div>
       <div ref={scrollRef} className="min-h-0 flex-1 overflow-auto">
+        {decodeKind === "native" && !authed.src && !authed.err && <ViewerLoading />}
+        {decodeKind === "native" && authed.err && <ViewerError msg={authed.err} />}
         {decodeKind !== "native" && decoded.status === "loading" && <ViewerLoading />}
         {decodeKind !== "native" && decoded.status === "error" && <ViewerError msg={decoded.error} />}
         {imageSrc && (
@@ -77,6 +88,7 @@ function useClientDecodedImage(
   kind: ClientImageDecodeKind,
   sizeBytes?: number,
 ): DecodedImageState {
+  const { t } = useI18n();
   const [state, setState] = useState<DecodedImageState>(() => (
     kind === "native"
       ? { status: "ready", src: url, error: null }
@@ -92,7 +104,7 @@ function useClientDecodedImage(
       setState({
         status: "error",
         src: null,
-        error: "TIFF/HEIC preview is limited to files up to 50 MB.",
+        error: t.viewer.imageTooLarge,
       });
       return;
     }
@@ -102,15 +114,15 @@ function useClientDecodedImage(
 
     void (async () => {
       try {
-        const response = await fetch(url);
+        const response = await fetch(url, { headers: authHeaders() });
         if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
         const blob = await response.blob();
         if (blob.size > CLIENT_IMAGE_DECODE_MAX_BYTES) {
-          throw new Error("TIFF/HEIC preview is limited to files up to 50 MB.");
+          throw new Error(t.viewer.imageTooLarge);
         }
         const preview = kind === "heic"
-          ? await decodeHeicPreview(blob)
-          : await decodeTiffPreview(await blob.arrayBuffer());
+          ? await decodeHeicPreview(blob, t.viewer)
+          : await decodeTiffPreview(await blob.arrayBuffer(), t.viewer);
         objectUrl = URL.createObjectURL(preview);
         if (cancelled) {
           URL.revokeObjectURL(objectUrl);
@@ -133,48 +145,48 @@ function useClientDecodedImage(
       cancelled = true;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [kind, sizeBytes, url]);
+  }, [kind, sizeBytes, t, url]);
 
   return state;
 }
 
-async function decodeHeicPreview(blob: Blob): Promise<Blob> {
+async function decodeHeicPreview(blob: Blob, msgs: ViewerStrings): Promise<Blob> {
   const { default: heic2any } = await import("heic2any");
   const converted = await heic2any({ blob, toType: "image/png" });
   const first = Array.isArray(converted) ? converted[0] : converted;
-  if (!first) throw new Error("HEIC image did not produce a preview.");
+  if (!first) throw new Error(msgs.heicNoPreview);
   return first;
 }
 
-async function decodeTiffPreview(buffer: ArrayBuffer): Promise<Blob> {
+async function decodeTiffPreview(buffer: ArrayBuffer, msgs: ViewerStrings): Promise<Blob> {
   const UTIF = await import("utif");
   const ifds = UTIF.decode(buffer);
   const ifd = ifds[0];
-  if (!ifd) throw new Error("TIFF file has no image frames.");
+  if (!ifd) throw new Error(msgs.tiffNoFrames);
   const rawWidth = Number(ifd.width ?? (ifd.t256 as number[] | undefined)?.[0] ?? 0);
   const rawHeight = Number(ifd.height ?? (ifd.t257 as number[] | undefined)?.[0] ?? 0);
   if (rawWidth > 0 && rawHeight > 0 && rawWidth * rawHeight > CLIENT_IMAGE_DECODE_MAX_PIXELS) {
-    throw new Error("TIFF preview is limited to images up to 80 megapixels.");
+    throw new Error(msgs.imageTooManyPixels);
   }
   UTIF.decodeImage(buffer, ifd);
   const width = Number(ifd.width || rawWidth);
   const height = Number(ifd.height || rawHeight);
-  if (!width || !height) throw new Error("TIFF image has invalid dimensions.");
+  if (!width || !height) throw new Error(msgs.tiffInvalidDimensions);
   if (width * height > CLIENT_IMAGE_DECODE_MAX_PIXELS) {
-    throw new Error("TIFF preview is limited to images up to 80 megapixels.");
+    throw new Error(msgs.imageTooManyPixels);
   }
   const rgba = UTIF.toRGBA8(ifd);
   const canvas = document.createElement("canvas");
   canvas.width = width;
   canvas.height = height;
   const ctx = canvas.getContext("2d");
-  if (!ctx) throw new Error("Canvas 2D is not available.");
+  if (!ctx) throw new Error(msgs.canvasUnavailable);
   ctx.putImageData(
     new ImageData(new Uint8ClampedArray(rgba), width, height),
     0,
     0,
   );
   const out = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
-  if (!out) throw new Error("TIFF image could not be converted to PNG.");
+  if (!out) throw new Error(msgs.tiffConvertFailed);
   return out;
 }

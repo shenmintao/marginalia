@@ -127,8 +127,11 @@ export function ChatPage() {
 
   const send = useCallback(async () => {
     const q = input.trim();
-    const { streaming: curStreaming } = useChatSession.getState();
-    if (!q || curStreaming) return;
+    const { streaming: curStreaming, loading: curLoading } = useChatSession.getState();
+    // Block sends while a transcript fetch is in flight: turnIdx and the
+    // seeded live.turns would be computed from the previous session's
+    // stale turns and corrupt the visible conversation.
+    if (!q || curStreaming || curLoading) return;
     if (llmReady === false) {
       setOpenErr(i18n.chat.llmMissingError);
       return;
@@ -240,6 +243,9 @@ export function ChatPage() {
       return;
     }
     setStreaming(false);
+    // Clear synchronously so the previous session's turns never show
+    // under the newly selected session while the transcript loads.
+    setTurns([]);
     try {
       const transcript = await sessions.messages(id);
       if (useChatSession.getState().sessionId !== id) return;
@@ -370,10 +376,10 @@ export function ChatPage() {
             ) : (
               <button
                 onClick={send}
-                disabled={!input.trim()}
+                disabled={!input.trim() || loading}
                 className={cn(
                   "flex h-9 items-center gap-1.5 rounded-md px-3 text-sm font-medium transition-colors",
-                  input.trim()
+                  input.trim() && !loading
                     ? "bg-accent text-accent-fg hover:opacity-90"
                     : "cursor-not-allowed bg-bg-muted text-fg-subtle",
                 )}

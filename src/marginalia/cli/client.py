@@ -117,7 +117,7 @@ class MarginaliaClient:
         display_name: str | None = None,
         on_conflict: str | None = None,
     ) -> dict[str, Any]:
-        local = Path(local_path)
+        local = Path(local_path).expanduser()
         if not local.is_file():
             raise ValueError(f"not a file: {local}")
         params: dict[str, Any] = {"remote_path": remote_path}
@@ -182,7 +182,12 @@ class MarginaliaClient:
                 elif line.startswith("event:"):
                     event_type = line[6:].strip()
                 elif line.startswith("data:"):
-                    data_lines.append(line[5:].lstrip())
+                    # SSE spec: strip exactly ONE leading space so payload
+                    # indentation (nested lists, code) survives intact.
+                    chunk = line[5:]
+                    data_lines.append(
+                        chunk[1:] if chunk.startswith(" ") else chunk
+                    )
                 # other SSE fields (`id:`, `retry:`, comments) ignored
 
     async def close_session(self, session_id: str) -> dict[str, Any]:

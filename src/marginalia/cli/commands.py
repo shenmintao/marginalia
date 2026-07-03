@@ -8,8 +8,10 @@ via the @command decorator. Help text is its docstring's first line.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import shlex
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, MutableMapping, cast
@@ -31,6 +33,16 @@ class CliContext:
     """Mutable per-REPL state."""
     client: MarginaliaClient
     session_id: str | None = None
+    # True when talking to ANY http backend — an explicit --server box OR
+    # a server discovered on this machine. Commands that bypass the client
+    # to touch the LOCAL db/vault directly (/check, /ingest) must refuse:
+    # they'd manipulate the db out from under the server that owns it.
+    remote: bool = False
+    # True only for an EXPLICIT remote (--server / MARGINALIA_SERVER), i.e.
+    # a truly different box whose vault our local settings don't describe.
+    # Discovered-local leaves this False: the server shares this machine's
+    # vault, so vault-membership checks (the /upload guard) still apply.
+    remote_explicit: bool = False
     cwd_remote: str = "/"  # for resolving relative remote paths
     history: list[dict] = field(default_factory=list)
     chat_mode: ChatMode = "auto"
@@ -250,13 +262,25 @@ async def cmd_ls(ctx: CliContext, args: str) -> None:
     parent_id = args.strip() or None
     out = await ctx.client.list_folder(parent_id=parent_id)
     folders = out.get("folders") or []
-    if not folders:
-        print("(no folders)")
+    entries = out.get("entries") or []
+    if not folders and not entries:
+        print("(empty)")
         return
-    print(f"\n{'NAME':<30} {'ID':<38}")
-    print("-" * 70)
-    for f in folders:
-        print(f"{f['name']:<30} {f['id']:<38}")
+    if folders:
+        print(f"\n{'NAME':<30} {'ID':<38}")
+        print("-" * 70)
+        for f in folders:
+            print(f"{f['name']:<30} {f['id']:<38}")
+    if entries:
+        print(f"\n{'FILE':<30} {'ID':<38} {'INGEST':<10}")
+        print("-" * 80)
+        for e in entries:
+            name = e.get("display_name") or "?"
+            if len(name) > 29:
+                name = name[:26] + "…"
+            status = e.get("ingest_status") or "?"
+            print(f"{name:<30} {e['id']:<38} {status:<10}")
+            remember_entry(ctx, e["id"], e.get("display_name") or "")
     print()
 
 
@@ -308,25 +332,29 @@ async def cmd_upload(ctx: CliContext, args: str) -> None:
     # In mirror mode, reject local paths that already live inside the
     # vault — those should go through /ingest, which adopts in place.
     # Without this, /upload would re-write the bytes (collision-renaming
-    # the existing on-disk file).
-    from marginalia.config import get_settings
-    from marginalia.storage import MirrorStorage, get_storage
-    storage = get_storage()
-    if isinstance(storage, MirrorStorage):
-        from pathlib import Path as _P
-        vault_root = _P(get_settings().mirror_vault_root).resolve()
-        try:
-            _P(local).resolve().relative_to(vault_root)
-        except ValueError:
-            pass  # outside vault → fine, proceed
-        else:
-            print(
-                f"{local!r} is inside the vault.\n"
-                f"  → /upload is for copying files INTO the vault. "
-                f"Use /ingest {_P(local).resolve().relative_to(vault_root).as_posix()!r} "
-                f"to register an existing vault file."
-            )
-            return
+    # the existing on-disk file). Skipped only for an EXPLICIT remote,
+    # whose vault our local settings don't describe. A discovered-local
+    # server shares this machine's vault, so the guard still applies.
+    if not ctx.remote_explicit:
+        from marginalia.config import get_settings
+        from marginalia.storage import MirrorStorage, get_storage
+        storage = get_storage()
+        if isinstance(storage, MirrorStorage):
+            from pathlib import Path as _P
+            vault_root = _P(get_settings().mirror_vault_root).resolve()
+            local_resolved = _P(local).expanduser().resolve()
+            try:
+                rel = local_resolved.relative_to(vault_root)
+            except ValueError:
+                pass  # outside vault → fine, proceed
+            else:
+                print(
+                    f"{local!r} is inside the vault.\n"
+                    f"  → /upload is for copying files INTO the vault. "
+                    f"Use /ingest {rel.as_posix()!r} "
+                    f"to register an existing vault file."
+                )
+                return
 
     try:
         out = await ctx.client.upload_file(
@@ -986,7 +1014,12 @@ async def chat(ctx: CliContext, message: str) -> None:
                 except (ValueError, TypeError):
                     payload = {}
                 if not payload.get("ok", True) and sp is not None:
-                    sp.fail(f"tool failed: {payload.get('error', '')[:40]}")
+                    failure = f"tool failed: {payload.get('error', '')[:40]}"
+                    sp.fail(failure)
+                    # Spinner is a no-op when disabled (piped stdout,
+                    # NO_COLOR, TERM=dumb) — surface the failure plainly.
+                    if not sp._enabled:
+                        print(f"error: {failure}")
                     sp = None
             elif ev.event_type == "user_artifact":
                 try:
@@ -1013,6 +1046,12 @@ async def chat(ctx: CliContext, message: str) -> None:
                     done_payload = json.loads(ev.data)
                 except (ValueError, TypeError):
                     done_payload = {}
+    except asyncio.CancelledError:
+        # Ctrl-C cancelled the turn — commit the spinner line so its
+        # animation thread doesn't keep redrawing over the next prompt.
+        if sp is not None:
+            sp.fail("interrupted")
+        raise
     except CliHttpError as e:
         if sp is not None:
             sp.fail(f"HTTP {e.status}")
@@ -1022,6 +1061,10 @@ async def chat(ctx: CliContext, message: str) -> None:
     if error_msg is not None:
         if sp is not None:
             sp.fail(error_msg)
+        # sp.fail writes nothing when the spinner is disabled (and sp may
+        # already be None after a tool failure) — never swallow the error.
+        if sp is None or not sp._enabled:
+            print(f"error: {error_msg}")
         return
 
     if sp is not None:
@@ -1051,6 +1094,22 @@ class _ExitREPL(Exception):
 
 # ---- /check, /sync, /ingest --all, /forget --all-missing -----------------
 
+def _refuse_remote_vault_cmd(ctx: CliContext, name: str) -> bool:
+    """True (after printing why) when a vault command can't run remotely.
+
+    /check and /ingest scan the LOCAL vault and write to the LOCAL db —
+    against a remote --server they'd operate on the wrong machine (or
+    crash on a missing local schema)."""
+    if not ctx.remote:
+        return False
+    print(
+        f"/{name} is not available against a remote server — it scans "
+        f"this machine's vault and db, not the server's.\n"
+        f"  → run `marginalia` (embedded mode) on the server machine instead."
+    )
+    return True
+
+
 @command("check")
 async def cmd_check(ctx: CliContext, args: str) -> None:
     """/check  — diff the mirror vault against db (no writes).
@@ -1058,6 +1117,8 @@ async def cmd_check(ctx: CliContext, args: str) -> None:
     Walks <vault>, hashes each file, and reports new / modified / moved /
     missing entries vs the db. Read-only — apply with /ingest.
     """
+    if _refuse_remote_vault_cmd(ctx, "check"):
+        return
     report = await _load_scan_report()
     if report is None:
         return
@@ -1081,6 +1142,8 @@ async def cmd_ingest(ctx: CliContext, args: str) -> None:
     copying a file from OUTSIDE the vault into it; /ingest is the
     in-vault counterpart.
     """
+    if _refuse_remote_vault_cmd(ctx, "ingest"):
+        return
     from pathlib import Path
     from marginalia.config import get_settings
     from marginalia.storage import MirrorStorage, get_storage
@@ -1116,17 +1179,29 @@ async def cmd_ingest(ctx: CliContext, args: str) -> None:
         from marginalia.services.sync import apply_all
         print(render_report(report))
         if "--yes" not in parts:
-            print(
-                f"\napply {report.total_changes} changes? [y/N] ",
-                end="",
-            )
+            # Read the confirmation off the event loop (executor), never via
+            # blocking input(). The REPL installs a loop-level SIGINT handler
+            # that cancels the in-flight command; input() would wedge the
+            # loop so the Ctrl-C is deferred until AFTER the user answers,
+            # then cancels the apply they just approved. An executor read
+            # keeps the loop responsive, so a Ctrl-C at THIS prompt cancels
+            # the read (clean abort here) instead.
+            print(f"\napply {report.total_changes} changes? [y/N] ", end="")
+            sys.stdout.flush()
+            loop = asyncio.get_running_loop()
             try:
-                confirm = input().strip().lower()
-            except EOFError:
-                confirm = ""
-            if confirm not in ("y", "yes"):
+                raw = await loop.run_in_executor(None, sys.stdin.readline)
+            except (EOFError, KeyboardInterrupt):
+                raw = ""
+            if raw.strip().lower() not in ("y", "yes"):
                 print("cancelled.")
                 return
+            # Drain any SIGINT delivered during the prompt before applying:
+            # this yield forces one loop cycle, so a pending Ctrl-C is
+            # processed here (surfacing as a clean cancel with nothing
+            # applied) rather than tearing down apply_all mid-write.
+            await asyncio.sleep(0)
+
         def _progress(done: int, total: int, _path: Path) -> None:
             # Single-line progress redraw. Last update overwrites itself
             # so the terminal doesn't fill with N/M lines on big batches.

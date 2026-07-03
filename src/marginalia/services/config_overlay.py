@@ -137,9 +137,12 @@ def _canonical_overlay(raw: dict[str, Any]) -> dict[str, Any]:
         if k not in _ALLOWED_FIELDS:
             continue
         try:
-            out.update(validate_and_normalize({k: v}))
+            clean = validate_and_normalize({k: v})
         except OverlayValidationError:
             continue
+        # A null (or "") on disk means "no override" — never merge it as
+        # None over the .env default.
+        out.update({ck: cv for ck, cv in clean.items() if cv is not None})
     return out
 
 
@@ -193,6 +196,13 @@ def validate_and_normalize(patch: dict[str, Any]) -> dict[str, Any]:
             continue
         if v == "":
             v = None
+        if v is None:
+            # None means "clear this override" — pass it through untouched
+            # so the route can drop the key. The coercions below would
+            # otherwise 422 (int(None)/float(None)) or store an explicit
+            # False (bool(None)) instead of falling back to .env.
+            out[k] = None
+            continue
         if k.endswith("_provider") and v is not None:
             valid = (
                 _VALID_EMBEDDING_PROVIDERS

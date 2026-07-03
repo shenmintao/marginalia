@@ -332,6 +332,23 @@ class FolderNotFoundError(Exception):
     pass
 
 
+def _safe_zip_component(name: str) -> str:
+    """One zip member path component with separators / control chars
+    stripped (mirrors exports._safe_zip_name, which we can't import
+    without a cycle) and '.'/'..' neutralized so a hostile display_name
+    or folder name can't produce a zip-slip archive."""
+    out = []
+    for ch in name:
+        if ch in ("/", "\\", "\x00") or ord(ch) < 32:
+            out.append("_")
+        else:
+            out.append(ch)
+    s = "".join(out)
+    if not s or s.strip(".") == "":
+        return "unnamed"
+    return s
+
+
 async def collect_folder_entries(
     session: AsyncSession,
     *,
@@ -339,7 +356,8 @@ async def collect_folder_entries(
 ) -> list[tuple[str, FileEntry, File]]:
     """Walk the folder subtree, returning (relative_zip_path, entry, file)
     for every live entry inside. relative_zip_path is folder-relative so
-    nested folders show up as nested zip directories.
+    nested folders show up as nested zip directories; every path component
+    is sanitized so the generated archive can't contain traversal members.
 
     Raises FolderNotFoundError if the root folder is missing or soft-deleted.
     """
@@ -347,20 +365,25 @@ async def collect_folder_entries(
     if root is None or root.deleted_at is not None:
         raise FolderNotFoundError(folder_id)
 
-    # BFS over folders, recording each folder's relative path
+    # BFS over folders, recording each folder's relative path.
+    # rel_paths doubles as the visited set — a parent_id cycle (possible
+    # via WebDAV import) must not hang the walk.
     rel_paths: dict[str, str] = {root.id: ""}
     frontier = [root.id]
     while frontier:
         children = await folders_repo.list_live_children_of_many(
             session, frontier,
         )
-        if not children:
-            break
         next_frontier: list[str] = []
         for ch in children:
+            if ch.id in rel_paths:
+                continue
             parent_rel = rel_paths[ch.parent_id]
-            rel_paths[ch.id] = (parent_rel + "/" if parent_rel else "") + ch.name
+            safe_name = _safe_zip_component(ch.name)
+            rel_paths[ch.id] = (parent_rel + "/" if parent_rel else "") + safe_name
             next_frontier.append(ch.id)
+        if not next_frontier:
+            break
         frontier = next_frontier
 
     folder_ids = list(rel_paths.keys())
@@ -377,7 +400,8 @@ async def collect_folder_entries(
             remote_entry_ids.append(entry.id)
             continue
         rel = rel_paths.get(entry.folder_id, "")
-        zip_path = (rel + "/" + entry.display_name) if rel else entry.display_name
+        safe_name = _safe_zip_component(entry.display_name)
+        zip_path = (rel + "/" + safe_name) if rel else safe_name
         result.append((zip_path, entry, file_row))
     if remote_entry_ids:
         raise FolderRemoteNotHydratedError(remote_entry_ids)
@@ -401,7 +425,9 @@ async def _build_folder_path(
         return "/"
     parts: list[str] = []
     cur: str | None = folder_id
-    while cur is not None:
+    seen: set[str] = set()  # guard against a parent_id cycle (WebDAV import)
+    while cur is not None and cur not in seen:
+        seen.add(cur)
         f = await session.get(Folder, cur)
         if f is None or f.deleted_at is not None:
             break
@@ -434,7 +460,9 @@ async def get_entry_path(
 
     chain: list[dict[str, str]] = []
     cur: str | None = entry.folder_id
-    while cur is not None:
+    seen: set[str] = set()  # guard against a parent_id cycle (WebDAV import)
+    while cur is not None and cur not in seen:
+        seen.add(cur)
         f = await session.get(Folder, cur)
         if f is None or f.deleted_at is not None:
             break

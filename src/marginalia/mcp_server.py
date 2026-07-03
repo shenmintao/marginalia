@@ -283,6 +283,7 @@ class McpBackend:
         self.mode = "unresolved"
         self._client: httpx.AsyncClient | None = None
         self._lifespan: Any | None = None
+        self._client_lock = asyncio.Lock()
 
     async def __aenter__(self) -> "McpBackend":
         return self
@@ -299,34 +300,40 @@ class McpBackend:
         if self._client is not None:
             return self._client
 
-        base_url, _explicit = await _discover_backend_url(
-            explicit_server_url=self.server_url,
-            discover_backend=self.discover_backend,
-        )
-        headers = {"Authorization": f"Bearer {self.api_token}"} if self.api_token else None
-        if base_url is not None:
-            self.mode = "http"
+        # Requests are dispatched concurrently; without the lock two first
+        # callers would build (and leak) duplicate clients/lifespans.
+        async with self._client_lock:
+            if self._client is not None:
+                return self._client
+
+            base_url, _explicit = await _discover_backend_url(
+                explicit_server_url=self.server_url,
+                discover_backend=self.discover_backend,
+            )
+            headers = {"Authorization": f"Bearer {self.api_token}"} if self.api_token else None
+            if base_url is not None:
+                self.mode = "http"
+                self._client = httpx.AsyncClient(
+                    base_url=base_url,
+                    timeout=httpx.Timeout(60.0, connect=1.0),
+                    headers=headers,
+                )
+                return self._client
+
+            from asgi_lifespan import LifespanManager
+
+            from marginalia.main import app
+
+            self.mode = "embedded"
+            self._lifespan = LifespanManager(app)
+            manager = await self._lifespan.__aenter__()
             self._client = httpx.AsyncClient(
-                base_url=base_url,
-                timeout=httpx.Timeout(60.0, connect=1.0),
+                base_url="http://embedded",
+                transport=httpx.ASGITransport(app=manager.app),
+                timeout=60.0,
                 headers=headers,
             )
             return self._client
-
-        from asgi_lifespan import LifespanManager
-
-        from marginalia.main import app
-
-        self.mode = "embedded"
-        self._lifespan = LifespanManager(app)
-        manager = await self._lifespan.__aenter__()
-        self._client = httpx.AsyncClient(
-            base_url="http://embedded",
-            transport=httpx.ASGITransport(app=manager.app),
-            timeout=60.0,
-            headers=headers,
-        )
-        return self._client
 
 
 def _mcp_json_content(payload: Any, *, is_error: bool = False) -> dict[str, Any]:
@@ -453,7 +460,9 @@ async def _sse_events(response: httpx.Response):
         elif line.startswith("event:"):
             event_type = line[6:].strip()
         elif line.startswith("data:"):
-            data_lines.append(line[5:].lstrip())
+            # SSE spec: strip exactly one leading space; keep further indentation.
+            chunk = line[5:]
+            data_lines.append(chunk[1:] if chunk.startswith(" ") else chunk)
     if data_lines or event_type != "message":
         yield event_type, "\n".join(data_lines)
 
@@ -484,39 +493,42 @@ async def _ask_marginalia(
     done: dict[str, Any] | None = None
     tool_events = 0
 
-    async with client.stream(
-        "POST",
-        f"/v1/chat/{quote(session_id, safe='')}",
-        json={"query": query, "mode": mode},
-        timeout=None,
-    ) as response:
-        if response.status_code >= 400:
-            body = await response.aread()
-            raise McpBackendError(
-                f"HTTP {response.status_code}: {body.decode('utf-8', 'replace')}"
-            )
-        async for event_type, data in _sse_events(response):
-            if event_type == "conversation":
-                conversation_id = data
-            elif event_type == "plan":
-                plan = data
-            elif event_type == "answer":
-                answer_parts.append(data)
-            elif event_type in {"tool_call", "tool_result"}:
-                tool_events += 1
-            elif event_type == "done":
-                try:
-                    done = json.loads(data)
-                except ValueError:
-                    done = {"raw": data}
-            elif event_type == "error":
-                raise McpBackendError(data)
-
-    if close_session:
-        try:
-            await client.post(f"/v1/sessions/{quote(session_id, safe='')}/close")
-        except httpx.HTTPError:
-            pass
+    try:
+        async with client.stream(
+            "POST",
+            f"/v1/chat/{quote(session_id, safe='')}",
+            json={"query": query, "mode": mode},
+            timeout=None,
+        ) as response:
+            if response.status_code >= 400:
+                body = await response.aread()
+                raise McpBackendError(
+                    f"HTTP {response.status_code}: {body.decode('utf-8', 'replace')}"
+                )
+            async for event_type, data in _sse_events(response):
+                if event_type == "conversation":
+                    conversation_id = data
+                elif event_type == "plan":
+                    plan = data
+                elif event_type == "answer":
+                    answer_parts.append(data)
+                elif event_type in {"tool_call", "tool_result"}:
+                    tool_events += 1
+                elif event_type == "done":
+                    try:
+                        done = json.loads(data)
+                    except ValueError:
+                        done = {"raw": data}
+                elif event_type == "error":
+                    raise McpBackendError(data)
+    finally:
+        # Close even when the stream errors or is cancelled, mirroring
+        # oneshot._run_ask; otherwise the auto-created session leaks.
+        if close_session:
+            try:
+                await client.post(f"/v1/sessions/{quote(session_id, safe='')}/close")
+            except (httpx.HTTPError, OSError):
+                pass
 
     return _mcp_json_content(
         {
@@ -764,12 +776,29 @@ async def handle_message(
             }
         return _jsonrpc_result(request_id, result)
 
+    if is_notification:
+        # JSON-RPC 2.0 forbids responding to notifications, even unknown ones
+        # (e.g. notifications/progress, notifications/roots/list_changed).
+        return None
     raise JsonRpcError(METHOD_NOT_FOUND, f"unknown method: {method}")
 
 
 async def _read_line(stdin: TextIO) -> str:
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, stdin.readline)
+
+
+def _cancelled_request_key(message: Mapping[str, Any]) -> Any | None:
+    params = message.get("params")
+    if not isinstance(params, Mapping):
+        return None
+    request_id = params.get("requestId")
+    return request_id if isinstance(request_id, (str, int, float)) else None
+
+
+# How long a clean stdin EOF waits for in-flight requests to finish before
+# falling back to cancellation. Generous: tools/call may run agent asks.
+EOF_DRAIN_TIMEOUT_SECONDS = 300.0
 
 
 async def run_stdio_server(
@@ -779,27 +808,38 @@ async def run_stdio_server(
     server_url: str | None = None,
     api_token: str | None = None,
 ) -> int:
+    write_lock = asyncio.Lock()
+    # in_flight maps request id -> task for notifications/cancelled lookups.
+    # live_tasks tracks EVERY dispatch task so the shutdown drain in the
+    # finally block cannot miss one, whatever happens to the id mapping.
+    in_flight: dict[Any, asyncio.Task[None]] = {}
+    live_tasks: set[asyncio.Task[None]] = set()
+
+    async def _write(response: dict[str, Any]) -> None:
+        async with write_lock:
+            stdout.write(json.dumps(response, ensure_ascii=False, separators=(",", ":")) + "\n")
+            stdout.flush()
+
+    def _reap(done: asyncio.Task[None], *, key: Any) -> None:
+        live_tasks.discard(done)
+        if in_flight.get(key) is done:
+            del in_flight[key]
+        if not done.cancelled():
+            done.exception()  # consume, avoiding "exception was never retrieved"
+
     async with McpBackend(
         server_url=server_url,
         api_token=api_token,
         discover_backend=True,
     ) as backend:
-        while True:
-            line = await _read_line(stdin)
-            if not line:
-                return 0
-            line = line.strip()
-            if not line:
-                continue
-            request_id: Any = None
+
+        async def _dispatch(message: Mapping[str, Any], request_id: Any) -> None:
             try:
-                message = json.loads(line)
-                if not isinstance(message, Mapping):
-                    raise JsonRpcError(INVALID_REQUEST, "message must be a JSON object")
-                request_id = message.get("id")
                 response = await handle_message(message, backend=backend)
-            except json.JSONDecodeError as exc:
-                response = _jsonrpc_error(None, PARSE_ERROR, "invalid JSON", str(exc))
+            except asyncio.CancelledError:
+                # notifications/cancelled or shutdown: the client no longer
+                # expects a response for this request.
+                raise
             except JsonRpcError as exc:
                 response = _jsonrpc_error(request_id, exc.code, exc.message, exc.data)
             except Exception as exc:  # noqa: BLE001
@@ -808,10 +848,81 @@ async def run_stdio_server(
                     INTERNAL_ERROR,
                     f"{type(exc).__name__}: {exc}",
                 )
-            if response is None:
-                continue
-            stdout.write(json.dumps(response, ensure_ascii=False, separators=(",", ":")) + "\n")
-            stdout.flush()
+            if response is not None:
+                await _write(response)
+
+        clean_eof = False
+        try:
+            while True:
+                line = await _read_line(stdin)
+                if not line:
+                    clean_eof = True
+                    return 0
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    message = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    await _write(_jsonrpc_error(None, PARSE_ERROR, "invalid JSON", str(exc)))
+                    continue
+                if not isinstance(message, Mapping):
+                    await _write(
+                        _jsonrpc_error(None, INVALID_REQUEST, "message must be a JSON object")
+                    )
+                    continue
+                if "id" not in message:
+                    # JSON-RPC 2.0 forbids responding to notifications, even
+                    # unknown ones. notifications/cancelled is the only one
+                    # that needs work: cancel the matching in-flight request.
+                    if message.get("method") == "notifications/cancelled":
+                        key = _cancelled_request_key(message)
+                        task = in_flight.get(key) if key is not None else None
+                        if task is not None:
+                            task.cancel()
+                    continue
+                request_id = message.get("id")
+                if request_id is not None and not isinstance(request_id, (str, int, float)):
+                    await _write(
+                        _jsonrpc_error(None, INVALID_REQUEST, "id must be a string or number")
+                    )
+                    continue
+                if request_id in in_flight:
+                    # Dispatching would overwrite the in_flight entry, making
+                    # the first task unreachable for notifications/cancelled.
+                    await _write(
+                        _jsonrpc_error(
+                            request_id,
+                            INVALID_REQUEST,
+                            f"request id already in flight: {request_id!r}",
+                        )
+                    )
+                    continue
+                # Each request runs in its own task so ping/tools/list stay
+                # responsive while a long tools/call is in flight.
+                task = asyncio.create_task(_dispatch(message, request_id))
+                in_flight[request_id] = task
+                live_tasks.add(task)
+                task.add_done_callback(lambda done, key=request_id: _reap(done, key=key))
+        finally:
+            pending = [task for task in live_tasks if not task.done()]
+            try:
+                if pending and clean_eof:
+                    # Clean EOF (e.g. `printf '...' | marginalia mcp --stdio`):
+                    # drain, so responses to requests already read are written
+                    # before exit. Cancellation is reserved for the error path
+                    # and for tasks that outlive the drain window.
+                    _done, not_done = await asyncio.wait(
+                        pending, timeout=EOF_DRAIN_TIMEOUT_SECONDS
+                    )
+                    pending = list(not_done)
+            finally:
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    # Await inside the backend context so cancelled asks can
+                    # still close their auto-created sessions.
+                    await asyncio.gather(*pending, return_exceptions=True)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:

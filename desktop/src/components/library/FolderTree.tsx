@@ -15,7 +15,7 @@ import {
   AlertTriangle, CircleDashed, CloudDownload, CloudUpload,
 } from "lucide-react";
 
-import { folders, fileEntries, files, ApiError } from "@/api/client";
+import { folders, fileEntries, files, maybeAuthDownload, ApiError } from "@/api/client";
 import type { Folder, FolderIngestSummary, FileEntrySummary, WebDavStatus } from "@/types/api";
 import { cn } from "@/lib/utils";
 import { useI18n, type I18nStrings } from "@/lib/i18n";
@@ -686,7 +686,10 @@ function FileRow({
       <a
         href={fileEntries.downloadUrl(entry.id)}
         download={entry.display_name}
-        onClick={(e) => e.stopPropagation()}
+        onClick={(e) => {
+          e.stopPropagation();
+          maybeAuthDownload(e, fileEntries.downloadUrl(entry.id), entry.display_name);
+        }}
         title={t.library.download}
         className="hidden shrink-0 rounded p-0.5 text-fg-subtle hover:bg-bg-base hover:text-fg-base group-hover:flex"
       >

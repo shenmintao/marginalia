@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { FileText, Download, Cloud, Loader2 } from "lucide-react";
 
-import { fileEntries, webdavSync } from "@/api/client";
+import { fileEntries, maybeAuthDownload, webdavSync } from "@/api/client";
 import type { FileMetadata } from "@/types/api";
 import { useI18n } from "@/lib/i18n";
 import {
@@ -128,7 +128,7 @@ export function FileViewer({ entryId, meta, locator, onLocatorConsumed, onHydrat
             {t.library.hydrateFromWebDav}
           </button>
         ) : (
-          <a href={downloadUrl} download className="flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs hover:bg-bg-muted">
+          <a href={downloadUrl} download onClick={(e) => maybeAuthDownload(e, downloadUrl, name)} className="flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs hover:bg-bg-muted">
             <Download size={12} /> {t.library.download}
           </a>
         )}

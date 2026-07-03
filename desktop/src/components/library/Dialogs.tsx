@@ -888,7 +888,7 @@ function UploadRow({
       </td>
       <td className="px-2 py-1.5 text-right text-fg-muted">
         {item.status === "uploading" ? `${pct}%`
-         : item.status === "done" ? "done"
+         : item.status === "done" ? t.dialogs.done
          : item.status === "error" ? "!"
          : skipped ? t.dialogs.skipped
          : "-"}

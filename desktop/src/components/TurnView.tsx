@@ -272,7 +272,7 @@ function MetricsLine({ m }: { m: TurnMetrics }) {
   if (parts.length === 0) return null;
   return (
     <div className="mt-3 border-t border-border pt-2 font-mono text-[11px] text-fg-subtle">
-      ({parts.join(" · ")}){m.truncated && <span className="ml-2 text-warn">⚠ {t.chat.truncated}</span>}
+      ({parts.join(" · ")}){m.truncated && <span className="ml-2 text-warning">⚠ {t.chat.truncated}</span>}
     </div>
   );
 }

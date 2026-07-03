@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type MutableRefObject, type ReactNode, type RefObject } from "react";
 import { AlertCircle, Loader2 } from "lucide-react";
 
-import { fileEntries } from "@/api/client";
+import { authHeaders, fileEntries, hasApiToken } from "@/api/client";
 import type { FilePreviewText } from "@/types/api";
 import { useI18n } from "@/lib/i18n";
 
@@ -10,6 +10,61 @@ export interface JumpProps {
   lineRange: { start: number; end: number } | null;
   onScrolled?: () => void;
 }
+
+/** Resolve a backend content URL into something URL-based consumers
+ *  (<img>, <iframe>, epubjs, @silurus/ooxml) can load when the API is
+ *  token-protected: fetch the bytes with the Authorization header and
+ *  hand back an object URL, revoked on unmount / url change. When no
+ *  token is configured the original URL passes through untouched so the
+ *  direct streaming path keeps working with zero overhead.
+ *
+ *  Pass `enabled: false` when the caller won't render the result (e.g.
+ *  ImageView for formats it decodes itself) so token mode doesn't fetch
+ *  the whole file into an unused blob. */
+export function useAuthObjectUrl(
+  url: string,
+  enabled = true,
+): { src: string | null; err: string | null } {
+  const [state, setState] = useState<{ src: string | null; err: string | null }>(
+    () => (!enabled || hasApiToken() ? { src: null, err: null } : { src: url, err: null }),
+  );
+  useEffect(() => {
+    if (!enabled) {
+      setState({ src: null, err: null });
+      return;
+    }
+    if (!hasApiToken()) {
+      setState({ src: url, err: null });
+      return;
+    }
+    let cancelled = false;
+    let objectUrl: string | null = null;
+    setState({ src: null, err: null });
+    fetch(url, { headers: authHeaders() })
+      .then(async (r) => {
+        if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+        const blob = await r.blob();
+        objectUrl = URL.createObjectURL(blob);
+        if (cancelled) {
+          URL.revokeObjectURL(objectUrl);
+          objectUrl = null;
+          return;
+        }
+        setState({ src: objectUrl, err: null });
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          setState({ src: null, err: e instanceof Error ? e.message : String(e) });
+        }
+      });
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [url, enabled]);
+  return state;
+}
+
 export function useTextResource(url: string, maxBytes = 2_000_000) {
   const [text, setText] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -17,7 +72,7 @@ export function useTextResource(url: string, maxBytes = 2_000_000) {
   useEffect(() => {
     let cancelled = false;
     setText(null); setErr(null); setTruncated(false);
-    fetch(url)
+    fetch(url, { headers: authHeaders() })
       .then(async (r) => {
         if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
         const buf = await r.arrayBuffer();

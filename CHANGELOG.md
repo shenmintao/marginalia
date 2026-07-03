@@ -2,6 +2,82 @@
 
 ## Unreleased
 
+## 0.3.2 - 2026-07-03
+
+Hardening release from a full code audit: fixes for data-loss, correctness,
+and safety defects across WebDAV sync, the mirror vault, ingest pipelines,
+semantic recall, the agent runtime, the CLI/MCP surfaces, and the desktop app.
+
+### Fixed
+
+- WebDAV pull no longer clobbers newer local edits, resurrects locally
+  deleted entries, or wipes local-only tag assignments: a minimal conflict
+  guard skips rows whose local `updated_at` is newer, preserves newer local
+  deletions, and merges tags instead of replacing them.
+- WebDAV pull re-downloads remotely-changed file content instead of marking
+  the stale local bytes as hydrated, so `files.sha256` no longer diverges
+  from the stored blob.
+- WebDAV folder/catalog import handles children exported before their parent
+  (no foreign-key crash), reconciles same-name folders across machines by
+  `(parent_id, name)`, and rejects path-shaped remote ids/names.
+- WebDAV publish records and checks a `library_id`, refusing to overwrite an
+  unrelated remote library, and a full publish now reads-and-merges the remote
+  snapshot instead of dropping remote-only entries.
+- Mirror uploads into a folder (GUI `folder_id` style) now write the file into
+  the folder's directory instead of the vault root, and disk/DB name-collision
+  suffixes agree.
+- Folder rename/move relocates the on-disk mirror directory; renaming or moving
+  a not-yet-hydrated WebDAV entry no longer 500s; and folder relocation is
+  crash/partial-failure tolerant and runs off the event loop.
+- `scan`/`apply` correctly handles moves to the vault root and no longer
+  mis-attributes a deleted duplicate's file to another entry.
+- Ingest is more robust: archives containing dangling/absolute symlinks or an
+  inner tar in a subdirectory no longer crash; decompression bombs are refused
+  from the declared sizes before extraction; and text files in cp1252/latin-1
+  and similar legacy encodings decode correctly instead of as UTF-16 mojibake.
+- Semantic index refreshes are serialized within and across processes, use
+  unique temp files, cap embedded text length, avoid wiping a populated index
+  on an empty entry set, avoid re-embedding the whole library on the first
+  per-file refresh, and recover from a stale sqlite-vec sidecar.
+- Agent runtime: bounded resume-history replay, a terminal branch for
+  filtered/refused responses (no more burning the round budget), off-loop PDF
+  quote location, escaped citation link text, and DSML text tool-call parsing
+  gated to the providers that actually use it.
+- Metadata search rescues short non-CJK terms (`AI`, `Go`), escapes `%`/`_`
+  wildcards, and keeps short CJK terms in ranking; Postgres CJK search routes
+  through ILIKE.
+- CLI/MCP: SSE indentation is preserved in streamed answers; the MCP stdio
+  server dispatches requests concurrently, ignores unknown notifications, and
+  drains in-flight work on EOF; `/ls` lists entries; Ctrl-C during a chat turn
+  cancels the turn instead of quitting; errors surface when the spinner is
+  disabled; and `~` is expanded in upload paths.
+- Security hardening: `LocalStorage` refuses path-escaping keys; LLM-supplied
+  regexes in `query_log`/`analyze_container` run in a killable subprocess with
+  a wall-clock timeout; folder-download zip members are sanitized against
+  zip-slip; WebDAV routes no longer echo raw internal errors; and the server
+  logs a warning when bound to a non-loopback host without a token.
+- Desktop: token-protected backends load PDFs/images/EPUB/Office/downloads via
+  authenticated blob URLs; external links and the Office print button work
+  under Tauri; viewer toolbars and errors are localized; the "quote not found"
+  banner is styled; a stale search-error banner clears; and a port-conflict on
+  the fixed backend port surfaces an actionable error screen instead of an
+  infinite spinner (attaching to an already-running backend still works).
+- Alembic `upgrade head` succeeds on PostgreSQL when revision ids exceed 32
+  characters; interrupted SQLite table rebuilds are recovered on next start;
+  and the pooled connection is no longer left with foreign keys disabled.
+
+### Added
+
+- `MARGINALIA_UPLOAD_MAX_BYTES` caps `POST /v1/upload` (default `0` =
+  unlimited); oversized uploads are rejected with 413 before the body is
+  spooled to disk.
+
+### Changed
+
+- `glowpy` is pinned to an exact commit instead of a moving branch.
+- The unused `cost_estimate` / `total_cost_estimate` fields now surface as
+  `null` rather than a misleading constant `0`.
+
 ## 0.3.1 - 2026-07-02
 
 ### Added

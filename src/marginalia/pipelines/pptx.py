@@ -361,7 +361,15 @@ def _extract_pptx_images(body: bytes, max_slides: int | None = None) -> list[Doc
             "pptx pipeline needs python-pptx; `pip install python-pptx`"
         ) from exc
 
-    presentation = Presentation(io.BytesIO(body))
+    try:
+        presentation = Presentation(io.BytesIO(body))
+    except Exception:
+        # Images are supplemental vision fodder: a package python-pptx cannot
+        # re-open must not fail the ingest — the text extraction has already
+        # produced the primary content.
+        log.warning("pptx image extraction skipped: package unreadable",
+                    exc_info=True)
+        return []
     images: list[DocumentImage] = []
     for slide_no, slide in enumerate(presentation.slides, start=1):
         if max_slides is not None and slide_no > max_slides:

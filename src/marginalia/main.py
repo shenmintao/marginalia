@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ipaddress
+import json
 import logging
 import os
 import time
@@ -23,7 +25,10 @@ from marginalia.api.routes_semantic_index import router as semantic_index_router
 from marginalia.api.routes_settings import router as settings_router
 from marginalia.api.routes_tasks import router as tasks_router
 from marginalia.api.routes_tend import router as tend_router
-from marginalia.api.routes_upload import router as upload_router
+from marginalia.api.routes_upload import (
+    _MULTIPART_OVERHEAD as _UPLOAD_MULTIPART_OVERHEAD,
+    router as upload_router,
+)
 from marginalia.api.routes_user_files import router as user_files_router
 from marginalia.api.routes_webdav_sync import router as webdav_sync_router
 from marginalia.config import LlmConfigError, get_settings, validate_llm_config
@@ -48,6 +53,7 @@ async def lifespan(app: FastAPI):
         settings.worker_enabled,
         os.environ.get("MARGINALIA_DESKTOP") == "1",
     )
+    _warn_if_unauthenticated_bind(settings)
     # Desktop launch: server must come up even when the user hasn't entered
     # an API key yet, so they can do it from the Settings page. Tasks that
     # actually need an LLM call still fail at call time. Headless / CLI
@@ -99,6 +105,39 @@ async def lifespan(app: FastAPI):
             clear_server_state(settings.marginalia_home, pid=os.getpid())
         await dispose_engine()
         log.info("backend shutdown complete")
+
+
+def _warn_if_unauthenticated_bind(settings) -> None:
+    """Loud startup warning when the configured bind host is non-loopback
+    and no MARGINALIA_API_TOKEN is set: every endpoint is then reachable
+    unauthenticated by any host on the network. Intentionally a warning,
+    not a hard failure — existing tokenless loopback deployments and
+    reverse-proxy setups keep working."""
+    if settings.marginalia_api_token:
+        return
+    host = os.environ.get("MARGINALIA_API_HOST") or settings.marginalia_api_host
+    try:
+        is_loopback = ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        is_loopback = host.lower() == "localhost"
+    if is_loopback:
+        return
+    log.warning(
+        "\n"
+        "================================================================\n"
+        "  SECURITY WARNING: MARGINALIA_API_TOKEN is not set while the\n"
+        "  API is configured to bind non-loopback host %r.\n"
+        "\n"
+        "  EVERY endpoint is UNAUTHENTICATED: any host that can reach\n"
+        "  this port can download all ingested documents, rewrite LLM\n"
+        "  settings (redirecting prompts and stored API keys to an\n"
+        "  attacker endpoint), upload files, and delete data.\n"
+        "\n"
+        "  Set MARGINALIA_API_TOKEN before exposing the API beyond\n"
+        "  127.0.0.1.\n"
+        "================================================================",
+        host,
+    )
 
 
 async def _check_storage_consistency(settings) -> None:
@@ -188,6 +227,92 @@ app.add_middleware(
         "X-Member-Count",
     ],
 )
+
+
+class _UploadTooLargeAbort(Exception):
+    """Signals the receive wrapper hit the streamed-byte budget."""
+
+
+class UploadSizeLimitMiddleware:
+    """Reject oversized uploads BEFORE Starlette spools the multipart body.
+
+    The in-route cap (routes_upload) only runs after FastAPI has resolved the
+    ``UploadFile`` dependency, by which point Starlette has already written the
+    whole body to a SpooledTemporaryFile (rolling onto the tmp partition past
+    1 MB) — so a huge or chunked upload can exhaust disk before the route sees
+    it. This ASGI middleware wraps ``receive`` and stops that at the door:
+    it rejects on an over-limit Content-Length up front, and counts streamed
+    bytes to abort a chunked/underreported body mid-flight. Active only when
+    ``upload_max_bytes`` is configured; the route keeps its own cap as the
+    authoritative second line of defence.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or scope.get("method") != "POST" \
+                or scope.get("path") != f"{V1_PREFIX}/upload":
+            return await self.app(scope, receive, send)
+        max_bytes = get_settings().upload_max_bytes
+        if not max_bytes or max_bytes <= 0:
+            return await self.app(scope, receive, send)
+        limit = max_bytes + _UPLOAD_MULTIPART_OVERHEAD
+        headers = dict(scope.get("headers") or [])
+        content_length = headers.get(b"content-length")
+        if content_length is not None:
+            try:
+                if int(content_length) > limit:
+                    return await self._reject(send, max_bytes)
+            except ValueError:
+                pass
+
+        total = 0
+        response_started = False
+
+        async def counting_receive():
+            nonlocal total
+            message = await receive()
+            if message["type"] == "http.request":
+                total += len(message.get("body", b""))
+                if total > limit:
+                    raise _UploadTooLargeAbort()
+            return message
+
+        async def watching_send(message):
+            nonlocal response_started
+            if message["type"] == "http.response.start":
+                response_started = True
+            await send(message)
+
+        try:
+            await self.app(scope, counting_receive, watching_send)
+        except _UploadTooLargeAbort:
+            # The body parser hasn't produced a response yet at the point it
+            # pulls the body, so we can still answer 413 ourselves.
+            if not response_started:
+                await self._reject(send, max_bytes)
+
+    @staticmethod
+    async def _reject(send, max_bytes: int) -> None:
+        body = json.dumps({
+            "detail": {
+                "error": "upload_too_large",
+                "max_bytes": max_bytes,
+            }
+        }).encode()
+        await send({
+            "type": "http.response.start",
+            "status": 413,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(body)).encode()),
+            ],
+        })
+        await send({"type": "http.response.body", "body": body})
+
+
+app.add_middleware(UploadSizeLimitMiddleware)
 
 
 @app.middleware("http")

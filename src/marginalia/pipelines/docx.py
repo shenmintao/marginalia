@@ -323,7 +323,15 @@ def _extract_docx_images(body: bytes) -> list[DocumentImage]:
             "docx pipeline needs python-docx; `pip install python-docx`"
         ) from exc
 
-    doc = Document(io.BytesIO(body))
+    try:
+        doc = Document(io.BytesIO(body))
+    except Exception:
+        # Images are supplemental vision fodder: a package python-docx cannot
+        # re-open (corrupt zip, odd relationships) must not fail the ingest —
+        # the text extraction has already produced the primary content.
+        log.warning("docx image extraction skipped: package unreadable",
+                    exc_info=True)
+        return []
     images: list[DocumentImage] = []
     seen: set[tuple[int, str]] = set()
     rendered_block_no = 0

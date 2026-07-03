@@ -31,6 +31,7 @@ conversation-*.zip
 tests/_*_e2e_data/
 tests/_*_e2e_*/
 tests/_e2e_data/
+tests/_e2e_data_*/
 
 # Bundled python-build-standalone runtime, staged by
 # scripts/prepare-backend.mjs before tauri build. The directory itself

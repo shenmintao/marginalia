@@ -11,14 +11,32 @@ import { SearchPage } from "@/pages/SearchPage";
 import { SettingsPage } from "@/pages/SettingsPage";
 import { HelpPage } from "@/pages/HelpPage";
 import { AboutPage } from "@/pages/AboutPage";
+import { useI18n } from "@/lib/i18n";
 import { useTheme } from "@/lib/theme";
+
+function isTauri(): boolean {
+  return Boolean(
+    (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ ||
+      (window as unknown as { __TAURI__?: unknown }).__TAURI__,
+  );
+}
 
 export default function App() {
   const initTheme = useTheme((s) => s.init);
+  const { locale } = useI18n();
 
   useEffect(() => {
     return initTheme();
   }, [initTheme]);
+
+  // The tray menu lives in the Rust shell, which has no locale of its
+  // own — push the resolved UI language over so its items match.
+  useEffect(() => {
+    if (!isTauri()) return;
+    void import("@tauri-apps/api/core")
+      .then(({ invoke }) => invoke("set_ui_language", { lang: locale }))
+      .catch(() => { /* older shells without the command */ });
+  }, [locale]);
 
   return (
     <BackendGate>
@@ -36,6 +54,9 @@ export default function App() {
                 <Route path="/settings" element={<SettingsPage />} />
                 <Route path="/help" element={<HelpPage />} />
                 <Route path="/about" element={<AboutPage />} />
+                {/* Safety net: stray hash fragments (e.g. an unresolved
+                    in-answer "#foo" anchor) must not blank the pane. */}
+                <Route path="*" element={<Navigate to="/chat" replace />} />
               </Routes>
             </main>
           </div>

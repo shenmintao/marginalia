@@ -347,15 +347,23 @@ async def list_recent_with_usage(
     models and the caller (HTTP route) just serialises them."""
     from marginalia.db.models.task_outcomes import TaskOutcome
 
+    # A retried task writes one task_outcomes row per failed attempt plus one
+    # on final success, so an outer join would emit the task N times and let
+    # duplicates eat the LIMIT. Correlate a scalar subquery to the single
+    # latest outcome per task instead.
+    latest_detail = (
+        select(TaskOutcome.detail)
+        .where(
+            TaskOutcome.object_kind == "task",
+            TaskOutcome.object_id == Task.id,
+        )
+        .order_by(TaskOutcome.completed_at.desc())
+        .limit(1)
+        .scalar_subquery()
+    )
     rows = (
         await db.execute(
-            select(Task, TaskOutcome.detail)
-            .join(
-                TaskOutcome,
-                (TaskOutcome.object_kind == "task")
-                & (TaskOutcome.object_id == Task.id),
-                isouter=True,
-            )
+            select(Task, latest_detail.label("detail"))
             .where(Task.status.in_(("done", "dead")))
             .order_by(Task.finished_at.desc())
             .limit(limit)

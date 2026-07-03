@@ -19,6 +19,7 @@ import asyncio
 import json
 import logging
 import re
+from codecs import BOM_UTF16_BE, BOM_UTF16_LE
 from dataclasses import replace
 from typing import Any
 
@@ -1014,8 +1015,20 @@ def _pattern_search(
 
 def _decode_text(buf: bytes) -> str:
     """Robust decode — text mime says "should be utf-8" but we tolerate
-    BOM / utf-16 / arbitrary as last resort."""
-    for enc in ("utf-8-sig", "utf-8", "utf-16"):
+    BOM / utf-16 / legacy single-byte encodings.
+
+    UTF-16 is only attempted when a UTF-16 BOM is present: a bare
+    ``buf.decode("utf-16")`` succeeds on almost any even-length byte buffer
+    and silently turns cp1252/latin-1/GBK text into mojibake. After UTF-8
+    fails we fall back to cp1252/latin-1 (like the log pipeline) and use
+    ``errors="replace"`` only as the last resort.
+    """
+    if buf.startswith((BOM_UTF16_LE, BOM_UTF16_BE)):
+        try:
+            return buf.decode("utf-16")
+        except UnicodeDecodeError:
+            pass
+    for enc in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
         try:
             return buf.decode(enc)
         except UnicodeDecodeError:

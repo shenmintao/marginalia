@@ -227,8 +227,12 @@ async def list_live_children_of_many(
 async def list_live_descendant_ids(
     db: AsyncSession, root_id: str,
 ) -> list[str]:
-    """BFS-collect ids of `root_id` plus every live folder beneath it."""
+    """BFS-collect ids of `root_id` plus every live folder beneath it.
+
+    A `seen` set guards against parent_id cycles (a corrupt/imported chain
+    where A is under B and B is under A) so the walk always terminates."""
     out: list[str] = [root_id]
+    seen: set[str] = {root_id}
     frontier: list[str] = [root_id]
     while frontier:
         children = (
@@ -239,10 +243,12 @@ async def list_live_descendant_ids(
                 )
             )
         ).scalars().all()
-        if not children:
+        new = [c for c in children if c not in seen]
+        if not new:
             break
-        out.extend(children)
-        frontier = list(children)
+        seen.update(new)
+        out.extend(new)
+        frontier = new
     return out
 
 

@@ -1,7 +1,7 @@
 {
   "name": "marginalia-desktop",
   "private": true,
-  "version": "0.3.1",
+  "version": "0.3.2",
   "type": "module",
   "description": "Marginalia desktop GUI — Tauri + React + Vite",
   "scripts": {
@@ -16,6 +16,7 @@
   "dependencies": {
     "@silurus/ooxml": "^0.66.3",
     "@tauri-apps/api": "^2.1.1",
+    "@tauri-apps/plugin-opener": "^2.2.7",
     "@types/react-syntax-highlighter": "^15.5.13",
     "clsx": "^2.1.1",
     "epubjs": "^0.3.93",

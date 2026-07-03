@@ -50,6 +50,12 @@ log = logging.getLogger(__name__)
 
 
 _OPENAI_PROVIDERS: tuple[str, ...] = ("openai", "openai-compatible")
+# Dialects that actually emit text-mode DSML tool-call markup instead of the
+# OpenAI `message.tool_calls` field. We only parse the markup for these; for
+# every other openai-compatible endpoint an assistant string that merely
+# *contains* this markup (e.g. quoting an ingested document) must stay plain
+# text, never be executed as tool calls.
+_DSML_DIALECTS: tuple[str, ...] = ("deepseek", "thinking-type")
 _DSML = r"[|｜]{2}\s*DSML\s*[|｜]{2}"
 _DSML_TOOL_CALLS_RE = re.compile(
     rf"<\s*{_DSML}\s*tool_calls\s*>(?P<body>.*?)</\s*{_DSML}\s*tool_calls\s*>",
@@ -147,7 +153,7 @@ class OpenAIChatClient(ChatClient):
             kwargs.pop("reasoning_effort", None)
             kwargs.pop("extra_body", None)
             resp = await self._client.chat.completions.create(**kwargs)
-        return self._render_response(resp)
+        return self._render_response(resp, tools_offered=bool(request.tools))
 
     @staticmethod
     def _supports_temperature(model: str, reasoning_effort: str | None = None) -> bool:
@@ -238,7 +244,7 @@ class OpenAIChatClient(ChatClient):
 
     # --- response parsing ---------------------------------------------------
 
-    def _render_response(self, resp: Any) -> ChatResponse:
+    def _render_response(self, resp: Any, *, tools_offered: bool = False) -> ChatResponse:
         choice = resp.choices[0]
         msg = choice.message
         finish = choice.finish_reason or "stop"
@@ -260,7 +266,18 @@ class OpenAIChatClient(ChatClient):
             tool_calls.append(ToolCall(id=tc.id, name=tc.function.name, arguments=args))
 
         text = msg.content
-        if text:
+        # Text-mode DSML tool calls are a DeepSeek/thinking-type provider quirk.
+        # Only parse them for those dialects, only when tools were actually
+        # offered, and only when the provider did NOT already return structured
+        # tool_calls. This prevents an assistant message that merely echoes DSML
+        # markup (e.g. quoting an ingested/untrusted document) from being
+        # executed as real tool calls on arbitrary openai-compatible endpoints.
+        if (
+            text
+            and not tool_calls
+            and tools_offered
+            and self._compat_dialect in _DSML_DIALECTS
+        ):
             text_tool_calls, stripped_text = _extract_dsml_tool_calls(text)
             if text_tool_calls:
                 tool_calls.extend(text_tool_calls)
@@ -319,6 +336,14 @@ def _extract_dsml_tool_calls(text: str) -> tuple[list[ToolCall], str]:
     Treat those blocks as real tool calls so runtime dispatch and tool-budget
     guards still work, and remove the raw protocol markup from visible text.
     """
+    first = _DSML_TOOL_CALLS_RE.search(text)
+    if first is None:
+        return [], text
+    # A genuine text-mode tool call is the assistant's whole turn, so the block
+    # must begin the message (only whitespace before it). Markup that appears
+    # mid-answer is the model quoting content, not requesting a tool call.
+    if text[: first.start()].strip():
+        return [], text
     calls: list[ToolCall] = []
     for block in _DSML_TOOL_CALLS_RE.finditer(text):
         for invoke_index, invoke in enumerate(_DSML_INVOKE_RE.finditer(block.group("body"))):

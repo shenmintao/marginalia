@@ -107,9 +107,26 @@ export async function resolveTauriBaseUrl(): Promise<string> {
         error: describeError(e),
       });
     }
+    // Don't cache a failed resolution: after "Retry" respawns the
+    // sidecar (BackendGate), the next call must ask the shell again.
+    if (!_base) _tauriResolved = null;
     return _base;
   })();
   return _tauriResolved;
+}
+
+/** Forget a previously-resolved Tauri base URL so the next request asks
+ *  the shell again. BackendGate's Retry flow needs this: restart_backend
+ *  respawns the sidecar on a NEW ephemeral port, so a cached resolution
+ *  of the old (now dead) port would be polled forever. No-op when a user
+ *  override (localStorage / VITE_API_BASE) supplies the base URL. */
+export function resetResolvedBaseUrl(): void {
+  if (typeof window !== "undefined" && window.localStorage?.getItem(STORAGE_KEY)) {
+    return;
+  }
+  if (import.meta.env.VITE_API_BASE) return;
+  _base = "";
+  _tauriResolved = null;
 }
 
 export function setBaseUrl(url: string) {
@@ -366,6 +383,50 @@ function safeParseJson(s: string): unknown {
 export function authHeaders(): Record<string, string> {
   const token = getApiToken();
   return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+export function hasApiToken(): boolean {
+  return Boolean(getApiToken());
+}
+
+/** Anchor onClick guard for `<a href download>` links. Plain anchors
+ *  can't carry the Authorization header, so when a bearer token is
+ *  configured we fetch the blob ourselves and click a temporary
+ *  object-URL anchor instead. No-op (native anchor download) when no
+ *  token is set, so the streaming download path stays the default. */
+export function maybeAuthDownload(
+  e: { preventDefault: () => void },
+  url: string,
+  name?: string,
+): void {
+  if (!hasApiToken()) return;
+  e.preventDefault();
+  void (async () => {
+    try {
+      const res = await fetch(url, { headers: authHeaders() });
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+      const blob = await res.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = objectUrl;
+      a.download = name || "";
+      document.body.appendChild(a);
+      a.click();
+      // Deferred cleanup: revoking synchronously races the queued
+      // download navigation on WebKit-based webviews (macOS WKWebView /
+      // Linux WebKitGTK) and can abort it. Same 60s grace as the
+      // print-iframe cleanup in OfficeViewer.
+      window.setTimeout(() => {
+        a.remove();
+        URL.revokeObjectURL(objectUrl);
+      }, 60_000);
+    } catch (err) {
+      frontendLog("error", "authenticated download failed", {
+        url,
+        error: describeError(err),
+      });
+    }
+  })();
 }
 
 // ---- search / discover ----------------------------------------------------

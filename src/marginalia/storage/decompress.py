@@ -191,8 +191,18 @@ def open_archive(
         # of the archive, we collect the list of unsafe basenames and
         # propagate them via the session.
         unsafe_basenames: set[str] = set()
+        # Best-effort decompression-bomb guard BEFORE writing anything to
+        # disk: classic bombs honestly declare a huge uncompressed size (the
+        # trick is the ratio), so if the listing exposes per-entry sizes we
+        # refuse up front. When no size metadata is available we fall back to
+        # the post-extraction walk below. Note: list_archive() returns plain
+        # name strings in py7zz 1.3.x, so sizes must come from
+        # SevenZipFile.infolist() (ArchiveInfo.file_size).
+        declared_total = 0
+        have_sizes = False
         try:
-            listing = py7zz.list_archive(str(archive_path))
+            with py7zz.SevenZipFile(str(archive_path), "r") as _sz:
+                listing = _sz.infolist()
         except Exception as exc:
             raise DecompressionError(
                 f"py7zz could not list {filename!r}: {exc}"
@@ -205,6 +215,10 @@ def open_archive(
             )
             if not name:
                 continue
+            _size = getattr(entry, "file_size", None)
+            if isinstance(_size, int) and _size >= 0:
+                declared_total += _size
+                have_sizes = True
             n = str(name).replace("\\", "/")
             parts = n.split("/")
             if any(seg == ".." for seg in parts) or \
@@ -212,6 +226,12 @@ def open_archive(
                 # This entry will be silently rewritten by py7zz —
                 # remember its sanitised basename so we can filter.
                 unsafe_basenames.add(parts[-1] if parts else "")
+
+        if have_sizes and declared_total > bomb_limit_bytes:
+            raise DecompressionError(
+                f"declared decompressed size {declared_total:,} bytes exceeds "
+                f"{bomb_limit_bytes:,} (possible decompression bomb)"
+            )
 
         try:
             py7zz.extract_archive(str(archive_path), str(extract_dir))
@@ -243,7 +263,11 @@ def open_archive(
             shutil.rmtree(extract_dir, ignore_errors=True)
             extract_dir = tmp_root / "out_inner"
             extract_dir.mkdir()
-            inner_archive = tmp_root / members[0].path
+            # Use just the basename: members[0].path may include a
+            # subdirectory (e.g. 'sub/foo.tar'), and tmp_root/'sub' does not
+            # exist yet, so writing tmp_root/members[0].path would raise
+            # FileNotFoundError.
+            inner_archive = tmp_root / os.path.basename(members[0].path)
             inner_archive.write_bytes(inner_body)
             try:
                 py7zz.extract_archive(str(inner_archive), str(extract_dir))
@@ -290,7 +314,16 @@ def _walk_files(root: Path) -> Iterator[Path]:
     for dirpath, _dirs, files in os.walk(root):
         dp = Path(dirpath)
         for name in files:
-            yield dp / name
+            p = dp / name
+            # Skip symlink members. Following them can crash on a dangling
+            # target (stat -> FileNotFoundError) and, for an absolute symlink
+            # like /etc/passwd that py7zz rewrites into the extract tree, would
+            # read outside the archive. Archive symlinks aren't indexable
+            # content, so dropping them here also keeps them out of the member
+            # list (read_bytes/iter_bytes never follow them).
+            if p.is_symlink():
+                continue
+            yield p
 
 
 def _safe_archive_name(filename: str) -> str:

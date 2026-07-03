@@ -449,8 +449,11 @@ def _dt(value: datetime | None) -> str | None:
     return value.astimezone(timezone.utc).isoformat()
 
 
-def _decimal(value: Decimal | None) -> str:
-    return str(value or Decimal("0"))
+def _decimal(value: Decimal | None) -> str | None:
+    # Cost accounting is deprecated (no pricing table exists), so a stored
+    # 0 means "never computed" — export null instead of a fake "0". Real
+    # non-zero values (e.g. imported from elsewhere) still round-trip.
+    return str(value) if value else None
 
 
 def _json_bytes(value: Any, *, indent: int | None = None) -> bytes:

@@ -146,19 +146,39 @@ def _metadata_like_terms(terms: list[str]) -> list[str]:
     return out
 
 
-def _metadata_short_cjk_like_terms(terms: list[str]) -> list[str]:
+def _metadata_short_like_terms(terms: list[str]) -> list[str]:
+    """Terms too short for the trigram FTS index \u2014 rescued via LIKE.
+
+    SQLite's trigram tokenizer can't index anything shorter than 3 chars, so
+    any such term ("AI"/"ML"/"Go", a 2-char CJK word, \u2026) would be silently
+    dropped from an FTS query. We OR these back in as LIKE terms."""
     return [
         term
         for term in _metadata_like_terms(terms)
-        if len(term) < _MIN_TRIGRAM_FTS_TERM_LEN and _contains_cjk(term)
+        if len(term) < _MIN_TRIGRAM_FTS_TERM_LEN
+    ]
+
+
+def _metadata_postgres_like_terms(terms: list[str]) -> list[str]:
+    """Terms Postgres' 'simple' tsvector can't match \u2014 rescued via ILIKE.
+
+    'simple' tokenizes on whitespace/punctuation, so a contiguous CJK run
+    collapses to one token and a CJK query term never matches. Route every
+    CJK term (any length) plus every sub-trigram term to the ILIKE fallback."""
+    return [
+        term
+        for term in _metadata_like_terms(terms)
+        if len(term) < _MIN_TRIGRAM_FTS_TERM_LEN or _contains_cjk(term)
     ]
 
 
 def _contains_cjk(term: str) -> bool:
     return any(
-        "\u3400" <= ch <= "\u4dbf"
-        or "\u4e00" <= ch <= "\u9fff"
-        or "\uf900" <= ch <= "\ufaff"
+        "\u3040" <= ch <= "\u30ff"     # hiragana + katakana
+        or "\u3400" <= ch <= "\u4dbf"  # CJK unified ideographs ext. A
+        or "\u4e00" <= ch <= "\u9fff"  # CJK unified ideographs
+        or "\uac00" <= ch <= "\ud7a3"  # hangul syllables
+        or "\uf900" <= ch <= "\ufaff"  # CJK compatibility ideographs
         for ch in term
     )
 
@@ -167,17 +187,23 @@ def _quote_fts_phrase(term: str) -> str:
     return '"' + term.replace('"', '""') + '"'
 
 
+def _escape_like_term(term: str) -> str:
+    """Escape LIKE/ILIKE wildcards so a user term like `report_2024` or
+    `100%` matches literally instead of degenerating to a wildcard."""
+    return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def _metadata_like_clauses(terms: Sequence[str]):
     clauses = []
     for term in _metadata_like_terms(list(terms)):
-        like = f"%{term}%"
+        like = f"%{_escape_like_term(term)}%"
         clauses.extend((
-            File.summary.ilike(like),
-            cast(File.description, String).ilike(like),
-            File.extra.ilike(like),
-            File.original_ext.ilike(like),
-            FileEntry.extra.ilike(like),
-            FileEntry.display_name.ilike(like),
+            File.summary.ilike(like, escape="\\"),
+            cast(File.description, String).ilike(like, escape="\\"),
+            File.extra.ilike(like, escape="\\"),
+            File.original_ext.ilike(like, escape="\\"),
+            FileEntry.extra.ilike(like, escape="\\"),
+            FileEntry.display_name.ilike(like, escape="\\"),
         ))
     return clauses
 
@@ -192,11 +218,12 @@ async def _metadata_fts_query(
     if db.bind is None:
         return None
     dialect = db.bind.dialect.name
-    like_terms = tuple(_metadata_short_cjk_like_terms(terms))
     if dialect == "postgresql":
+        like_terms = tuple(_metadata_postgres_like_terms(terms))
         return _MetadataTextSearch(dialect="postgresql", fts_query=query, like_terms=like_terms)
     if dialect != "sqlite":
         return None
+    like_terms = tuple(_metadata_short_like_terms(terms))
     try:
         exists = (
             await db.execute(
@@ -714,7 +741,7 @@ async def resolve_entry_id_prefix(
             await db.execute(
                 select(FileEntry.id, FileEntry.display_name)
                 .where(FileEntry.display_name.ilike(f"%{s}%"))
-                .where(FileEntry.lifecycle != "deleted")
+                .where(_live_entry())
                 .limit(5)
             )
         ).all()

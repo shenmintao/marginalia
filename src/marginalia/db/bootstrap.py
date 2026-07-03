@@ -502,6 +502,75 @@ def _drop_entry_metadata_fts(bind) -> None:
     ))
 
 
+def _recover_interrupted_rebuild(bind, name: str) -> None:
+    """Recover a table rebuild that was interrupted mid-flight.
+
+    The rebuild shims below do
+    ``ALTER TABLE x RENAME TO _x_old; CREATE TABLE x; INSERT INTO x SELECT …
+    FROM _x_old; DROP TABLE _x_old``. Under pysqlite's default driver the
+    RENAME/CREATE autocommit while the INSERT/DROP run in a later transaction,
+    so a crash (or the desktop app being killed) in that window leaves an
+    EMPTY live table plus a fully-populated ``_x_old`` — and the shim's
+    constraint guard then no-ops because the freshly-created table already
+    carries the new CHECK, permanently stranding every row in ``_x_old``.
+
+    Detect a leftover ``_x_old`` and copy any stranded rows back into the live
+    table before the guard runs. Idempotent: re-running after the copy sees
+    no ``_x_old`` and does nothing; a crash mid-recovery leaves ``_x_old`` in
+    place for the next start to finish. No-op on Postgres.
+    """
+    if bind.dialect.name != "sqlite":
+        return
+    old = f"_{name}_old"
+    exists = bind.execute(
+        sa.text("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = :n"),
+        {"n": old},
+    ).fetchone()
+    if exists is None:
+        return
+    # A crash right after RENAME leaves no live table at all — recreate it
+    # with the current schema so the copy below has a destination.
+    Base.metadata.tables[name].create(bind=bind, checkfirst=True)
+    inspector = sa.inspect(bind)
+    old_cols = {c["name"] for c in inspector.get_columns(old)}
+    shared = [c["name"] for c in inspector.get_columns(name) if c["name"] in old_cols]
+    col_list = ", ".join(f'"{c}"' for c in shared)
+    bind.execute(sa.text("PRAGMA legacy_alter_table = ON"))
+    bind.execute(sa.text("PRAGMA foreign_keys = OFF"))
+    try:
+        # INSERT OR IGNORE covers the (harmless) case where the copy had
+        # already committed before the crash: the live rows win and nothing
+        # is duplicated.
+        bind.execute(sa.text(
+            f'INSERT OR IGNORE INTO "{name}" ({col_list}) '
+            f'SELECT {col_list} FROM "{old}"'
+        ))
+        bind.execute(sa.text(f'DROP TABLE "{old}"'))
+    finally:
+        bind.execute(sa.text("PRAGMA foreign_keys = ON"))
+        bind.execute(sa.text("PRAGMA legacy_alter_table = OFF"))
+
+
+def _recover_leftover_rebuilds(bind) -> None:
+    """Recover EVERY interrupted rebuild, not just the fixed set of tables the
+    relax shims each guard. `_repair_dangling_file_entries_fks` renames
+    arbitrary FK-referencing tables to `_<name>_old`, so a crash there can
+    strand a table the per-shim recovery never looks at. Scan sqlite_master for
+    any `_<name>_old` leftover whose base table is metadata-known and finish it.
+    No-op on Postgres and on a clean database.
+    """
+    if bind.dialect.name != "sqlite":
+        return
+    leftovers = bind.execute(sa.text(
+        "SELECT name FROM sqlite_master "
+        "WHERE type = 'table' AND name LIKE '\\_%\\_old' ESCAPE '\\'"
+    )).fetchall()
+    for (old_name,) in leftovers:
+        base = old_name[1:-len("_old")]
+        if base in Base.metadata.tables:
+            _recover_interrupted_rebuild(bind, base)
+
+
 def _relax_file_entries_folder_id_nullable(bind) -> None:
     """Make file_entries.folder_id nullable on existing SQLite DBs.
 
@@ -510,6 +579,7 @@ def _relax_file_entries_folder_id_nullable(bind) -> None:
     Postgres (handled by alembic in a separate migration if/when needed)
     and on freshly-created SQLite tables (already nullable from the model).
     """
+    _recover_interrupted_rebuild(bind, "file_entries")
     if bind.dialect.name != "sqlite":
         return
     inspector = sa.inspect(bind)
@@ -554,6 +624,13 @@ def _repair_dangling_file_entries_fks(bind) -> None:
     bootstrap that renamed file_entries without `legacy_alter_table=ON`."""
     if bind.dialect.name != "sqlite":
         return
+    # This shim renames arbitrary FK-referencing tables to `_<name>_old` with
+    # the same non-atomic rename/create/copy/drop pattern as the relax shims,
+    # so a crash mid-loop can strand a table's rows in `_<name>_old` while the
+    # recreated live table no longer matches the `%_file_entries_old%` filter
+    # below (and thus never gets re-processed). Recover any such leftover for a
+    # metadata-known table first — a no-op on a clean run.
+    _recover_leftover_rebuilds(bind)
     rows = bind.execute(sa.text(
         "SELECT name FROM sqlite_master "
         "WHERE type = 'table' AND sql LIKE '%_file_entries_old%'"
@@ -592,6 +669,7 @@ def _relax_sessions_end_reason_check(bind) -> None:
     constraint already matches the model, or on Postgres (handled by
     alembic if/when needed).
     """
+    _recover_interrupted_rebuild(bind, "sessions")
     if bind.dialect.name != "sqlite":
         return
     inspector = sa.inspect(bind)
@@ -637,6 +715,7 @@ def _relax_files_kind_check(bind) -> None:
     """
     from marginalia.db.models.enums import FILE_KINDS, _in_clause
 
+    _recover_interrupted_rebuild(bind, "files")
     inspector = sa.inspect(bind)
     if "files" not in inspector.get_table_names():
         return
@@ -853,9 +932,12 @@ def _stamp_alembic_version(bind, revision: str) -> None:
     equivalent), or upgrades the stamp on an existing DB once
     bootstrap-time shims have caught it up. Idempotent.
     """
+    # VARCHAR(255), not alembic's default 32: several revision ids in the
+    # chain are longer and Postgres enforces the length (alembic/env.py
+    # widens pre-existing tables the same way).
     bind.execute(sa.text(
         "CREATE TABLE IF NOT EXISTS alembic_version ("
-        "version_num VARCHAR(32) NOT NULL PRIMARY KEY)"
+        "version_num VARCHAR(255) NOT NULL PRIMARY KEY)"
     ))
     bind.execute(sa.text("DELETE FROM alembic_version"))
     bind.execute(
@@ -892,6 +974,12 @@ async def bootstrap_schema() -> None:
                 await conn.run_sync(helper)
         async with engine.begin() as conn:
             await conn.run_sync(_stamp_alembic_version, ALEMBIC_HEAD_REVISION)
+        # The table-rebuild shims restore `PRAGMA foreign_keys = ON` inside the
+        # rebuild's write transaction, where SQLite silently ignores it, so the
+        # pooled connection they ran on is left with FK enforcement OFF for its
+        # whole lifetime. Drop the pool so every subsequent checkout is a fresh
+        # DBAPI connection that re-runs the connect-time PRAGMA (FK = ON).
+        await engine.dispose()
         return
     async with engine.begin() as conn:
         await conn.run_sync(bootstrap_schema_sync)

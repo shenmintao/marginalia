@@ -1,7 +1,7 @@
 """agent runtime types (the bigger picture lives in agent.runtime)."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import Literal
 
@@ -23,7 +23,9 @@ class TurnUsage:
     tool_calls: int = 0
     llm_calls: int = 0
     duration_ms: int = 0
-    cost_estimate: Decimal = field(default_factory=lambda: Decimal("0"))
+    # Deprecated: no pricing table exists, so this is None rather than a
+    # misleading constant 0 (see audit 2026-07-02 bug #57).
+    cost_estimate: Decimal | None = None
 
 
 @dataclass(slots=True)

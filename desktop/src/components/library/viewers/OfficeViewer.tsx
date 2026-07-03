@@ -11,6 +11,8 @@ import {
   ZoomOut,
 } from "lucide-react";
 
+import { maybeAuthDownload } from "@/api/client";
+import { useI18n } from "@/lib/i18n";
 import {
   VIEWER_MAX_ZOOM,
   VIEWER_MIN_ZOOM,
@@ -27,16 +29,13 @@ import {
   parseCssPixels,
   preserveViewportZoomAnchor,
   refreshVisualPageBase,
+  useAuthObjectUrl,
   useQuoteJump,
   useViewportWheelZoom,
 } from "./ViewerShared";
 type OfficeKind = "docx" | "xlsx" | "pptx";
 type SingleCanvasOoxmlKind = Exclude<OfficeKind, "docx">;
 const OFFICE_VIEWER_LOAD_TIMEOUT_MS = 30_000;
-
-function officePreviewTimeoutMessage(format: OfficeKind): string {
-  return `${format.toUpperCase()} preview did not finish loading. The desktop runtime may be blocking document viewer workers or WebAssembly.`;
-}
 
 interface OfficeViewerToolbarProps {
   ready: boolean;
@@ -97,6 +96,7 @@ function OfficeViewerToolbar({
   canPrint,
   onPrint,
 }: OfficeViewerToolbarProps) {
+  const { t } = useI18n();
   return (
     <div className="flex h-10 shrink-0 items-center gap-2 overflow-x-auto border-b border-border bg-bg px-3 text-xs text-fg-muted">
       <div className="flex items-center gap-1">
@@ -133,15 +133,15 @@ function OfficeViewerToolbar({
       </div>
       <div className="h-5 w-px shrink-0 bg-border" />
       <div className="flex items-center gap-1">
-        <ViewerToolbarButton title="Zoom out" disabled={!canZoomOut} onClick={onZoomOut}>
+        <ViewerToolbarButton title={t.viewer.zoomOut} disabled={!canZoomOut} onClick={onZoomOut}>
           <ZoomOut size={14} />
         </ViewerToolbarButton>
         <span className="min-w-14 text-center tabular-nums">{zoomLabel}</span>
-        <ViewerToolbarButton title="Zoom in" disabled={!canZoomIn} onClick={onZoomIn}>
+        <ViewerToolbarButton title={t.viewer.zoomIn} disabled={!canZoomIn} onClick={onZoomIn}>
           <ZoomIn size={14} />
         </ViewerToolbarButton>
         <ViewerToolbarButton
-          title="Fit to width"
+          title={t.viewer.fitWidth}
           disabled={!ready}
           active={fitActive}
           onClick={onFitWidth}
@@ -150,13 +150,14 @@ function OfficeViewerToolbar({
         </ViewerToolbarButton>
       </div>
       <div className="ml-auto flex items-center gap-1">
-        <ViewerToolbarButton title="Print" disabled={!canPrint} onClick={onPrint}>
+        <ViewerToolbarButton title={t.viewer.print} disabled={!canPrint} onClick={onPrint}>
           <Printer size={14} />
         </ViewerToolbarButton>
         <a
           href={downloadUrl}
           download={name}
-          title="Download"
+          onClick={(e) => maybeAuthDownload(e, downloadUrl, name)}
+          title={t.viewer.download}
           className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded border border-border text-fg-muted transition-colors hover:bg-bg-muted"
         >
           <Download size={14} />
@@ -229,10 +230,16 @@ export function OfficeDocumentView({ url, format, name, downloadUrl, quote, page
   page: number | null;
   onScrolled?: () => void;
 }) {
+  // Token-protected backends reject the ooxml loaders' internal fetch;
+  // route the bytes through an object URL in that case (direct URL
+  // otherwise).
+  const { src, err } = useAuthObjectUrl(url);
+  if (err) return <ViewerError msg={err} />;
+  if (!src) return <ViewerLoading />;
   if (format === "docx") {
     return (
       <DocxScrollView
-        url={url}
+        url={src}
         name={name}
         downloadUrl={downloadUrl}
         quote={quote}
@@ -242,7 +249,7 @@ export function OfficeDocumentView({ url, format, name, downloadUrl, quote, page
   }
   return (
     <OoxmlView
-      url={url}
+      url={src}
       format={format}
       name={name}
       downloadUrl={downloadUrl}
@@ -259,6 +266,7 @@ function DocxScrollView({ url, name, downloadUrl, quote, onScrolled }: {
   quote: string | null;
   onScrolled?: () => void;
 }) {
+  const { t } = useI18n();
   const scrollRef = useRef<HTMLDivElement>(null);
   const docRef = useRef<DocxDocumentInstance | null>(null);
   const pageRefs = useRef<(HTMLDivElement | null)[]>([]);
@@ -384,7 +392,7 @@ function DocxScrollView({ url, name, downloadUrl, quote, onScrolled }: {
   useEffect(() => {
     let cancelled = false;
     const timeout = window.setTimeout(() => {
-      if (!cancelled) setErr(officePreviewTimeoutMessage("docx"));
+      if (!cancelled) setErr(t.viewer.officeTimeout("DOCX"));
     }, OFFICE_VIEWER_LOAD_TIMEOUT_MS);
     setReady(false);
     setRendering(false);
@@ -554,9 +562,9 @@ function DocxScrollView({ url, name, downloadUrl, quote, onScrolled }: {
         downloadUrl={downloadUrl}
         positionInput={pageInput}
         total={pageCount}
-        inputLabel="Page number"
-        prevTitle="Previous page"
-        nextTitle="Next page"
+        inputLabel={t.viewer.pageNumber}
+        prevTitle={t.viewer.prevPage}
+        nextTitle={t.viewer.nextPage}
         prevIcon={<ChevronUp size={14} />}
         nextIcon={<ChevronDown size={14} />}
         canPrev={canPrev}
@@ -740,8 +748,40 @@ function printRenderedCanvasPages(
     .filter((canvas): canvas is HTMLCanvasElement => canvas != null);
   if (canvases.length === 0) return;
   const printWindow = window.open("", "_blank", "width=960,height=720");
-  if (!printWindow) return;
-  const doc = printWindow.document;
+  if (printWindow) {
+    writePrintDocument(printWindow.document, title, canvases, () => {
+      printWindow.focus();
+      printWindow.print();
+    });
+    return;
+  }
+  // Packaged Tauri webviews silently drop window.open() popups; fall
+  // back to printing from a hidden same-document iframe instead.
+  const frame = document.createElement("iframe");
+  frame.style.cssText =
+    "position:fixed;right:0;bottom:0;width:0;height:0;border:0;visibility:hidden;";
+  document.body.appendChild(frame);
+  const doc = frame.contentDocument;
+  const win = frame.contentWindow;
+  if (!doc || !win) {
+    frame.remove();
+    return;
+  }
+  writePrintDocument(doc, title, canvases, () => {
+    win.focus();
+    win.print();
+    // Leave the frame around long enough for the print dialog to
+    // consume its content, then clean up.
+    window.setTimeout(() => frame.remove(), 60_000);
+  });
+}
+
+function writePrintDocument(
+  doc: Document,
+  title: string,
+  canvases: HTMLCanvasElement[],
+  onReady: () => void,
+) {
   doc.open();
   doc.write("<!doctype html><html><head><title></title></head><body></body></html>");
   doc.close();
@@ -756,10 +796,7 @@ function printRenderedCanvasPages(
   const maybePrint = () => {
     remaining -= 1;
     if (remaining > 0) return;
-    window.setTimeout(() => {
-      printWindow.focus();
-      printWindow.print();
-    }, 50);
+    window.setTimeout(onReady, 50);
   };
   for (const canvas of canvases) {
     const img = doc.createElement("img");
@@ -778,6 +815,7 @@ function OoxmlView({ url, format, name, downloadUrl, quote, page, onScrolled }: 
   page: number | null;
   onScrolled?: () => void;
 }) {
+  const { t } = useI18n();
   const scrollRef = useRef<HTMLDivElement>(null);
   const hostRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -920,7 +958,7 @@ function OoxmlView({ url, format, name, downloadUrl, quote, page, onScrolled }: 
     let reportedError = false;
     const timeout = window.setTimeout(() => {
       reportedError = true;
-      if (!cancelled) setErr(officePreviewTimeoutMessage(format));
+      if (!cancelled) setErr(t.viewer.officeTimeout(format.toUpperCase()));
     }, OFFICE_VIEWER_LOAD_TIMEOUT_MS);
     const rafs: number[] = [];
     setReady(false);
@@ -1125,9 +1163,9 @@ function OoxmlView({ url, format, name, downloadUrl, quote, page, onScrolled }: 
         positionInput={positionInput}
         total={position.total}
         positionLabel={positionLabel}
-        inputLabel={isPptx ? "Slide number" : "Sheet number"}
-        prevTitle={isPptx ? "Previous slide" : "Previous sheet"}
-        nextTitle={isPptx ? "Next slide" : "Next sheet"}
+        inputLabel={isPptx ? t.viewer.slideNumber : t.viewer.sheetNumber}
+        prevTitle={isPptx ? t.viewer.prevSlide : t.viewer.prevSheet}
+        nextTitle={isPptx ? t.viewer.nextSlide : t.viewer.nextSheet}
         prevIcon={isPptx ? <ChevronLeft size={14} /> : <ChevronUp size={14} />}
         nextIcon={isPptx ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
         canPrev={canPrev}
@@ -1165,7 +1203,7 @@ function OoxmlView({ url, format, name, downloadUrl, quote, page, onScrolled }: 
                         ? "border-accent/60 bg-accent/10 text-accent"
                         : "border-border bg-bg-subtle text-fg-muted hover:bg-bg-muted")
                     }
-                    title={`Slide ${i + 1}`}
+                    title={t.viewer.slide(i + 1)}
                   >
                     <div className="flex aspect-video w-full items-center justify-center overflow-hidden bg-white shadow-sm">
                       <canvas

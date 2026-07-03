@@ -7,6 +7,7 @@ an LRU cache keyed by immutable file content when possible.
 """
 from __future__ import annotations
 
+import asyncio
 import io
 import re
 from collections import OrderedDict
@@ -102,7 +103,11 @@ async def get_pdf_text_for_file(
     if not storage_key:
         raise ValueError("file has no storage_key")
     pdf_bytes = await read_storage_bytes(storage, str(storage_key))
-    doc = extract_pdf_text_range(pdf_bytes, page_start=1, page_end=None)
+    # pypdf whole-document extraction is pure-CPU and can take tens of seconds
+    # on large PDFs; offload it so the event loop (API/SSE server) stays free.
+    doc = await asyncio.to_thread(
+        extract_pdf_text_range, pdf_bytes, page_start=1, page_end=None,
+    )
     if cache_key:
         _put_lru(_TEXT_CACHE, cache_key, doc, PDF_TEXT_CACHE_MAX_DOCS)
         _put_lru(_LABEL_CACHE, cache_key, doc.page_labels, PDF_LABEL_CACHE_MAX_DOCS)
@@ -122,7 +127,8 @@ async def get_pdf_page_labels_for_file(
     if not storage_key:
         return []
     pdf_bytes = await read_storage_bytes(storage, str(storage_key))
-    labels = extract_pdf_page_labels(pdf_bytes)
+    # Offload the pypdf parse off the event loop (see get_pdf_text_for_file).
+    labels = await asyncio.to_thread(extract_pdf_page_labels, pdf_bytes)
     if cache_key:
         _put_lru(_LABEL_CACHE, cache_key, labels, PDF_LABEL_CACHE_MAX_DOCS)
     return labels

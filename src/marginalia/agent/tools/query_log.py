@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import gzip
+import asyncio
 import re
+import zlib
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
@@ -9,6 +10,7 @@ from typing import Any, Mapping
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from marginalia.agent import _regex_subprocess
 from marginalia.agent.tools import ToolContext, tool
 from marginalia.repositories import entries as entries_repo
 from marginalia.storage import StorageBackend, get_storage
@@ -17,6 +19,14 @@ TOOL_NAME = "query_log"
 DEFAULT_LIMIT = 200
 MAX_LIMIT = 1000
 MAX_ENTRY_IDS = 50
+# Patterns are LLM-supplied; cap the length so absurd inputs get a clear
+# tool error instead of feeding an arbitrarily large regex to re.compile.
+# (A hard match timeout would need the third-party `regex` module.)
+MAX_PATTERN_CHARS = 1000
+# The whole log is loaded into memory for line scanning; cap both the raw
+# object read and the gzip-decompressed form so a huge ingested log can't
+# OOM the backend. Over-limit inputs are truncated with a notice.
+MAX_LOG_BYTES = 32 * 1024 * 1024
 
 
 _TOOL_SCHEMA = {
@@ -159,7 +169,9 @@ async def handle(db: Any, storage: StorageBackend, args: dict[str, Any]) -> dict
 
     results = []
     for raw_id in ids:
-        result = await _run_for_entry(db, storage, raw_id, args, operation, compiled, since, until)
+        result = await _run_for_entry(
+            db, storage, raw_id, args, operation, compiled, regex, since, until
+        )
         results.append(result)
 
     if len(results) == 1:
@@ -197,6 +209,7 @@ async def _run_for_entry(
     args: dict[str, Any],
     operation: str,
     compiled: re.Pattern[str] | None,
+    regex: bool,
     since: datetime | None,
     until: datetime | None,
 ) -> dict[str, Any]:
@@ -210,45 +223,145 @@ async def _run_for_entry(
     entry, file_row = pair
 
     try:
-        text = await _read_text(storage, file_row, entry.display_name)
+        text, input_truncated = await _read_text(storage, file_row, entry.display_name)
     except Exception as exc:
         return {"ok": False, "entry_id": resolved, "error": f"failed to read log: {exc}"}
 
     limit = min(int(args.get("limit") or DEFAULT_LIMIT), MAX_LIMIT)
     offset = max(int(args.get("offset") or 0), 0)
-    scoped = list(_scoped_lines(text, args, since, until))
+    source = compiled.pattern if compiled is not None else None
+    flags = compiled.flags if compiled is not None else 0
+    group_name = str(args.get("group_by") or "").strip()
 
-    base = {
+    # `_scoped_lines` filtering (level / time / line-range) uses only fixed
+    # internal regexes, so it stays in a worker thread. The LLM-supplied
+    # pattern is applied by `_scan_dispatch` via `_regex_subprocess`, which
+    # runs a caller-supplied regex in a killable subprocess (a literal is
+    # escaped and can't backtrack, so it stays in-thread). Either way the
+    # blocking work is off the event loop.
+    try:
+        return await asyncio.to_thread(
+            _scan_dispatch,
+            text, args, since, until, operation, resolved, entry.display_name,
+            input_truncated, limit, offset, source, flags, regex, group_name,
+        )
+    except _regex_subprocess.RegexScanTimeout as exc:
+        return {"ok": False, "entry_id": resolved, "error": str(exc)}
+    except _regex_subprocess.RegexScanError as exc:
+        return {"ok": False, "entry_id": resolved, "error": f"scan failed: {exc}"}
+
+
+def _scan_dispatch(
+    text: str,
+    args: dict[str, Any],
+    since: datetime | None,
+    until: datetime | None,
+    operation: str,
+    resolved: str,
+    display_name: str,
+    input_truncated: bool,
+    limit: int,
+    offset: int,
+    source: str | None,
+    flags: int,
+    is_regex: bool,
+    group_name: str,
+) -> dict[str, Any]:
+    scoped = list(_scoped_lines(text, args, since, until))
+    texts = [s.text for s in scoped]
+
+    base: dict[str, Any] = {
         "ok": True,
         "entry_id": resolved,
-        "display_name": entry.display_name,
+        "display_name": display_name,
         "operation": operation,
         "scanned_lines": len(scoped),
     }
+    if input_truncated:
+        base["input_truncated"] = (
+            f"log larger than {MAX_LOG_BYTES} bytes; only the first "
+            f"{MAX_LOG_BYTES} bytes were scanned"
+        )
 
-    if operation == "filter_lines":
-        return base | _filter_lines(scoped, compiled, limit, offset)
-    if operation == "count_pattern":
-        return base | _count_pattern(scoped, compiled)
     if operation == "top_values":
-        return base | _top_values(scoped, compiled, str(args.get("group_by") or ""), limit)
+        if source is None:
+            return base | {"ok": False, "error": "top_values requires a regex pattern"}
+        captures = _regex_subprocess.run_match_captures(
+            source, flags, texts, group_name, is_regex=is_regex
+        )
+        return base | _top_values(captures, limit)
+
+    # `matched` is the set of matched line indices, or None when there is no
+    # pattern at all (every line counts — no regex is executed).
+    matched: set[int] | None = (
+        None if source is None
+        else _regex_subprocess.run_match_flags(source, flags, texts, is_regex=is_regex)
+    )
+    if operation == "filter_lines":
+        return base | _filter_lines(scoped, matched, limit, offset)
+    if operation == "count_pattern":
+        return base | _count_pattern(scoped, matched, source)
     if operation == "time_distribution":
         group_by = str(args.get("group_by") or "day").lower()
-        return base | _time_distribution(scoped, compiled, group_by, limit)
+        return base | _time_distribution(scoped, matched, group_by, limit)
 
     return {"ok": False, "entry_id": resolved, "error": f"unsupported operation: {operation}"}
 
 
-async def _read_text(storage: StorageBackend, file_row: Any, display_name: str) -> str:
+async def _read_text(
+    storage: StorageBackend, file_row: Any, display_name: str,
+) -> tuple[str, bool]:
+    """Load the log as text, bounded by MAX_LOG_BYTES.
+
+    Returns (text, truncated) where truncated=True means the raw object or
+    its decompressed form exceeded the cap and was cut off."""
     buf = bytearray()
+    truncated = False
     async for chunk in storage.get(file_row.storage_key):
+        remaining = MAX_LOG_BYTES - len(buf)
+        if len(chunk) > remaining:
+            buf.extend(chunk[:remaining])
+            truncated = True
+            break
         buf.extend(chunk)
     data = bytes(buf)
     ext = str(getattr(file_row, "original_ext", "") or "").lower()
     name = str(display_name or "").lower()
     if data.startswith(b"\x1f\x8b") or ext == ".gz" or name.endswith(".gz"):
-        data = gzip.decompress(data)
-    return _decode(data)
+        data, gz_truncated = _gunzip_capped(data, MAX_LOG_BYTES)
+        truncated = truncated or gz_truncated
+    return _decode(data), truncated
+
+
+def _gunzip_capped(data: bytes, budget: int) -> tuple[bytes, bool]:
+    """Bounded, multi-member-aware gzip decompress: (bytes, hit_cap).
+
+    Unlike gzip.decompress, tolerates a truncated stream (we may have cut
+    the raw bytes at MAX_LOG_BYTES) by returning what decompressed so far,
+    and tolerates trailing/inter-member NUL padding (common in rotated or
+    block-padded logs) which gzip.decompress also silently accepts."""
+    out = bytearray()
+    while data:
+        # Strip NUL padding between/after members before probing for the next
+        # gzip header; a run of NULs is not a valid header and would otherwise
+        # raise on the next decompressobj.
+        data = data.lstrip(b"\x00")
+        if not data:
+            break
+        d = zlib.decompressobj(wbits=31)  # 31 = expect gzip container
+        try:
+            out.extend(d.decompress(data, budget + 1 - len(out)))
+        except zlib.error:
+            # A garbage / non-gzip tail (e.g. a truncated final member or
+            # foreign padding) is treated like a truncated stream: keep what
+            # decoded so far instead of raising.
+            return bytes(out[:budget]), len(out) > budget
+        if len(out) > budget:
+            return bytes(out[:budget]), True
+        if not d.eof:
+            return bytes(out), True
+        data = d.unused_data
+    return bytes(out), False
 
 
 def _decode(data: bytes) -> str:
@@ -323,6 +436,10 @@ def _compile_pattern(
     if not pattern:
         return None, None
     text = str(pattern)
+    if len(text) > MAX_PATTERN_CHARS:
+        return None, (
+            f"pattern too long ({len(text)} chars; max {MAX_PATTERN_CHARS})"
+        )
     flags = 0 if case_sensitive else re.IGNORECASE
     source = text if regex else re.escape(text)
     try:
@@ -333,14 +450,14 @@ def _compile_pattern(
 
 def _filter_lines(
     lines: list[ScopedLine],
-    compiled: re.Pattern[str] | None,
+    matched: set[int] | None,
     limit: int,
     offset: int,
 ) -> dict[str, Any]:
     matches: list[dict[str, Any]] = []
     total = 0
-    for scoped in lines:
-        if compiled is not None and not compiled.search(scoped.text):
+    for idx, scoped in enumerate(lines):
+        if matched is not None and idx not in matched:
             continue
         total += 1
         if total <= offset:
@@ -359,14 +476,15 @@ def _filter_lines(
     }
 
 
-def _count_pattern(lines: list[ScopedLine], compiled: re.Pattern[str] | None) -> dict[str, Any]:
-    total = 0
-    for scoped in lines:
-        if compiled is None or compiled.search(scoped.text):
-            total += 1
+def _count_pattern(
+    lines: list[ScopedLine],
+    matched: set[int] | None,
+    pattern: str | None,
+) -> dict[str, Any]:
+    total = len(lines) if matched is None else len(matched)
     scanned = len(lines)
     return {
-        "pattern": compiled.pattern if compiled is not None else None,
+        "pattern": pattern,
         "match_count": total,
         "line_count": scanned,
         "match_percent": round((total / scanned) * 100, 4) if scanned else 0.0,
@@ -374,68 +492,48 @@ def _count_pattern(lines: list[ScopedLine], compiled: re.Pattern[str] | None) ->
 
 
 def _top_values(
-    lines: list[ScopedLine],
-    compiled: re.Pattern[str] | None,
-    group_by: str,
+    captures: list[list[str | None]],
     limit: int,
 ) -> dict[str, Any]:
-    if compiled is None:
-        return {"ok": False, "error": "top_values requires a regex pattern"}
-
-    group_name = group_by.strip()
     counter: Counter[str] = Counter()
     matched_lines = 0
     missing_group = False
 
-    for scoped in lines:
-        for match in compiled.finditer(scoped.text):
-            value = _capture_value(match, group_name)
+    for values in captures:
+        for value in values:
             if value is None:
                 missing_group = True
                 continue
             matched_lines += 1
             counter[value] += 1
 
-    values = [{"value": value, "count": count} for value, count in counter.most_common(limit)]
+    values_out = [{"value": value, "count": count} for value, count in counter.most_common(limit)]
     result: dict[str, Any] = {
-        "values": values,
+        "values": values_out,
         "unique_values": len(counter),
         "match_count": matched_lines,
         "truncated": len(counter) > limit,
     }
-    if missing_group and not values:
+    if missing_group and not values_out:
         result["error"] = "pattern did not expose the requested capture group"
     return result
 
 
-def _capture_value(match: re.Match[str], group_name: str) -> str | None:
-    if group_name:
-        try:
-            return match.group(group_name)
-        except (IndexError, KeyError):
-            return None
-    if match.lastgroup:
-        return match.group(match.lastgroup)
-    if match.lastindex:
-        return match.group(1)
-    return None
-
-
 def _time_distribution(
     lines: list[ScopedLine],
-    compiled: re.Pattern[str] | None,
+    matched: set[int] | None,
     group_by: str,
     limit: int,
 ) -> dict[str, Any]:
     bucket_mode = "hour" if group_by == "hour" else "day"
     counter: Counter[str] = Counter()
-    matched = 0
+    matched_count = 0
     with_timestamps = 0
 
-    for scoped in lines:
-        if compiled is not None and not compiled.search(scoped.text):
+    for idx, scoped in enumerate(lines):
+        if matched is not None and idx not in matched:
             continue
-        matched += 1
+        matched_count += 1
         bucket = _time_bucket(scoped.text, bucket_mode)
         if bucket is None:
             continue
@@ -446,7 +544,7 @@ def _time_distribution(
     return {
         "group_by": bucket_mode,
         "buckets": buckets,
-        "match_count": matched,
+        "match_count": matched_count,
         "timestamped_count": with_timestamps,
         "truncated": len(counter) > limit,
     }

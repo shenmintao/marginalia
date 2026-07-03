@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -32,7 +33,13 @@ from marginalia.services.webdav_sync import (
 from marginalia.tasks.enqueue import enqueue
 from marginalia.tasks.kinds import KIND_WEBDAV_PUBLISH
 
+log = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/sync/webdav", tags=["webdav_sync"])
+
+# Raw exception strings can embed WebDAV URLs (possibly with credentials);
+# log them server-side and hand clients a generic message.
+_GENERIC_WEBDAV_ERROR = "WebDAV request failed; see server logs"
 
 _CONFIG_FIELDS = {
     "webdav_url",
@@ -86,8 +93,9 @@ async def webdav_test() -> dict[str, Any]:
         return await test_connection()
     except WebDavConfigError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
+    except Exception:
+        log.exception("webdav test failed")
+        raise HTTPException(status_code=502, detail=_GENERIC_WEBDAV_ERROR)
 
 
 @router.post("/remote-status")
@@ -96,8 +104,9 @@ async def webdav_remote_status() -> dict[str, Any]:
         return await sync_remote_status()
     except WebDavConfigError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
+    except Exception:
+        log.exception("webdav remote-status failed")
+        raise HTTPException(status_code=502, detail=_GENERIC_WEBDAV_ERROR)
 
 
 @router.post("/publish")
@@ -130,8 +139,9 @@ async def webdav_upload_plan() -> dict[str, Any]:
         return await upload_plan()
     except WebDavConfigError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
+    except Exception:
+        log.exception("webdav upload-plan failed")
+        raise HTTPException(status_code=502, detail=_GENERIC_WEBDAV_ERROR)
 
 
 @router.post("/publish-selected")
@@ -140,8 +150,9 @@ async def webdav_publish_selected(body: WebDavSelectedEntriesBody) -> dict[str, 
         return await publish_selected(body.entry_ids)
     except WebDavConfigError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
+    except Exception:
+        log.exception("webdav publish-selected failed")
+        raise HTTPException(status_code=502, detail=_GENERIC_WEBDAV_ERROR)
 
 
 @router.post("/pull")
@@ -150,8 +161,9 @@ async def webdav_pull() -> dict[str, Any]:
         return await pull_latest_metadata()
     except WebDavConfigError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
+    except Exception:
+        log.exception("webdav pull failed")
+        raise HTTPException(status_code=502, detail=_GENERIC_WEBDAV_ERROR)
 
 
 @router.get("/download-plan")
@@ -160,8 +172,9 @@ async def webdav_download_plan() -> dict[str, Any]:
         return await download_plan()
     except WebDavConfigError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
+    except Exception:
+        log.exception("webdav download-plan failed")
+        raise HTTPException(status_code=502, detail=_GENERIC_WEBDAV_ERROR)
 
 
 @router.post("/download")
@@ -170,8 +183,9 @@ async def webdav_download() -> dict[str, Any]:
         return await download_latest()
     except WebDavConfigError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
+    except Exception:
+        log.exception("webdav download failed")
+        raise HTTPException(status_code=502, detail=_GENERIC_WEBDAV_ERROR)
 
 
 @router.post("/download-selected")
@@ -180,8 +194,9 @@ async def webdav_download_selected(body: WebDavSelectedEntriesBody) -> dict[str,
         return await download_selected(body.entry_ids)
     except WebDavConfigError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
+    except Exception:
+        log.exception("webdav download-selected failed")
+        raise HTTPException(status_code=502, detail=_GENERIC_WEBDAV_ERROR)
 
 
 @router.post("/hydrate/{entry_id}")
@@ -192,5 +207,6 @@ async def webdav_hydrate(entry_id: str) -> dict[str, Any]:
         msg = str(exc)
         status = 404 if "not found" in msg else 400
         raise HTTPException(status_code=status, detail=msg)
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
+    except Exception:
+        log.exception("webdav hydrate failed entry_id=%s", entry_id)
+        raise HTTPException(status_code=502, detail=_GENERIC_WEBDAV_ERROR)

@@ -312,6 +312,16 @@ RESUME_BOUNDARY_NOTE = (
 # Cap for tool result text when replaying history — prevents a single
 # massive result from blowing out the resumed prefix.
 RESUME_MAX_TOOL_RESULT_LEN = 50_000
+# Total character budget for the whole replayed history. Without this the
+# resumed prefix grows unboundedly across a long session until the next
+# chat.complete call exceeds the provider context window and every subsequent
+# turn in the session fails the same way. We keep the newest turns (most
+# relevant to the live follow-up) and elide older ones once the budget is hit.
+RESUME_TOTAL_BUDGET_CHARS = 200_000
+RESUME_ELIDED_NOTE = (
+    "(Earlier turns in this session were elided to fit the context budget; "
+    "only the most recent turns are replayed below.)"
+)
 PLAN_HISTORY_MAX_TURNS = 6
 PLAN_HISTORY_MAX_TEXT_LEN = 8_000
 
@@ -396,7 +406,10 @@ async def build_resumed_messages(
     async with session_scope() as db:
         rows = await session_service.list_for_session_ordered(db, session_id)
 
-    history: list[ChatMessage] = []
+    # Build each prior turn as a self-contained group of messages, then keep
+    # whole groups newest-first until the total budget is hit — so the replayed
+    # prefix stays bounded and the most recent (most relevant) turns survive.
+    groups: list[list[ChatMessage]] = []
     for conv in rows:
         if conv.id == current_conversation_id:
             continue
@@ -404,7 +417,9 @@ async def build_resumed_messages(
             continue
         if not conv.user_message:
             continue
-        history.append(ChatMessage(role="user", content=conv.user_message))
+        group: list[ChatMessage] = [
+            ChatMessage(role="user", content=conv.user_message)
+        ]
 
         tool_calls = [tc for tc in (conv.tool_calls or []) if isinstance(tc, dict)]
         if tool_calls:
@@ -436,14 +451,51 @@ async def build_resumed_messages(
                 tool_blocks.append(ToolResultBlock(
                     tool_call_id=tu_id, content=body, is_error=is_error,
                 ))
-            history.append(ChatMessage(role="assistant", content=assistant_blocks))
-            history.append(ChatMessage(role="tool", content=tool_blocks))
+            group.append(ChatMessage(role="assistant", content=assistant_blocks))
+            group.append(ChatMessage(role="tool", content=tool_blocks))
 
         if conv.agent_response:
-            history.append(ChatMessage(
+            group.append(ChatMessage(
                 role="assistant", content=conv.agent_response,
             ))
+        groups.append(group)
+
+    kept: list[list[ChatMessage]] = []
+    used = 0
+    elided = False
+    for group in reversed(groups):
+        size = sum(_message_chars(m) for m in group)
+        if kept and used + size > RESUME_TOTAL_BUDGET_CHARS:
+            elided = True
+            break
+        kept.append(group)
+        used += size
+    kept.reverse()
+
+    history: list[ChatMessage] = []
+    if elided:
+        history.append(ChatMessage(role="user", content=RESUME_ELIDED_NOTE))
+    for group in kept:
+        history.extend(group)
 
     if history:
         history.append(ChatMessage(role="user", content=RESUME_BOUNDARY_NOTE))
     return history
+
+
+def _message_chars(message: ChatMessage) -> int:
+    """Rough character size of a rendered message, for the resume budget."""
+    content = message.content
+    if isinstance(content, str):
+        return len(content)
+    total = 0
+    for block in content or []:
+        text = getattr(block, "content", None)
+        if text is None:
+            text = getattr(block, "text", None)
+        if isinstance(text, str):
+            total += len(text)
+        args = getattr(block, "arguments", None)
+        if isinstance(args, dict):
+            total += len(str(args))
+    return total

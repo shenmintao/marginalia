@@ -3,6 +3,7 @@ import { AlertCircle, CheckCircle2, ExternalLink, RefreshCw } from "lucide-react
 
 import { APP_VERSION } from "@/lib/appVersion";
 import { useI18n } from "@/lib/i18n";
+import { interceptExternalLink } from "@/lib/openExternal";
 import { cn } from "@/lib/utils";
 
 const RELEASES_URL = "https://github.com/shenmintao/marginalia/releases";
@@ -158,6 +159,7 @@ function LatestVersionResult({ state }: { state: CheckState }) {
           href={state.release.html_url || RELEASES_URL}
           target="_blank"
           rel="noreferrer"
+          onClick={(e) => interceptExternalLink(e, state.release.html_url || RELEASES_URL)}
           className="mt-2 inline-flex items-center gap-1 text-xs text-accent hover:underline"
         >
           {t.about.openLatestRelease}
@@ -180,6 +182,7 @@ function ExternalLinkButton({
       href={href}
       target="_blank"
       rel="noreferrer"
+      onClick={(e) => interceptExternalLink(e, href)}
       className="inline-flex items-center justify-between gap-2 rounded-md border border-border bg-bg-base px-3 py-2 text-sm text-fg-muted hover:bg-bg-muted hover:text-fg-base"
     >
       <span>{children}</span>

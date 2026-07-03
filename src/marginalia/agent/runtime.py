@@ -51,7 +51,6 @@ import time
 import urllib.parse
 from collections import deque
 from dataclasses import dataclass, field
-from decimal import Decimal
 from typing import Any, AsyncIterator, Literal
 
 from marginalia.agent.compression_adapter import maybe_compress_tool_result_for_model
@@ -533,7 +532,9 @@ async def run_turn(
             tool_calls=conv.total_tool_calls or 0,
             llm_calls=conv.total_llm_calls or 0,
             duration_ms=conv.total_duration_ms or 0,
-            cost_estimate=conv.total_cost_estimate or Decimal("0"),
+            # No pricing table exists, so a stored 0 means "never
+            # computed" — surface None instead of a fake $0.
+            cost_estimate=conv.total_cost_estimate or None,
         )
         await db.commit()
 
@@ -820,6 +821,18 @@ def _turn_budget_fallback(user_message: str) -> str:
     )
 
 
+def _filtered_stop_fallback(user_message: str) -> str:
+    if _prefers_zh(user_message):
+        return (
+            "模型这轮没有返回答案，响应可能被服务商过滤或拒绝。"
+            "请调整问题后重试。"
+        )
+    return (
+        "The model ended this turn without an answer; the response was likely "
+        "filtered or refused by the provider. Please rephrase and try again."
+    )
+
+
 def _joined_final_answer(parts: list[str], fallback: str = "(no answer)") -> str:
     """Join final-answer fragments from max_tokens continuation calls."""
     text = "".join(p for p in parts if p)
@@ -1032,6 +1045,17 @@ def _footnote_detail(reason: str | None, quote: str | None) -> str | None:
     return " — ".join(parts) if parts else None
 
 
+_MD_LABEL_ESCAPE_RE = re.compile(r"([\\\[\]()`])")
+
+
+def _escape_markdown_label(name: str) -> str:
+    """Neutralize markdown-significant chars in a display name so a crafted
+    filename like `report](https://evil.example)` can't inject a live link
+    (or break the citation) when interpolated into `[name](entry:...)`.
+    Newlines/whitespace runs collapse to a single space first."""
+    return _MD_LABEL_ESCAPE_RE.sub(r"\\\1", " ".join(name.split()))
+
+
 async def _rewrite_footnotes_for_display(
     answer: str,
     *,
@@ -1119,7 +1143,7 @@ async def _rewrite_footnotes_for_display(
                 page,
                 located_pdf_page=located_pdf_pages.get(m.start()),
             )
-            head = f"[{name}](entry:{full_eid}{qs})"
+            head = f"[{_escape_markdown_label(name)}](entry:{full_eid}{qs})"
         detail = _footnote_detail(reason, quote)
         if detail:
             return f"[^{marker}]: {head} — {detail}"
@@ -1500,6 +1524,30 @@ async def _run_execute_phase(
             ))
             continuing_final_answer = True
             continue
+
+        # Terminal non-tool stop reason (e.g. OpenAI content_filter or an
+        # Anthropic 'refusal', both mapped to 'other'). Nothing was appended to
+        # `messages`, so looping would just re-send an identical request and
+        # burn the whole round budget on duplicate filtered/refused outputs.
+        # Surface what we have and stop instead of looping.
+        surfaced = _strip_leaked_no_plan(resp.text or last_text or "")
+        if surfaced.strip():
+            outcome.truncated = True
+            outcome.answer = surfaced
+            yield AgentEvent(
+                event_type="answer",
+                data=await _rewrite_footnotes_for_display(surfaced),
+            )
+            return
+        log.error(
+            "conversation %s execute stopped with stop_reason=%s and no answer",
+            conversation_id,
+            resp.stop_reason,
+        )
+        outcome.error = _filtered_stop_fallback(user_message)
+        outcome.answer = outcome.error
+        yield AgentEvent(event_type="error", data=outcome.error)
+        return
 
     log.warning("conversation %s hit agent_execute_max_turns=%d", conversation_id,
                 max_execute_turns)

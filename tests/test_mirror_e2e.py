@@ -8,7 +8,8 @@ Verifies the contract that makes mirror useful:
   1. Upload → file appears at <vault>/<folder>/<sanitized-name> on disk.
   2. Same sha256 uploaded twice → two real files on disk (dedup OFF in
      mirror), two file rows in db.
-  3. Filename collision in same folder → second upload gets ' (2)' suffix
+  3. Filename collision in same folder → second upload gets ' (1)' suffix
+     (disk and DB display_name share one numbering; see audit bug #39/#55)
      both in db display_name AND on-disk filename.
   4. Illegal characters get sanitized: 'Q3 report: draft.pdf' →
      'Q3 report_ draft.pdf' on disk (Linux portable to Windows).
@@ -119,15 +120,15 @@ async def _main() -> None:
         assert len(rows) == 2, f"expected 2 file rows, got {len(rows)}"
     print(f"[2] dedup off: same sha256 → 2 file rows + 2 disk files")
 
-    # 3. Collision in same folder → ' (2)' suffix.
+    # 3. Collision in same folder → ' (1)' suffix (same number as display_name).
     body_b = b"different content\n"
     r3 = await _upload(body_b, name="notes.txt", remote_path="/research/llm/")
-    second = _VAULT / "research" / "llm" / "notes (2).txt"
+    second = _VAULT / "research" / "llm" / "notes (1).txt"
     assert second.is_file(), \
-        f"expected ' (2)' rename on disk, got listing: " + \
+        f"expected ' (1)' rename on disk, got listing: " + \
         str(list((_VAULT / "research" / "llm").iterdir()))
     assert second.read_bytes() == body_b
-    print(f"[3] collision rename: second notes.txt → notes (2).txt")
+    print(f"[3] collision rename: second notes.txt → notes (1).txt")
 
     # 4. Illegal char in display_name → sanitize on disk.
     r4 = await _upload(

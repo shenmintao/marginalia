@@ -18,7 +18,7 @@ from __future__ import annotations
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from marginalia.db.models import FileEntry
@@ -38,7 +38,10 @@ class RenameBody(BaseModel):
 
 
 class MoveBody(BaseModel):
-    folder_id: str
+    # folder_id stays required (no default) but accepts an explicit null,
+    # which means "move to the vault root". Omitting the field is a 422 —
+    # the intent must be spelled out, per this module's one-intent rule.
+    folder_id: str | None = Field(...)
     on_conflict: Literal["rename", "error", "skip"] | None = None
 
 

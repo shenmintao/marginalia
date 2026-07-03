@@ -27,6 +27,7 @@ import rehypeKatex from "rehype-katex";
 import type { Pluggable } from "unified";
 
 import { useTheme } from "@/lib/theme";
+import { interceptExternalLink } from "@/lib/openExternal";
 import { processLatexBrackets } from "@/lib/markdown";
 import { useTemporaryValue } from "@/hooks/useTemporaryValue";
 import { cn } from "@/lib/utils";
@@ -141,10 +142,14 @@ export function MarkdownView({ content, onEntryLink, className, idPrefix }: Prop
         <a
           href={href}
           onClick={(e) => {
+            // Always swallow the navigation: under HashRouter an
+            // unresolved `#foo` fragment would otherwise become the
+            // route "/foo" and blank the main area. Scroll only when
+            // the target actually exists.
+            e.preventDefault();
             const id = decodeURIComponent(href.slice(1));
             const el = document.getElementById(id);
             if (!el) return;
-            e.preventDefault();
             el.scrollIntoView({ behavior: "smooth", block: "nearest" });
           }}
           {...rest}
@@ -154,7 +159,13 @@ export function MarkdownView({ content, onEntryLink, className, idPrefix }: Prop
       );
     }
     return (
-      <a href={href} target="_blank" rel="noreferrer" {...rest}>
+      <a
+        href={href}
+        target="_blank"
+        rel="noreferrer"
+        onClick={(e) => interceptExternalLink(e, href)}
+        {...rest}
+      >
         {children}
       </a>
     );

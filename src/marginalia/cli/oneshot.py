@@ -202,6 +202,7 @@ async def _client_context(
     client: MarginaliaClient | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
     base_url: str | None = None,
+    resolved_target: str | None = None,
 ) -> AsyncIterator[MarginaliaClient]:
     if client is not None:
         yield client
@@ -218,9 +219,12 @@ async def _client_context(
             await owned.aclose()
         return
 
-    target = (server_url or os.environ.get(ENV_SERVER) or "").strip().rstrip("/")
-    if not target:
-        target = await _discover_remote_url() or ""
+    # run_async resolves the target up front (to set CliContext.remote) and
+    # passes it here so discovery runs at most once; fall back to resolving
+    # ourselves for any other caller.
+    if resolved_target is None:
+        resolved_target, _ = await _resolve_remote_target(server_url)
+    target = resolved_target
     if target:
         owned = MarginaliaClient(base_url=target, api_token=api_token)
         try:
@@ -254,6 +258,28 @@ async def _discover_remote_url() -> str | None:
         return await discover_server_url(settings.marginalia_home)
     except (OSError, RuntimeError, ValueError):
         return None
+
+
+async def _resolve_remote_target(server_url: str | None) -> tuple[str, bool]:
+    """Resolve the backend URL and whether it was set explicitly.
+
+    Returns ``(target, explicit)``. ``target`` is ``""`` for embedded/local
+    mode. ``explicit`` is True only for ``--server`` / ``MARGINALIA_SERVER``
+    (a truly different box); a URL found via local discovery — a server on
+    THIS machine sharing the same vault — reports False.
+    """
+    explicit_url = (server_url or os.environ.get(ENV_SERVER) or "").strip().rstrip("/")
+    if explicit_url:
+        return explicit_url, True
+    discovered = (await _discover_remote_url() or "").strip().rstrip("/")
+    return discovered, False
+
+
+def _remote_vault_refusal(name: str) -> str:
+    return (
+        f"{name} is not available against a remote server — it reads and "
+        f"writes this machine's vault and db directly, bypassing the server."
+    )
 
 
 async def run_async(
@@ -293,14 +319,34 @@ async def run_async(
                 print_help()
             return 0
 
+        # Resolve whether we target a remote/http backend so vault commands
+        # that bypass the client to touch the LOCAL db (/check, /ingest)
+        # refuse against a server, and the /upload guard can tell a truly
+        # remote box from same-machine discovery. Injected client/transport
+        # (tests, embedded) is always treated as local.
+        remote = False
+        remote_explicit = False
+        resolved_target: str | None = None
+        if client is None and transport is None:
+            resolved_target, remote_explicit = await _resolve_remote_target(
+                opts.server_url
+            )
+            remote = bool(resolved_target)
+
         async with _client_context(
             server_url=opts.server_url,
             api_token=api_token,
             client=client,
             transport=transport,
             base_url=base_url,
+            resolved_target=resolved_target,
         ) as active_client:
-            ctx = CliContext(client=active_client, chat_mode=opts.mode)
+            ctx = CliContext(
+                client=active_client,
+                chat_mode=opts.mode,
+                remote=remote,
+                remote_explicit=remote_explicit,
+            )
             if command_name in CHAT_COMMANDS:
                 prompt = _read_prompt(args, stdin_prompt=opts.stdin_prompt)
                 payload = await _run_ask(ctx, prompt, mode=opts.mode)
@@ -444,11 +490,15 @@ async def _run_json_command(
         payload["ok"] = True
         return payload
     if command_name == "check":
+        if ctx.remote:
+            raise OneShotUsageError(_remote_vault_refusal("check"))
         report = await _scan_report()
         payload = _scan_report_payload(report)
         payload["ok"] = True
         return payload
     if command_name == "ingest":
+        if ctx.remote:
+            raise OneShotUsageError(_remote_vault_refusal("ingest"))
         return await _ingest_json(ctx, args)
     return await _generic_json_text(ctx, command_name, args)
 

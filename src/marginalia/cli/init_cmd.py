@@ -24,9 +24,11 @@ from typing import Iterable
 _STARTER_ENV = """\
 # Marginalia configuration. See README.md for the full set.
 
-# Project-local home — db, library, and objects all live under ./data/.
-# Comment this out (or change to ~/Marginalia) to use the user-global home.
-MARGINALIA_HOME=./data
+# Project-local home — db, library, and objects all live under the data/
+# directory next to this file. Written as an absolute path so the CLI,
+# server, and worker agree on one database regardless of each process's
+# working directory. Change to ~/Marginalia to use the user-global home.
+MARGINALIA_HOME={home}
 
 DB_BACKEND=sqlite
 
@@ -116,7 +118,8 @@ def init_project(cwd: Path) -> list[_Artifact]:
     """Create / update the bootstrap files. Caller pretty-prints the report."""
     out: list[_Artifact] = []
 
-    out.append(_Artifact(".env", _write_if_missing(cwd / ".env", _STARTER_ENV)))
+    starter_env = _STARTER_ENV.format(home=(cwd / "data").resolve())
+    out.append(_Artifact(".env", _write_if_missing(cwd / ".env", starter_env)))
     out.append(_Artifact("data/", _ensure_dir(cwd / "data")))
     out.append(_Artifact("data/library/", _ensure_dir(cwd / "data" / "library")))
     out.append(_Artifact(".marginalia/", _ensure_dir(cwd / ".marginalia")))

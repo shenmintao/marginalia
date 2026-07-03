@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight, Download, ZoomIn, ZoomOut } from "lucide-react";
 
+import { maybeAuthDownload } from "@/api/client";
+import { useI18n } from "@/lib/i18n";
 import {
   ViewerError,
   ViewerLoading,
   ViewerToolbarButton,
   clampInt,
+  useAuthObjectUrl,
 } from "./ViewerShared";
 
 type EpubBookInstance = import("epubjs").Book;
@@ -111,11 +114,15 @@ export function EpubView({ url, name, downloadUrl, quote, page, onScrolled }: {
   page: number | null;
   onScrolled?: () => void;
 }) {
+  const { t } = useI18n();
   const hostRef = useRef<HTMLDivElement>(null);
   const pageInputRef = useRef<HTMLInputElement>(null);
   const bookRef = useRef<EpubBookInstance | null>(null);
   const renditionRef = useRef<EpubRenditionInstance | null>(null);
   const appliedLocatorRef = useRef<string | null>(null);
+  // Token-protected backends reject epubjs's internal fetch; route the
+  // bytes through an object URL in that case (direct URL otherwise).
+  const { src: epubSrc, err: srcErr } = useAuthObjectUrl(url);
   const [ready, setReady] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [fontSize, setFontSize] = useState(100);
@@ -184,12 +191,13 @@ export function EpubView({ url, name, downloadUrl, quote, page, onScrolled }: {
     });
     const host = hostRef.current;
     host?.replaceChildren();
+    if (!epubSrc) return;
 
     (async () => {
       try {
         const { default: ePub } = await import("epubjs");
         if (cancelled || !hostRef.current) return;
-        const book = ePub(url, { openAs: "epub" });
+        const book = ePub(epubSrc, { openAs: "epub" });
         const rendition = book.renderTo(hostRef.current, {
           width: "100%",
           height: "100%",
@@ -239,7 +247,7 @@ export function EpubView({ url, name, downloadUrl, quote, page, onScrolled }: {
       bookRef.current = null;
       hostRef.current?.replaceChildren();
     };
-  }, [updateLocation, url]);
+  }, [epubSrc, updateLocation]);
 
   useEffect(() => {
     if (!ready) return;
@@ -289,7 +297,7 @@ export function EpubView({ url, name, downloadUrl, quote, page, onScrolled }: {
       <div className="flex h-10 shrink-0 items-center gap-2 overflow-x-auto border-b border-border bg-bg px-3 text-xs text-fg-muted">
         <div className="flex items-center gap-1">
           <ViewerToolbarButton
-            title="Previous page"
+            title={t.viewer.prevPage}
             disabled={!ready || location.atStart}
             onClick={() => void renditionRef.current?.prev()}
           >
@@ -312,11 +320,11 @@ export function EpubView({ url, name, downloadUrl, quote, page, onScrolled }: {
             }}
             inputMode="numeric"
             className="h-7 w-12 rounded border border-border bg-bg px-1.5 text-center text-xs text-fg-base tabular-nums outline-none focus:border-accent disabled:opacity-50"
-            aria-label="EPUB page"
+            aria-label={t.viewer.epubPage}
           />
           <span className="min-w-10 text-center tabular-nums">/ {totalPages || "-"}</span>
           <ViewerToolbarButton
-            title="Next page"
+            title={t.viewer.nextPage}
             disabled={!ready || location.atEnd}
             onClick={() => void renditionRef.current?.next()}
           >
@@ -326,7 +334,7 @@ export function EpubView({ url, name, downloadUrl, quote, page, onScrolled }: {
         <div className="h-5 w-px shrink-0 bg-border" />
         <div className="flex items-center gap-1">
           <ViewerToolbarButton
-            title="Decrease text size"
+            title={t.viewer.decreaseTextSize}
             disabled={!canZoomOut}
             onClick={() => setFontSize((value) => clampInt(value - EPUB_FONT_STEP, EPUB_MIN_FONT, EPUB_MAX_FONT))}
           >
@@ -334,7 +342,7 @@ export function EpubView({ url, name, downloadUrl, quote, page, onScrolled }: {
           </ViewerToolbarButton>
           <span className="min-w-14 text-center tabular-nums">{fontSize}%</span>
           <ViewerToolbarButton
-            title="Increase text size"
+            title={t.viewer.increaseTextSize}
             disabled={!canZoomIn}
             onClick={() => setFontSize((value) => clampInt(value + EPUB_FONT_STEP, EPUB_MIN_FONT, EPUB_MAX_FONT))}
           >
@@ -345,7 +353,8 @@ export function EpubView({ url, name, downloadUrl, quote, page, onScrolled }: {
           <a
             href={downloadUrl}
             download={name}
-            title="Download"
+            onClick={(e) => maybeAuthDownload(e, downloadUrl, name)}
+            title={t.viewer.download}
             className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded border border-border text-fg-muted transition-colors hover:bg-bg-muted"
           >
             <Download size={14} />
@@ -354,14 +363,14 @@ export function EpubView({ url, name, downloadUrl, quote, page, onScrolled }: {
       </div>
       <div className="relative min-h-0 flex-1 bg-bg">
         <div ref={hostRef} className="h-full w-full" />
-        {!ready && !err && (
+        {!ready && !err && !srcErr && (
           <div className="absolute inset-0 z-20 bg-bg/80">
             <ViewerLoading />
           </div>
         )}
-        {err && (
+        {(err || srcErr) && (
           <div className="absolute inset-0 z-20 bg-bg">
-            <ViewerError msg={err} />
+            <ViewerError msg={(err || srcErr)!} />
           </div>
         )}
       </div>

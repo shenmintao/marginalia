@@ -41,7 +41,7 @@ from marginalia.config import get_settings
 get_settings.cache_clear()  # type: ignore[attr-defined]
 
 from marginalia.db.engine import get_engine, get_session_factory
-from marginalia.db.models import Base, Conversation
+from marginalia.db.models import Base, Conversation, Session
 from marginalia.db.bootstrap import bootstrap_schema
 from marginalia.llm.types import ChatRequest, ChatResponse, TokenUsage
 from marginalia.utils.ids import new_id
@@ -189,18 +189,23 @@ async def test_unique_constraint_blocks_dupes() -> None:
     """Insert two Conversation rows with the same (session_id, turn_index).
     The DB MUST reject the second one. This is the cross-process backstop
     that protects against the asyncio.Lock not running (multi-worker
-    Postgres deploy, scripts that bypass the route layer)."""
-    factory = get_session_factory()
-    async with factory() as s:
-        # Use a fake session_id — UniqueConstraint is on (session_id,
-        # turn_index) not on the FK itself, so the insert would be
-        # rejected by FK unless we create a session. Easiest path:
-        # use a real session id from above by querying.
-        sid_row = (
-            await s.execute(select(Conversation.session_id).limit(1))
-        ).scalar_one()
+    Postgres deploy, scripts that bypass the route layer).
 
+    Self-contained: the test creates its own Session row (the FK target)
+    instead of borrowing one written by test_concurrent_chat_serialises,
+    so it also passes standalone (-k test_unique_constraint_blocks_dupes)
+    or after the first test fails."""
+    factory = get_session_factory()
     now = datetime.now(timezone.utc)
+    sid_row = new_id()
+    async with factory() as s:
+        s.add(Session(
+            id=sid_row,
+            started_at=now,
+            initiating_user_message="unique-constraint probe",
+        ))
+        await s.commit()
+
     async with factory() as s:
         s.add(Conversation(
             id=new_id(), session_id=sid_row, turn_index=99,

@@ -21,6 +21,9 @@ export function SearchPage() {
     if (!term) { setResults(null); setError(null); return; }
     let cancelled = false;
     setLoading(true);
+    // Clear any stale failure banner from a previous request; a new
+    // search's success path never touched `error` before.
+    setError(null);
     const handle = window.setTimeout(async () => {
       try {
         const r = await search.query(term, 25);

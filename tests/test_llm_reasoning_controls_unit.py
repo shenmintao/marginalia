@@ -220,11 +220,13 @@ async def test_openai_adapter_parses_dsml_text_tool_calls() -> None:
             usage=SimpleNamespace(prompt_tokens=3, completion_tokens=2),
         )
 
+    # DSML text-markup parsing is gated to the dialects that actually emit it
+    # (deepseek / thinking-type); a deepseek base_url selects that path.
     client = OpenAIChatClient(LlmProfile(
         name="chat",
         provider="openai-compatible",
         api_key="sk-fake",
-        base_url="https://example.invalid",
+        base_url="https://api.deepseek.com/v1",
         model="fake-model",
     ))
     client._client = SimpleNamespace(  # type: ignore[assignment]
@@ -254,6 +256,80 @@ async def test_openai_adapter_parses_dsml_text_tool_calls() -> None:
             "reads": [{"line_start": 1, "line_end": 100}],
         }],
     }
+
+
+def _dsml_markup() -> str:
+    return (
+        '<｜｜DSML｜｜tool_calls> '
+        '<｜｜DSML｜｜invoke name="read_files"> '
+        '<｜｜DSML｜｜parameter name="requests" string="false">'
+        '[{"entry_id":"389594c8-defc-4fdb-ad4c-93b1f65a4534",'
+        '"reads":[{"line_start":1,"line_end":100}]}]'
+        '</｜｜DSML｜｜parameter> '
+        '</｜｜DSML｜｜invoke> '
+        '</｜｜DSML｜｜tool_calls>'
+    )
+
+
+def _dsml_client(base_url: str, content: str) -> OpenAIChatClient:
+    async def fake_create(**kwargs):
+        return SimpleNamespace(
+            choices=[SimpleNamespace(
+                finish_reason="stop",
+                message=SimpleNamespace(content=content, tool_calls=[]),
+            )],
+            usage=SimpleNamespace(prompt_tokens=3, completion_tokens=2),
+        )
+
+    client = OpenAIChatClient(LlmProfile(
+        name="chat",
+        provider="openai-compatible",
+        api_key="sk-fake",
+        base_url=base_url,
+        model="fake-model",
+    ))
+    client._client = SimpleNamespace(  # type: ignore[assignment]
+        chat=SimpleNamespace(completions=SimpleNamespace(create=fake_create)),
+    )
+    return client
+
+
+_DSML_TOOLS = [
+    ToolDef(name="read_files", description="read", input_schema={"type": "object"}),
+]
+
+
+@pytest.mark.asyncio
+async def test_openai_adapter_ignores_dsml_markup_on_generic_dialect() -> None:
+    """DSML markup on a non-deepseek endpoint is document content, not a tool
+    call — executing it would let quoted/ingested text drive real tools."""
+    client = _dsml_client("https://example.invalid", _dsml_markup())
+    resp = await client.complete(ChatRequest(
+        system=None,
+        messages=[ChatMessage(role="user", content="hello")],
+        max_tokens=32,
+        tools=_DSML_TOOLS,
+    ))
+    assert resp.tool_calls == []
+    assert resp.stop_reason != "tool_use"
+    assert _dsml_markup() in (resp.text or "")
+
+
+@pytest.mark.asyncio
+async def test_openai_adapter_ignores_mid_text_dsml_markup() -> None:
+    """A genuine text-mode tool call is the whole assistant turn; markup
+    embedded mid-answer is the model quoting content and must stay text."""
+    content = "The document contains this markup:\n" + _dsml_markup()
+    client = _dsml_client("https://api.deepseek.com/v1", content)
+    resp = await client.complete(ChatRequest(
+        system=None,
+        messages=[ChatMessage(role="user", content="hello")],
+        max_tokens=32,
+        tools=_DSML_TOOLS,
+    ))
+    assert resp.tool_calls == []
+    assert resp.stop_reason != "tool_use"
+    assert _dsml_markup() in (resp.text or "")
 
 
 @pytest.mark.asyncio

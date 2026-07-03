@@ -21,6 +21,7 @@ Safety: extraction limits and tempdir cleanup are owned by
 """
 from __future__ import annotations
 
+import asyncio
 import fnmatch
 import logging
 import re
@@ -28,12 +29,19 @@ from typing import Any, Mapping
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from marginalia.agent import _regex_subprocess
 from marginalia.agent.tools import ToolContext, tool
 from marginalia.pipelines.archive import _is_listable
 from marginalia.repositories import entries as entries_repo
 from marginalia.storage import get_storage, open_archive
 
 log = logging.getLogger(__name__)
+
+# Search patterns are LLM-supplied; cap the length so absurd inputs get a
+# clear tool error instead of feeding an arbitrarily large regex to
+# re.compile. (A hard match timeout would need the third-party `regex`
+# module.)
+MAX_PATTERN_CHARS = 1000
 
 
 SCHEMA: dict[str, Any] = {
@@ -140,25 +148,32 @@ async def analyze_container(
         body.extend(chunk)
 
     filename = entry.display_name or "archive"
-    with open_archive(bytes(body), filename) as session:
-        # Filter out noise + git internals + path-traversal members so
-        # the agent works against the same listing the ingest pipeline
-        # produced.
-        unsafe = session.unsafe_basenames
-        visible = [
-            m for m in session.members if _is_listable(m.path, unsafe)
-        ]
-        out: dict[str, Any] = {
-            "display_name": entry.display_name,
-            "file_count": len(visible),
-        }
-        if "list_files" in args:
-            out["files"] = _do_list(visible, args["list_files"] or {})
-        if "read_files" in args:
-            out["reads"] = _do_reads(session, visible, args["read_files"] or [])
-        if "search" in args:
-            out["search"] = _do_search(session, visible, args["search"] or {})
-        return out
+
+    def _analyze() -> dict[str, Any]:
+        with open_archive(bytes(body), filename) as session:
+            # Filter out noise + git internals + path-traversal members so
+            # the agent works against the same listing the ingest pipeline
+            # produced.
+            unsafe = session.unsafe_basenames
+            visible = [
+                m for m in session.members if _is_listable(m.path, unsafe)
+            ]
+            out: dict[str, Any] = {
+                "display_name": entry.display_name,
+                "file_count": len(visible),
+            }
+            if "list_files" in args:
+                out["files"] = _do_list(visible, args["list_files"] or {})
+            if "read_files" in args:
+                out["reads"] = _do_reads(session, visible, args["read_files"] or [])
+            if "search" in args:
+                out["search"] = _do_search(session, visible, args["search"] or {})
+            return out
+
+    # Extraction and the search scan are CPU-bound, and search runs an
+    # LLM-supplied regex; offload to a worker thread so a slow
+    # (catastrophic-backtracking) pattern can't stall the event loop.
+    return await asyncio.to_thread(_analyze)
 
 
 # ---- list_files ------------------------------------------------------------
@@ -257,17 +272,25 @@ def _do_search(
     pattern = (params.get("pattern") or "").strip()
     if not pattern:
         return {"error": "pattern is required"}
+    if len(pattern) > MAX_PATTERN_CHARS:
+        return {"error": (
+            f"pattern too long ({len(pattern)} chars; max {MAX_PATTERN_CHARS})"
+        )}
     regex_mode = bool(params.get("regex"))
     max_hits = min(int(params.get("max_hits") or 50), 200)
     ctx_lines = min(int(params.get("context_lines") or 1), 10)
     offset = max(0, int(params.get("offset") or 0))
+    # source/flags mirror the previous re.compile calls; the actual matching
+    # runs in a killable subprocess for a caller-supplied regex (a
+    # catastrophic pattern must not stall the event loop or leak a thread).
     if regex_mode:
+        source, flags = pattern, 0
         try:
-            pat = re.compile(pattern)
+            re.compile(source, flags)  # validate up front for a clean error
         except re.error as e:
             return {"error": f"invalid regex: {e!r}"}
     else:
-        pat = re.compile(re.escape(pattern), re.IGNORECASE)
+        source, flags = re.escape(pattern), re.IGNORECASE
 
     hits: list[dict[str, Any]] = []
     match_index = 0
@@ -282,9 +305,16 @@ def _do_search(
             continue
         text = _decode(body)
         lines = text.splitlines()
-        for i, line in enumerate(lines):
-            if not pat.search(line):
-                continue
+        try:
+            matched = _regex_subprocess.run_match_flags(
+                source, flags, lines, is_regex=regex_mode,
+            )
+        except _regex_subprocess.RegexScanTimeout as exc:
+            return {"error": str(exc)}
+        except _regex_subprocess.RegexScanError as exc:
+            return {"error": f"regex scan failed: {exc}"}
+        for i in sorted(matched):
+            line = lines[i]
             match_index += 1
             if match_index <= offset:
                 continue

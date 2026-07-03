@@ -30,6 +30,9 @@
 
   --danger: 220 38 38;
   --danger-fg: 255 255 255;
+
+  --warning: 217 119 6;       /* amber-600 */
+  --warning-fg: 255 255 255;
 }
 
 .dark {
@@ -53,6 +56,9 @@
 
   --danger: 248 113 113;
   --danger-fg: 17 24 39;
+
+  --warning: 251 191 36;      /* amber-400 */
+  --warning-fg: 17 24 39;
 }
 
 html, body, #root { height: 100%; }

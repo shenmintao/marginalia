@@ -65,14 +65,23 @@ async def scan_vault(vault_root: Path) -> ScanReport:
         report = ScanReport(vault_root=vault_root)
         seen_disk_paths: set[str] = set()
 
-        for entry, file_row in live_entries:
+        expected_rels: list[str] = []
+        for entry, _file_row in live_entries:
             folder_display = await _build_folder_display_path(
                 s, entry.folder_id,
             )
-            expected_rel = (
+            expected_rels.append(
                 f"{folder_display.lstrip('/')}/{entry.display_name}"
                 if folder_display else entry.display_name
             )
+
+        # Pass 1: claim every exact-path match (in_sync / modified) up
+        # front, so a mover search in pass 2 can never steal a path that
+        # a later-processed entry still legitimately owns (mirror mode
+        # commonly holds duplicate sha256s since dedup is off there).
+        deferred: list[int] = []
+        for i, (entry, file_row) in enumerate(live_entries):
+            expected_rel = expected_rels[i]
             disk_sha = disk_files.get(expected_rel)
             if disk_sha == file_row.sha256:
                 report.in_sync_count += 1
@@ -85,12 +94,44 @@ async def scan_vault(vault_root: Path) -> ScanReport:
                 report.modified.append((entry, vault_root / expected_rel))
                 seen_disk_paths.add(expected_rel)
                 continue
-            # Hash matches some other path? It's a move/rename.
+            deferred.append(i)
+
+        # Paths some live entry may still claim as its own — either its
+        # expected tree path or its current storage_key. Movers should
+        # avoid these so one entry's deletion never gets reported as a
+        # move onto another entry's file.
+        owned_paths: set[str] = set(expected_rels)
+        owned_paths.update(
+            f.storage_key for _e, f in live_entries if f.storage_key
+        )
+
+        # Pass 2a: a deferred entry whose current storage_key still
+        # holds its bytes claims that path first (tree/disk divergence),
+        # before any same-hash sibling can grab it in the mover search.
+        pending: list[int] = []
+        for i in deferred:
+            entry, file_row = live_entries[i]
+            sk = file_row.storage_key
+            if (sk and sk not in seen_disk_paths
+                    and disk_files.get(sk) == file_row.sha256):
+                report.moved.append((entry, vault_root / sk))
+                seen_disk_paths.add(sk)
+            else:
+                pending.append(i)
+
+        # Pass 2b: moved / missing over whatever is left.
+        for i in pending:
+            entry, file_row = live_entries[i]
+            candidates = [
+                p for p, h in disk_files.items()
+                if h == file_row.sha256 and p not in seen_disk_paths
+            ]
+            # Hash matches some other path? It's a move/rename. Prefer a
+            # path no other entry owns; fall back to any unclaimed one.
             mover = next(
-                (p for p, h in disk_files.items()
-                 if h == file_row.sha256 and p not in seen_disk_paths),
+                (p for p in candidates if p not in owned_paths),
                 None,
-            )
+            ) or next(iter(candidates), None)
             if mover:
                 report.moved.append((entry, vault_root / mover))
                 seen_disk_paths.add(mover)

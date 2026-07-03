@@ -11,6 +11,7 @@ from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from marginalia.db.models import Conversation, Journal
+from marginalia.repositories.entries import _escape_like_term
 
 
 async def search(
@@ -42,7 +43,8 @@ async def search(
     text_terms = _text_terms(text)
     if text_terms:
         stmt = stmt.where(or_(
-            *(Journal.note.ilike(f"%{term}%") for term in text_terms)
+            *(Journal.note.ilike(f"%{_escape_like_term(term)}%", escape="\\")
+              for term in text_terms)
         ))
     if order == "oldest_first":
         stmt = stmt.order_by(Journal.created_at.asc())

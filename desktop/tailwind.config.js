@@ -51,6 +51,10 @@ export default {
           DEFAULT: "rgb(var(--danger) / <alpha-value>)",
           fg: "rgb(var(--danger-fg) / <alpha-value>)",
         },
+        warning: {
+          DEFAULT: "rgb(var(--warning) / <alpha-value>)",
+          fg: "rgb(var(--warning-fg) / <alpha-value>)",
+        },
       },
       animation: {
         "fade-in": "fadeIn 200ms ease-out",

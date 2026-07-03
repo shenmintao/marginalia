@@ -743,11 +743,29 @@ def _score_terms(text_terms: list[str]) -> list[str]:
                 continue
             has_digit = any(ch.isdigit() for ch in term)
             has_upper = any(ch.isupper() for ch in term)
-            if len(term) < 4 and not has_digit and not has_upper:
+            if (
+                len(term) < 4
+                and not has_digit
+                and not has_upper
+                and not _contains_cjk(term)
+            ):
                 continue
             seen.add(key)
             out.append(term)
     return out
+
+
+def _contains_cjk(term: str) -> bool:
+    """Most Chinese/Japanese/Korean words are 1-3 chars with no digit or
+    upper-case, so the short-noise-word filter would otherwise drop them all."""
+    return any(
+        "぀" <= ch <= "ヿ"     # hiragana + katakana
+        or "㐀" <= ch <= "䶿"  # CJK unified ideographs ext. A
+        or "一" <= ch <= "鿿"  # CJK unified ideographs
+        or "가" <= ch <= "힣"  # hangul syllables
+        or "豈" <= ch <= "﫿"  # CJK compatibility ideographs
+        for ch in term
+    )
 
 
 def _term_hits(raw: Any, term: str) -> int:

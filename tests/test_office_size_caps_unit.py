@@ -22,6 +22,13 @@ class _ChunkStorage:
         yield b"x" * self.size
 
 
+class _FakeResult(dict):
+    """Dict-shaped stand-in that also tolerates the attribute writes run()
+    performs on real PipelineResults (e.g. result.description)."""
+
+    description = None
+
+
 def _ctx(name: str, size: int) -> PipelineContext:
     return PipelineContext(
         file_id=f"file-{name}",
@@ -46,12 +53,12 @@ async def test_docx_ingest_no_longer_rejects_by_package_size(monkeypatch):
         return ["Large docx parsed"]
 
     async def fake_index(body, ctx, *, kind, coverage):
-        return {
-            "body": body,
-            "ctx": ctx,
-            "kind": kind,
-            "coverage": coverage,
-        }
+        return _FakeResult(
+            body=body,
+            ctx=ctx,
+            kind=kind,
+            coverage=coverage,
+        )
 
     monkeypatch.setattr(DocxPipeline, "_parse_paragraphs_from_bytes", staticmethod(fake_parse))
     monkeypatch.setattr("marginalia.pipelines.docx.index_extracted_text", fake_index)
@@ -80,12 +87,12 @@ async def test_spreadsheet_ingest_no_longer_rejects_by_package_size(monkeypatch)
         }
 
     async def fake_index(body, ctx, *, kind, coverage):
-        return {
-            "body": body,
-            "ctx": ctx,
-            "kind": kind,
-            "coverage": coverage,
-        }
+        return _FakeResult(
+            body=body,
+            ctx=ctx,
+            kind=kind,
+            coverage=coverage,
+        )
 
     monkeypatch.setattr(
         SpreadsheetPipeline,
@@ -119,12 +126,12 @@ async def test_pptx_ingest_no_longer_rejects_by_package_size(monkeypatch):
         }
 
     async def fake_index(body, ctx, *, kind, coverage):
-        return {
-            "body": body,
-            "ctx": ctx,
-            "kind": kind,
-            "coverage": coverage,
-        }
+        return _FakeResult(
+            body=body,
+            ctx=ctx,
+            kind=kind,
+            coverage=coverage,
+        )
 
     monkeypatch.setattr(PptxPipeline, "_render_from_bytes_with_coverage", staticmethod(fake_render))
     monkeypatch.setattr("marginalia.pipelines.pptx.index_extracted_text", fake_index)

@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import AsyncIterator, Literal
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from marginalia.db.models import EntryTag, File, FileEntry
@@ -124,6 +125,62 @@ async def _resolve_display_name(
         n += 1
         candidate = f"{stem} ({n}){ext}"
 
+# Bound on how many ' (N)' bumps we try when the disk-claimed storage_key
+# collides with a stale files.storage_key row (UNIQUE) in the DB.
+_STORAGE_KEY_DB_RETRIES = 50
+
+def _bump_suffix(name: str) -> str:
+    """Next ' (N)' variant of a filename, matching the numbering used by
+    _resolve_display_name / mirror._candidate_names. 'a.txt' -> 'a (1).txt';
+    'a (1).txt' -> 'a (2).txt'."""
+    stem, ext = _split_extension(name)
+    if stem.endswith(")") and " (" in stem:
+        head, _, num = stem.rpartition(" (")
+        num = num[:-1]  # drop trailing ')'
+        if head and num.isdigit():
+            return f"{head} ({int(num) + 1}){ext}"
+    return f"{stem} (1){ext}"
+
+def _sibling_rel(storage_key: str, name: str) -> str:
+    """Replace the basename of a storage_key with `name`, keeping its
+    parent directory."""
+    parent, _, _ = storage_key.rpartition("/")
+    return f"{parent}/{name}" if parent else name
+
+async def _storage_key_in_db(session: AsyncSession, storage_key: str) -> bool:
+    return (
+        await session.execute(
+            select(File.id).where(File.storage_key == storage_key).limit(1)
+        )
+    ).first() is not None
+
+async def _resolve_storage_key_db_collision(
+    session: AsyncSession, storage: StorageBackend, storage_key: str,
+) -> tuple[str, str]:
+    """Mirror mode: the on-disk O_EXCL claim in MirrorStorage.put only
+    guarantees a DISK-free path, but files.storage_key is UNIQUE. A live
+    File row whose disk file the user deleted in Finder (not yet /sync'd)
+    can still own this key, so the insert would raise IntegrityError (500)
+    and orphan the just-written vault file. Move the object to the next
+    ' (N)' candidate until the key is also free in the DB (bounded).
+
+    Returns (storage_key, disk_basename) — the basename is adopted as the
+    display_name so DB and vault keep the same string. The first
+    iteration also covers the common no-collision case (and any
+    sanitization put() applied)."""
+    for _ in range(_STORAGE_KEY_DB_RETRIES):
+        if not await _storage_key_in_db(session, storage_key):
+            return storage_key, storage_key.rsplit("/", 1)[-1]
+        next_name = _bump_suffix(storage_key.rsplit("/", 1)[-1])
+        storage_key = await storage.rename(
+            storage_key, _sibling_rel(storage_key, next_name),
+        )
+    await storage.delete(storage_key)
+    raise RuntimeError(
+        "could not find a storage_key free in both the vault and the "
+        f"database after {_STORAGE_KEY_DB_RETRIES} attempts"
+    )
+
 async def upload(
     session: AsyncSession,
     storage: StorageBackend,
@@ -148,21 +205,30 @@ async def upload(
     if (remote_path is None) == (folder_id is None):
         raise ValueError("exactly one of remote_path or folder_id is required")
 
-    folder_segments: list[str]
+    folder_display_path: str | None
     derived_name: str | None
     if folder_id is not None:
         folder = await folders_repo.get_live(session, folder_id)
         if folder is None:
             raise FolderNotFoundError(folder_id)
-        folder_segments = []  # for display path; resolved folder_id used directly
         derived_name = display_name
         resolved_folder_id: str | None = folder.id
+        # Walk the folder chain so mirror mode lands the file in the
+        # matching vault directory (deferred import: services.entries
+        # imports from this module).
+        from marginalia.services.entries import _build_folder_display_path
+        folder_display_path = (
+            await _build_folder_display_path(session, folder.id) or None
+        )
     else:
         folder_segments, derived_name = split_remote_path(
             remote_path or "", display_name_override=display_name,
         )
         folder = await resolve_or_create_folder(session, folder_segments)
         resolved_folder_id = folder.id if folder is not None else None
+        folder_display_path = (
+            "/" + "/".join(folder_segments) if folder_segments else None
+        )
     desired_name = (derived_name or fallback_name).strip()
     if not desired_name:
         raise ValueError("display_name and fallback_name both empty")
@@ -191,17 +257,21 @@ async def upload(
                 skipped=True,
             )
 
+    # --- resolve the final display_name BEFORE writing bytes so the DB
+    # name and the mirror disk name are the same string (one numbering
+    # convention, shared with mirror._candidate_names)
+    final_name, auto_renamed = await _resolve_display_name(
+        session, folder_id_for_lookup, desired_name,
+    )
+
     # --- stream → storage at a tentative key (we don't yet know if dedup hits)
     tentative_file_id = new_id()
     tentative_storage_key = _make_storage_key(tentative_file_id)
-    folder_display_path = (
-        "/" + "/".join(folder_segments) if folder_segments else None
-    )
     hasher = StreamHasher(stream)
     storage_key = await storage.put(
         tentative_storage_key, hasher.__aiter__(),
         content_type=content_type,
-        display_name=desired_name,
+        display_name=final_name,
         folder_path=folder_display_path,
     )
     sha256 = hasher.hexdigest
@@ -216,6 +286,18 @@ async def upload(
     # canonical disk path (which contradicts the mirror promise).
     is_mirror = isinstance(storage, MirrorStorage)
 
+    if is_mirror:
+        # Adopt the disk basename (put() may have sanitized/suffixed it)
+        # AND resolve any UNIQUE(files.storage_key) collision with a stale
+        # DB row before inserting — otherwise the flush 500s and orphans
+        # the vault file we just wrote.
+        storage_key, disk_name = await _resolve_storage_key_db_collision(
+            session, storage, storage_key,
+        )
+        if disk_name != final_name:
+            final_name = disk_name
+            auto_renamed = final_name != desired_name
+
     if not is_mirror:
         existing_file = await files_repo.get_by_sha256(session, sha256)
         if existing_file is not None:
@@ -224,22 +306,32 @@ async def upload(
                 session,
                 file=existing_file,
                 folder_id=folder_id_for_lookup,
-                desired_name=desired_name,
+                final_name=final_name,
+                auto_renamed=auto_renamed,
                 now=now,
             )
 
-    return await _create_new_file_entry(
-        session,
-        file_id=tentative_file_id,
-        storage_key=storage_key,
-        sha256=sha256,
-        size=size,
-        content_type=content_type,
-        fallback_name=fallback_name,
-        folder_id=folder_id_for_lookup,
-        desired_name=desired_name,
-        now=now,
-    )
+    try:
+        return await _create_new_file_entry(
+            session,
+            file_id=tentative_file_id,
+            storage_key=storage_key,
+            sha256=sha256,
+            size=size,
+            content_type=content_type,
+            fallback_name=fallback_name,
+            folder_id=folder_id_for_lookup,
+            final_name=final_name,
+            auto_renamed=auto_renamed,
+            now=now,
+        )
+    except Exception:
+        # The row insert failed (e.g. a storage_key/UNIQUE race not caught
+        # by the pre-check above). The stored object would otherwise be
+        # orphaned — no row will ever reference it — so drop it before
+        # re-raising. storage.delete swallows a missing file.
+        await storage.delete(storage_key)
+        raise
 
 async def _create_new_file_entry(
     session: AsyncSession,
@@ -251,7 +343,8 @@ async def _create_new_file_entry(
     content_type: str | None,
     fallback_name: str,
     folder_id: str | None,
-    desired_name: str,
+    final_name: str,
+    auto_renamed: bool,
     now: datetime,
 ) -> UploadResult:
     file_row = File(
@@ -284,7 +377,6 @@ async def _create_new_file_entry(
         },
     )
 
-    final_name, auto_renamed = await _resolve_display_name(session, folder_id, desired_name)
     entry = FileEntry(
         id=new_id(),
         folder_id=folder_id,
@@ -340,13 +432,13 @@ async def _create_dedup_entry(
     *,
     file: File,
     folder_id: str | None,
-    desired_name: str,
+    final_name: str,
+    auto_renamed: bool,
     now: datetime,
 ) -> UploadResult:
     """sha256 already exists. Find a seed entry, copy AI fields, INSERT new entry."""
     seed = await entries_repo.find_seed_by_file_id(session, file.id)
 
-    final_name, auto_renamed = await _resolve_display_name(session, folder_id, desired_name)
     entry = FileEntry(
         id=new_id(),
         folder_id=folder_id,
