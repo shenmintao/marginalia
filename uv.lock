@@ -900,7 +900,7 @@ wheels = [
 [[package]]
 name = "glowpy"
 version = "0.1.0"
-source = { git = "https://github.com/shenmintao/glowpy.git?rev=main#57f07158c6bbeb3d24d6939df705388f9839a4b9" }
+source = { git = "https://github.com/shenmintao/glowpy.git?rev=57f07158c6bbeb3d24d6939df705388f9839a4b9#57f07158c6bbeb3d24d6939df705388f9839a4b9" }
 dependencies = [
     { name = "markdown-it-py" },
     { name = "mdit-py-plugins" },
@@ -1298,7 +1298,7 @@ wheels = [
 
 [[package]]
 name = "marginalia"
-version = "0.3.1"
+version = "0.3.2"
 source = { editable = "." }
 dependencies = [
     { name = "aioboto3" },
@@ -1355,7 +1355,7 @@ requires-dist = [
     { name = "duckdb", specifier = ">=1.0" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "fpdf2", marker = "extra == 'dev'", specifier = ">=2.8" },
-    { name = "glowpy", git = "https://github.com/shenmintao/glowpy.git?rev=main" },
+    { name = "glowpy", git = "https://github.com/shenmintao/glowpy.git?rev=57f07158c6bbeb3d24d6939df705388f9839a4b9" },
     { name = "greenlet", specifier = ">=3.1" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "markitdown", extras = ["xls", "outlook"], git = "https://github.com/shenmintao/markitdown.git?subdirectory=packages%2Fmarkitdown&rev=f48c7dd2e34d3c2fb25194d14347186f052aae6d" },
