@@ -48,6 +48,10 @@ icon_source="$script_dir/../../desktop/src-tauri/icons/128x128@2x.png"
 cp --remove-destination -- "$icon_source" "$appdir/$icon_name.png"
 cp --remove-destination -- "$icon_source" "$appdir/.DirIcon"
 
+# appimagetool stores files as root. Tauri's wrapped launcher may have mode
+# 750, so grant read access and preserve executable files for every user.
+chmod -R a+rX -- "$appdir"
+
 work_dir="$(mktemp -d "$BUNDLE_DIR/.appimage-finalize.XXXXXX")"
 trap 'rm -rf -- "$work_dir"' EXIT
 
@@ -75,14 +79,20 @@ chmod +x "$tool"
 # would miss links which only work while the build directory still exists.
 rebuilt_offset="$("$work_dir/rebuilt.AppImage" --appimage-offset)"
 unsquashfs -no-progress -o "$rebuilt_offset" -d "$work_dir/check" \
-  "$work_dir/rebuilt.AppImage" AppRun .DirIcon "$desktop_name" "$icon_name.png"
-for entry in AppRun .DirIcon "$desktop_name" "$icon_name.png"; do
+  "$work_dir/rebuilt.AppImage" AppRun AppRun.wrapped .DirIcon "$desktop_name" "$icon_name.png"
+for entry in AppRun AppRun.wrapped .DirIcon "$desktop_name" "$icon_name.png"; do
   if [ ! -f "$work_dir/check/$entry" ] || [ -L "$work_dir/check/$entry" ]; then
     echo "Missing or linked AppImage root file: $entry" >&2
     exit 1
   fi
 done
 test -x "$work_dir/check/AppRun"
+test -x "$work_dir/check/AppRun.wrapped"
+restricted="$(find "$work_dir/check" -type f -perm /111 ! -perm -0005 -print -quit)"
+if [ -n "$restricted" ]; then
+  echo "AppImage executable is not readable/executable by every user: $restricted" >&2
+  exit 1
+fi
 desktop-file-validate "$work_dir/check/$desktop_name"
 for icon in .DirIcon "$icon_name.png"; do
   if [ "$(file --brief --mime-type "$work_dir/check/$icon")" != "image/png" ]; then

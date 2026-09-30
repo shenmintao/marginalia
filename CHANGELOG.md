@@ -11,6 +11,8 @@
   pipeline checks these files in the packaged image before upload.
 - AppImage release filenames now use `x86_64` and `aarch64` architecture names
   without the redundant `linux` component, following the catalog's naming advice.
+- AppImage files are readable by all users and existing executable files retain
+  execute permission for all users, including Tauri's wrapped launcher.
 
 ## 0.3.7 - 2026-09-01
 
