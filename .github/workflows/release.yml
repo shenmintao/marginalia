@@ -16,6 +16,8 @@ name: Release
 #     compatible with Ubuntu 22.04-class systems. AppImage bundling sets
 #     NO_STRIP=true to avoid linuxdeploy's bundled strip failing on modern ELF
 #     relocation sections; see https://github.com/tauri-apps/tauri/issues/14796.
+#     Finalization replaces build-path icon/desktop symlinks and verifies the
+#     packaged AppDir entries. AppImage asset names use x86_64/aarch64.
 #   - A multi-arch Docker image pushed to ghcr.io/<owner>/marginalia and
 #     tagged with the version and latest.
 #
@@ -235,6 +237,13 @@ jobs:
           export LD_LIBRARY_PATH="$backend_lib_dirs${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
           npm run tauri -- bundle --ci --bundles appimage --verbose
 
+      - name: Finalize and verify Linux AppImage
+        if: matrix.platform == 'linux'
+        shell: bash
+        env:
+          ARCH: ${{ matrix.appimage_arch }}
+        run: bash scripts/ci/finalize-appimage.sh desktop/src-tauri/target/release/bundle/appimage "$ARCH"
+
       - name: Package Windows portable zip
         if: matrix.platform == 'windows'
         run: node scripts/package-windows-portable.mjs
@@ -307,6 +316,7 @@ jobs:
         env:
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
           TARGET: ${{ matrix.target }}
+          APPIMAGE_ARCH: ${{ matrix.appimage_arch }}
         run: |
           set -euo pipefail
           mkdir -p release-assets
@@ -331,7 +341,7 @@ jobs:
           fi
           cp "${debs[0]}" "release-assets/marginalia-$TAG-$TARGET.deb"
           cp "${rpms[0]}" "release-assets/marginalia-$TAG-$TARGET.rpm"
-          cp "${appimages[0]}" "release-assets/marginalia-$TAG-$TARGET.AppImage"
+          cp "${appimages[0]}" "release-assets/marginalia-$TAG-$APPIMAGE_ARCH.AppImage"
 
       - name: Upload desktop artifacts
         uses: actions/upload-artifact@v4
@@ -460,10 +470,10 @@ jobs:
             "marginalia-$TAG-macos-arm64.dmg"
             "marginalia-$TAG-linux-x64.deb"
             "marginalia-$TAG-linux-x64.rpm"
-            "marginalia-$TAG-linux-x64.AppImage"
+            "marginalia-$TAG-x86_64.AppImage"
             "marginalia-$TAG-linux-arm64.deb"
             "marginalia-$TAG-linux-arm64.rpm"
-            "marginalia-$TAG-linux-arm64.AppImage"
+            "marginalia-$TAG-aarch64.AppImage"
           )
           assets="$(find release-assets -maxdepth 1 -type f -printf '%f\n' | sort)"
           missing=0
@@ -513,10 +523,10 @@ jobs:
             "marginalia-$TAG-macos-arm64.dmg"
             "marginalia-$TAG-linux-x64.deb"
             "marginalia-$TAG-linux-x64.rpm"
-            "marginalia-$TAG-linux-x64.AppImage"
+            "marginalia-$TAG-x86_64.AppImage"
             "marginalia-$TAG-linux-arm64.deb"
             "marginalia-$TAG-linux-arm64.rpm"
-            "marginalia-$TAG-linux-arm64.AppImage"
+            "marginalia-$TAG-aarch64.AppImage"
           )
           assets="$(gh release view "$TAG" --json assets --jq '.assets[].name')"
           missing=0

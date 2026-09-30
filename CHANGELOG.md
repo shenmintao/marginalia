@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.3.8 - 2026-09-30
+
+### Fixed
+
+- Linux AppImage releases now ship `.DirIcon`, the root PNG icon, and the desktop
+  entry as regular files, avoiding links to build-machine paths. The release
+  pipeline checks these files in the packaged image before upload.
+- AppImage release filenames now use `x86_64` and `aarch64` architecture names
+  without the redundant `linux` component, following the catalog's naming advice.
+
 ## 0.3.7 - 2026-09-01
 
 ### Changed
